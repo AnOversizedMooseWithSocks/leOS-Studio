@@ -1,0 +1,62 @@
+# leStudio -- a STANDALONE app (never published) built on top of the leos-core PyPI package.
+# `pip install -e .` just wires up the deps + the `lestudio` command locally.
+# The engine is a dependency, not a vendored copy: everything the node graph computes goes
+# through `import lecore` (pattern_field, escape_time, color_transfer, segment_image,
+# image_edges, inpaint, upscale, blend_images, light_shafts, cosine_palette, image_colours).
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lestudio"
+version = "0.1.0"
+description = "leStudio -- Photoshop/GIMP-style layered image editor with a non-destructive node graph, built on the leCore engine (leos-core)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    # The engine, from PyPI (import name: lecore). 0.2.4 is the release that
+    # ships features()/version(), texture_image, mask_refraction, cloud_scene,
+    # render_water, ramp, and fit_shape -- everything the new nodes and the
+    # Match/Palette buttons use -- so a fresh install gets the full app with
+    # nothing dimmed. Runtime capability gating (lestudio.have() against the
+    # engine's own features() manifest) STAYS on top of the floor: a version
+    # number cannot answer "is THIS faculty present on the build in front of
+    # me?" -- a renamed or absent faculty is invisible to a pin, which is how
+    # a missing wrap_webgl2 once reached a user as a 500.
+    "leos-core>=0.2.7",
+    "flask>=2.0",         # the browser UI
+    "pillow>=9.0",        # image import/export
+    "numpy",
+    "opencv-python-headless",   # video files + network streams for Media-in
+]
+
+[project.optional-dependencies]
+# Optional accelerators, forwarded to the engine's own extras. leStudio turns
+# each on automatically when present and falls back to NumPy when absent -- the
+# app and its whole test suite pass with none of these installed.
+#
+#   pip install -e .[accel]      the safe, pure-wheel CPU accelerators
+#
+# `zig` is the biggest measured win on CPU (leCore reports 2-5x on batch
+# kernels and 3.8x on the raymarcher -- which is what the Clouds node does),
+# is bit-identical in safe mode, and ships its whole toolchain in one wheel.
+accel = ["leos-core[jit,zig,fft]"]
+# GPU is deliberately SEPARATE: CuPy is tied to your CUDA version, so leCore's
+# own packaging notes say to install it by hand (e.g. `pip install cupy-cuda12x`)
+# rather than let a generic `cupy` resolve. Use this only if you know your CUDA.
+gpu = ["leos-core[gpu]"]
+# resolve YouTube / page URLs into direct video streams for Media-in nodes
+media = ["yt-dlp"]
+
+[project.scripts]
+lestudio = "lestudio.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+lestudio = ["static/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Run the leStudio test suite.
+
+The suite is plain functions (no pytest dependency at runtime), so this is the
+entry point:
+
+    python tests/run.py                 # everything
+    python tests/run.py --slowest 10    # everything, then the 10 worst offenders
+    python tests/run.py --chunk 1/2     # first half only
+    python tests/run.py -k paint        # only tests whose name contains "paint"
+
+--chunk exists because the full suite outgrew some CI/step time limits; running
+it as `1/2` then `2/2` covers the same ground in two shorter passes. --slowest
+is how the 38 s Flow-warp test got found: it was testing a cache bound by
+computing twenty real noise fields.
+"""
+import argparse
+import contextlib
+import importlib
+import os
+import sys
+import time
+import traceback
+import types
+import warnings
+
+
+def _install_pytest_shim():
+    """The tests use two pytest helpers; provide them without the dependency."""
+    if "pytest" in sys.modules:
+        return
+    shim = types.ModuleType("pytest")
+    shim.importorskip = importlib.import_module
+
+    @contextlib.contextmanager
+    def raises(exc):
+        try:
+            yield
+        except exc:
+            return
+        raise AssertionError("expected %s" % getattr(exc, "__name__", exc))
+
+    shim.raises = raises
+    sys.modules["pytest"] = shim
+
+
+def _reset_workspace():
+    """Every test starts from the SAME shared-server state: one fresh default
+    document, empty graph, empty presence. Two ordering bugs came from tests
+    mutating the shared workspace (a 64x48 resize silently repositioned a
+    later test's geometry; a doc-lineup shuffle made zombie references line
+    up differently) -- and a census found 61 tests touching shared state.
+    Rather than converting them one by one, the runner resets the workspace
+    between tests, which kills the whole contamination class. Any test this
+    breaks was latently order-dependent."""
+    import sys
+    SV = sys.modules.get("lestudio.server")
+    if SV is None:
+        return                               # server never imported: nothing shared
+    from lestudio import Document, NodeGraph
+    d = Document(768, 512)
+    SV.WS.docs = {d.id: d}
+    SV.WS.graphs = {d.id: NodeGraph(d)}
+    SV.WS.active = d.id
+    SV.WS._wire()
+    for k in ("clients", "tabuser", "joined", "names"):
+        SV.SYNC[k].clear()
+    SV.SYNC["kicked"].clear()
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("-k", dest="filter", default="",
+                    help="substring match on the test name")
+    ap.add_argument("--chunk", default="",
+                    help="run one slice, e.g. 1/2 or 3/4")
+    ap.add_argument("--slowest", type=int, default=0,
+                    help="also print the N slowest tests")
+    ap.add_argument("-q", "--quiet", action="store_true")
+    args = ap.parse_args(argv)
+
+    warnings.filterwarnings("ignore")
+    _install_pytest_shim()
+    here = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, here)
+    mod = importlib.import_module("test_studio")
+
+    names = sorted(n for n in dir(mod) if n.startswith("test_"))
+
+    # A test defined twice is silently lost: Python keeps only the last
+    # definition, so the file claims more coverage than the suite runs. That
+    # happened -- two identical copies of test_vector_masks_re_derive -- and
+    # nothing noticed because the run was still all-green. Compare what the
+    # SOURCE defines against what the MODULE exposes, here in the runner rather
+    # than inside test_studio.py, so shadowing the check itself cannot hide it.
+    import ast
+    import collections
+    src = open(os.path.join(here, "test_studio.py")).read()
+    defined = [n.name for n in ast.parse(src).body
+               if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")]
+    dupes = {k: v for k, v in collections.Counter(defined).items() if v > 1}
+    if dupes:
+        print("ERROR: shadowed test definitions (only the last one runs): %s"
+              % ", ".join("%s x%d" % kv for kv in sorted(dupes.items())))
+        return 1
+
+    if args.filter:
+        names = [n for n in names if args.filter in n]
+    if args.chunk:
+        idx, total = (int(x) for x in args.chunk.split("/"))
+        if not 1 <= idx <= total:
+            ap.error("--chunk must be like 1/2 with 1 <= idx <= total")
+        size = (len(names) + total - 1) // total
+        names = names[(idx - 1) * size: idx * size]
+
+    timings, failures = [], []
+    t_start = time.time()
+    for name in names:
+        t0 = time.time()
+        try:
+            _reset_workspace()
+            getattr(mod, name)()
+            ok = True
+        except Exception:
+            ok = False
+            failures.append((name, traceback.format_exc()))
+        dt = time.time() - t0
+        timings.append((dt, name))
+        if not args.quiet:
+            print("%s %-58s %6.2fs" % ("ok  " if ok else "FAIL", name, dt),
+                  flush=True)
+
+    total = time.time() - t_start
+    print("\n%d passed, %d failed in %.0fs"
+          % (len(names) - len(failures), len(failures), total))
+    for name, tb in failures:
+        print("\n--- FAIL %s ---\n%s" % (name, tb))
+    if args.slowest:
+        print("\nslowest %d:" % args.slowest)
+        for dt, name in sorted(timings, reverse=True)[:args.slowest]:
+            print("  %6.2fs  %s" % (dt, name))
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

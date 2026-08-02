@@ -1,0 +1,234 @@
+# leStudio
+
+A **Photoshop/GIMP-style image editor with a non-destructive node graph**, built on top of the
+[leos-core](https://pypi.org/project/leos-core/) engine (leCore, import name `lecore`). Pure
+NumPy underneath, deterministic throughout: same document + same graph = same pixels.
+
+A standalone app (not published anywhere) -- it consumes the engine strictly through
+`pip install leos-core`.
+
+> **Prerequisite:** the app is written against the leCore repo's current capability surface
+> (`render_sdf`, `synthesize_texture`, `depth_from_image`, `reproject`, `segment_image`,
+> `inpaint`, `upscale`, ...). Publish the repo's current state to PyPI as `leos-core` first,
+> then:
+
+**Windows:** double-click `run.bat` -- it creates a `.venv`, installs everything
+(`leos-core` from PyPI + Flask/Pillow/NumPy), and opens the editor at
+http://127.0.0.1:5050. Later runs skip the setup and just launch.
+
+**Any platform, by hand:**
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e .            # pulls leos-core from PyPI, adds the `lestudio` command
+lestudio                    # or: python -m lestudio  ->  http://127.0.0.1:5050
+```
+
+## What it is
+
+**Canvas tab** -- layered raster editing: soft brush + eraser (size/opacity/hardness), a
+10-mode blend stack (normal, multiply, screen, overlay, add, subtract, difference, darken,
+lighten, softlight), per-layer opacity/visibility, image import, PNG export, and snapshot
+undo/redo.
+
+**Node graph tab** -- 35 operators, most a direct door into the leCore engine:
+
+| Category | Nodes | leCore capability |
+|---|---|---|
+| Generate | Solid, Gradient, Pattern, Fractal, Warped noise, **SDF render** | `pattern_field`, `escape_time`, `warped_noise`, `render_sdf` + the full `holographic_sdf` DSL |
+| Color | Palette map (cosine / random / blackbody), Color transfer, Levels, Hue/Sat, Invert, Posterize | `cosine_palette`, `random_palette`, `blackbody_color`, `color_transfer`, `image_colours` |
+| Filter | Blur, Sharpen, Denoise, Edges, Segment, Inpaint, Upscale 2x, Displace, Texture synth, Flow warp, Annotate | `image_edges`, `segment_image`, `inpaint`, `upscale`, `synthesize_texture`, `curl_noise`, `image_lines` + `image_corners` |
+| Combine | Blend, Morph (blend / phase), Mask mix, Align, **Seamless clone** | `blend_images`, `phase_morph`, `est_dx`/`reproject`, `solve_poisson_periodic` (Poisson image editing) |
+| FX | Light shafts, Vignette, Depth fog (4 depth estimators), **Post FX**, ASCII art | `light_shafts`, `depth_from_image`/`auto_fuse_depth`/`haze_depth`/`sharpness_depth` + `depth_fog`, `postfx_chain` (bloom, glare, lens flare, chromatic aberration, film grain, colour grade, Reinhard/ACES), `ascii_view` |
+| Input | Layer, Canvas | the document itself |
+
+Node evaluation is **dependency-keyed and O(change)** (the engine's ModifierStack rule): each
+node's output is memoised under a hash of its type, params, and upstream signatures, so moving
+one slider recomputes only that node and its downstream. Cycles are refused. *Bake to layer*
+flattens any node's output into the layer stack, so destructive and non-destructive editing
+compose.
+
+## Library use
+
+```python
+from lestudio import Document, NodeGraph
+doc = Document(768, 512)
+doc.paint(doc.layers[0].id, [(10, 10), (200, 150)], color=(1, 0, 0), radius=12)
+g = NodeGraph(doc)
+g.set_graph([
+    {"id": "N1", "type": "Fractal", "params": {"julia": 1}, "inputs": {}},
+    {"id": "N2", "type": "Palette map", "params": {"freq": 2.0}, "inputs": {"image": "N1"}},
+])
+img = g.evaluate("N2")     # (H, W, 3) float in [0, 1]
+g.apply_to_layer("N2")     # bake into the document
+```
+
+
+## Media inputs & live streaming
+
+The **Media in** node accepts: a server file path (image or video — use the node's 📁
+button to upload), a **direct** video URL (`.mp4`, `.m3u8`, RTSP, MJPEG), or
+`test:clock` for a built-in animated signal. Page URLs like YouTube links are not
+direct streams — install `yt-dlp` (`pip install "leos-studio[media]"`) and they will
+be resolved automatically. The node shows its live status (connecting / capturing /
+a specific error) directly under its parameters.
+
+Press **● Live** to evaluate the graph continuously and publish
+`http://127.0.0.1:5050/api/stream.mjpg` — point OBS's browser/media source at it.
+
+## New in the latest leCore update
+
+Five new nodes, all fully composable with the rest of the graph:
+
+- **Procedural texture** (Generate) — the classic texture menu: marble, wood,
+  brick, voronoi, musgrave, wave, magic, checker, stripes, dots, noise, fbm,
+  white, gradient. Greyscale out, so it feeds Color ramp, Merge mattes, and
+  Mask mix directly. Dials that only affect some textures dim when irrelevant.
+- **Color ramp** (Color) — a four-stop gradient map with named stops
+  (shadows / low_mid / high_mid / highlights) as colour pickers. Turn
+  `smooth` off for toon banding.
+- **Refract** (FX) — bend the image through a mask as if it were water or
+  glass; strongest at the mask edge, like a real droplet. Any greyscale
+  node (a Procedural texture works well) can be the lens.
+- **Clouds** (Generate) — a real raymarched volumetric sky. Honest cost:
+  ~6 s on `fast`; the progress bar shows and Esc cancels.
+- **Water** (Generate) — rendered ocean / calm / storm. Wire a Value
+  node into `time` to animate.
+
+The Shadertoy node gained two buttons: **✨ Match canvas** fits a procedural
+shader to your picture (a same-family statistical match on roughness and
+detail — a starting point, not a copy; ~10 s) and **🎨 Palette** inserts iq's
+cosine palette — after a match it recolours the greyscale result in one click.
+
+Also: **Segment** and **Depth fog** gained a `detail` speed dial (Segment's
+worst case went 55 s → ~2 s; masks stay full-resolution), and optional CPU
+accelerators install with `run.bat accel` (Windows) or `./run.sh accel`
+(macOS / Linux) -- never installed silently.
+
+## Image menu
+
+**File ▸ Image** holds the document-wide operations: crop to selection, rotate
+90° CW / CCW / 180°, and flip horizontal / vertical. Rotate and flip are
+lossless — pure array reorderings rather than resampling — so four 90° turns
+return the exact original pixels, and every layer, mask, selection and spline
+moves together.
+
+## Starting simple
+
+Open it and paint — there is a document, a layer and a brush already. **B** for
+brush, **E** for eraser, **Ctrl+Z** to undo; a one-line hint says so on first
+run and then never returns.
+
+The sidebar leads with Layers and Brush. Masks and splines sit under a
+collapsed **Advanced** heading: nothing is hidden or removed, it is one click
+away when you want it and out of the way when you do not. The same applies to
+the tool dock — everyday tools first, then the stroke tools (Nudge, Select
+strokes) grouped after a divider, then selection tools.
+
+## Working with several documents, and with other people
+
+Document tabs carry a **•** when they hold unsaved edits, and closing one that
+does asks before discarding them — the server refuses the close and the client
+confirms, so edits can never vanish on a stray click.
+
+The workspace is shared: everyone sees the same document. The doc bar shows who
+else is connected, highlighted when they are on the document you are, dimmed
+when they are elsewhere. `.lews` files carry every open document, so saving and
+reopening restores the whole workspace rather than one canvas.
+
+## Selections are temporary until you keep them
+
+Most selections are momentary — drag a marquee, paint inside it, move on — so a
+selection is a single reusable **working** slot, not a permanent entry. It
+behaves exactly like a saved one (it gates painting, crops, feeds nodes) and the
+canvas badge says plainly that it is not saved. Press **Keep…** to name it and
+add it to the list; only kept selections are written to the `.lews` file.
+
+## Streaming to OBS
+
+**Stream** in the top bar gives you a Browser-Source URL and the exact steps.
+Two modes: the default rides an MJPEG stream; **transparent** polls PNG frames
+with alpha so viewers see through the canvas to your other OBS sources.
+
+The dialog measures what your machine can actually sustain for the current
+canvas and says so — a frame takes roughly 120 ms at 720p and 990 ms at 4K, so
+picking 60 fps on a large canvas would just stutter. It warns before you
+configure something that cannot keep up, and suggests a rate that will.
+
+Opening the capture page turns Live on by itself, so the overlay is never
+blank, and the transparent path chains each frame off the last (with backoff on
+error) rather than queueing requests the server cannot answer.
+
+## Files keep working
+
+`.lews` files survive version drift in both directions, and it is tested. A file
+written before a feature existed still opens — the newer behaviour degrades
+rather than failing (a missing DPI defaults to 72, a mask with no stored shape
+resamples on resize, a document with no recorded strokes simply declines to
+nudge). A file written by a *later* build loads too, ignoring fields this one
+has never heard of instead of dying on an unexpected key.
+
+## Documents are reproducible
+
+A leStudio document is a recipe, not a pile of pixels: stroke paths with their
+brush settings, node parameters, and seeds. Rebuilding it renders **byte-identical
+output** — verified across a save/load and across separate processes. That is
+what lets Nudge replay strokes, "Re-render strokes" match a native-resolution
+render exactly, and a `.lews` file mean the same thing tomorrow.
+
+The accelerator chip warns if a setting would break that (enabling a GPU path
+makes renders bit-approximate rather than bit-exact), so the guarantee never
+lapses silently.
+
+## Resolution and DPI
+
+A new document declares both a pixel size and a **DPI**, with print presets (A4,
+Letter, 4×6) and a live physical-size readout. Opening an image into an empty
+document **adopts that image's resolution and DPI** rather than squeezing it
+into whatever canvas happened to be there.
+
+Document settings distinguishes **Image size** (resample — the picture stays,
+the pixel count changes) from **Canvas size** (the frame changes, content keeps
+its pixels). After an image resize, brush layers are re-rendered from their
+strokes rather than upscaled.
+
+Imported images keep the original file's pixels, so **File ▸ Re-render image**
+recovers full detail after a resize rather than upscaling what was fitted to the
+old canvas.
+
+Brush strokes are stored as paths, so they survive a resize exactly. After
+changing the canvas size, **File ▸ Re-render strokes** repaints a stroke layer at
+the new resolution — measurably identical to having drawn it at that size,
+rather than an upscale of the old pixels. See RESOLUTION_INDEPENDENCE.md for
+what is and is not resolution-free.
+
+## Exporting
+
+**Export PNG** saves at canvas size. **File ▸ Export at size…** renders the
+graph at any resolution you type — procedural nodes synthesize genuinely more
+detail at larger sizes rather than upscaling.
+
+## Colour swatches
+
+Colours you pick with the eyedropper, paint with, or choose directly collect in
+a strip under the colour well — newest first, no duplicates, twelve deep. Click
+one to use it again, Alt-click to drop it.
+
+## Histogram
+
+Tick **Histogram** under the Layers panel for a live per-channel tone
+distribution of the composite. It is computed in the browser from the pixels
+already on screen, so it costs nothing extra and can never disagree with what
+you are looking at. Red bars at either edge mean clipped shadows or highlights,
+with the exact percentages below. `GET /api/histogram` exposes the same numbers
+for scripting (sampled on a stride, and it says so).
+
+## Running the tests
+
+    python tests/run.py                 # everything (~2 min)
+    python tests/run.py --chunk 1/2     # first half, when a step has a time limit
+    python tests/run.py -k paint        # just the tests matching "paint"
+    python tests/run.py --slowest 10    # everything, then the 10 worst offenders
+
+The suite is plain functions, so no pytest install is required -- the runner
+provides the two helpers the tests use.
