@@ -5,7 +5,7 @@ Summary: leStudio -- Photoshop/GIMP-style layered image editor with a non-destru
 License: MIT
 Requires-Python: >=3.9
 Description-Content-Type: text/markdown
-Requires-Dist: leos-core>=0.2.7
+Requires-Dist: leos-core>=0.2.9
 Requires-Dist: flask>=2.0
 Requires-Dist: pillow>=9.0
 Requires-Dist: numpy

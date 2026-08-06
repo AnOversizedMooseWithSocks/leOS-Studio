@@ -191,7 +191,17 @@ body.wiring{cursor:crosshair}
 #brushGallery::-webkit-scrollbar-thumb{background:var(--ink-dim);border-radius:4px}
 /* every floating panel fits the window and scrolls when it cannot:
    the new-user 'panels off screen' class of report */
-#addMenu,#lightChip,.tbm,#presenceChip,#accelChip{max-height:calc(100vh - 70px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--ink-dim) transparent}
+/* NB .tbp, NOT .tbm. The wrapper (.tbm) is a ~46x25 box around the
+   button; giving IT overflow-y:auto made it CLIP its own absolutely
+   positioned dropdown to the button's height, so clicking File showed
+   the wrapper's scrollbar instead of a menu -- and on Windows, whose
+   scrollbars have arrow buttons, that stub looked like a number
+   spinner wedged between the toolbar buttons. The scrolling belongs to
+   the PANEL, which is what should get long. A getBoundingClientRect
+   check cannot catch this (it reports the panel's own box even when an
+   ancestor clips it); elementFromPoint at the panel's centre can, and
+   the test does. */
+#addMenu,#lightChip,.tbp,#presenceChip,#accelChip{max-height:calc(100vh - 70px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--ink-dim) transparent}
 #addMenu::-webkit-scrollbar,#lightChip::-webkit-scrollbar{width:8px}
 #addMenu::-webkit-scrollbar-thumb,#lightChip::-webkit-scrollbar-thumb{background:var(--ink-dim);border-radius:4px}
 .sect{border-bottom:1px solid var(--line);padding:4px 8px}
@@ -672,8 +682,6 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
         <button id="delLayer" title="Delete the selected layer">Delete</button>
       </div>
       <div id="layers"></div>
-      <div class="subh" title="Four planes perpendicular to the canvas, standing outside it. Empty until you put a layer on one. A wall layer is painted like any other — press Edit and it lies flat on the canvas; press Done and it stands back up on its side, hidden from the picture but still lighting it.">Walls (the room)</div>
-      <div id="wallSlots"></div>
       <div class="subh">Selected layer</div>
       <div class="row"><label>Blend</label><select id="lBlend" style="flex:1"></select></div>
       <div class="row"><label title="One-click layer styles and physical presets — the menu shows the layer's CURRENT persistent choice">Style</label><select id="lStyle" style="flex:1" title="One-click layer styles: builds a live graph chain (Layer → Layer style → Layer out) into a new layer just below this one. Repaint the source and the style follows on the next graph push."><option value="">Style…</option><optgroup label="Styles"><option value="shadow">＋ Drop shadow</option><option value="glow">＋ Outer glow</option></optgroup><optgroup label="Physical slab"><option value="vol_water">▦ Water slab</option><option value="vol_glass">▦ Tinted glass</option><option value="vol_fog">▦ Fog / murk</option><option value="vol_puff">▦ Cloud / puff</option><option value="vol_soak">▦ Absorbent paper</option><option value="vol_air">▦ Air gap (spacer)</option><option value="vol_off">▦ Flat again</option></optgroup><optgroup label="Living media"><option value="vol_ink">≈ Ink-in-water dish</option><option value="vol_smoke">≈ Smoke chamber</option><option value="vol_fire">≈ Fire</option><option value="vol_stir">≈ Stir / advance medium</option></optgroup><optgroup label="Pose &amp; print"><option value="vol_tilt">⟂ Tilt slab (+10°)</option><option value="vol_lower">⟂ Lower slab (−4)</option><option value="vol_raise">⟂ Raise slab (+4)</option><option value="vol_domeup">◠ Dome the slab (+8)</option><option value="vol_dish">◡ Dish the slab (−8)</option><option value="vol_print">⎙ Contact-print onto layer below</option><option value="vol_run">⟱ Run wet paint (gravity)</option></optgroup><optgroup label="Optics &amp; glow"><option value="vol_glow">✨ Emit brush colour (+0.6)</option><option value="vol_unglow">✨ Emission off</option><option value="vol_reflect">🪞 Water reflection (+0.4)</option><option value="vol_disp">◈ Dispersion fringes (+0.3)</option><option value="vol_optoff">◌ Optics off</option></optgroup></select></div>
@@ -692,6 +700,8 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
         <input type="number" id="plY" style="width:52px" title="Centre Y">
         <input type="range" id="plScale" min="5" max="400" title="Scale % (100 = the image's own pixels)"><span class="val" id="plScaleV"></span>
         <input type="range" id="plRot" min="-180" max="180" title="Rotation °"><span class="val" id="plRotV"></span></div>
+      <div class="subh" title="Four planes perpendicular to the canvas, standing outside it. Empty until you put a layer on one. A wall layer is painted like any other — press Edit and it lies flat on the canvas; press Done and it stands back up on its side, hidden from the picture but still lighting it.">Walls (the room)</div>
+      <div id="wallSlots"></div>
       <div class="subh">Shape &amp; pose</div>
       <div class="row"><label title="Lift the whole sheet off the floor (canvas units, 1 = 0.1 mm)">Height</label><input type="number" id="lZOff" step="1" style="width:62px" title="Z offset — lifts the sheet; lights and shadows respond">
         <button id="lFlipX" title="Mirror this layer left↔right (flips pixels, paint body, and a pasted layer's source; undoable)">↔ flip</button>
@@ -713,7 +723,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
       <div class="row" id="rowOptical"><label title="Keep this layer in the LIGHT simulation while it is hidden: its surface still refracts, throws caustics, and casts shadows, but its own pigment is not drawn. A sheet of rippled water you do not want to see, that still bends the light.">Optics&nbsp;when&nbsp;hidden</label><input type="checkbox" id="lOptical"></div>
       <div class="row" id="rowMediaRes"><label title="Simulation detail — a straight trade of fidelity against frame time. Measured at 1000×750: coarse ~11 ms/frame, normal ~18 ms, fine ~45 ms. Changing this keeps the ink you already have; it is resampled, not wiped.">Detail</label><select id="lMediaRes" style="flex:1"><option value="coarse">coarse — fastest</option><option value="normal">normal</option><option value="fine">fine — slowest</option></select></div>
       <div class="row" id="rowMediaTime"><label title="Timeline: the playhead drives this medium and scrubbing rewinds it. Live: it runs on its own and the timeline never touches it — for sources that genuinely cannot be rewound, like a feed.">Clock</label><select id="lMediaTime" style="flex:1"><option value="timeline">timeline — scrubbable</option><option value="live">live — independent</option></select></div>
-      <div class="row" id="rowCook"><label title="Advance the simulation WITHOUT moving the playhead, and make that the starting state. Lets smoke already be drifting at frame 0 instead of being a hard-edged blob.">Cook</label><button id="lCook24">+24</button><button id="lCook96">+96</button><button id="lCookSettle" title="Cook until the simulation SETTLES — the medium's own change-per-step signal decides when it has stopped moving, instead of you guessing a number.">until settled</button></div>
+      <div class="row" id="rowCook"><label title="Advance the simulation WITHOUT moving the playhead, and make that the starting state. Lets smoke already be drifting at frame 0 instead of being a hard-edged blob.">Cook</label><button id="lCookBack" title="Un-cook: step the simulation BACK. The uncooked state is kept, so this replays from it rather than trying to run the solver backwards — exact, and it stops at the raw stroke.">−</button><input type="number" id="lCookN" value="24" min="1" max="2400" step="1" style="width:52px" title="How many solver steps each press advances (or rewinds)."><button id="lCookFwd" title="Cook forward by the amount in the box.">+</button><button id="lCookSettle" title="Cook until the simulation SETTLES — the medium's own change-per-step signal decides when it has stopped moving, instead of you guessing a number.">until settled</button></div>
       <div class="row" id="rowMediaRate"><label title="How fast this medium lives per timeline frame. 0 FREEZES it in place (a new time segment — scrub-safe); 1 is real time; up to 3× for a boil.">Rate</label><input type="range" id="lMediaRate" min="0" max="300" value="100"><span class="val" id="lMediaRateV">1.0</span></div>
       <div class="row" id="rowFieldSrc"><label title="Herd this layer's LIVING MEDIA with existing content: the active selection, a mask, or a stroke's path.">Herd by</label><select id="lFieldSrc" style="flex:1"><option value="">none</option><option value="sel">selection</option></select></div>
       <div class="row" id="rowFieldMode"><label title="attract pulls the medium toward the field, repel pushes away, flow runs it along the contours, contain fences it inside.">Mode</label><select id="lFieldMode" style="flex:1"><option value="attract">attract</option><option value="repel">repel</option><option value="flow">flow</option><option value="contain">contain</option></select></div>
@@ -816,7 +826,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
         <option value="acrylic">Acrylic</option><option value="water">Watercolor</option>
       </select></div>
       <div class="row" id="bLoadRow" style="display:none"><label>Load</label><input type="range" id="bLoad" min="10" max="150" value="60" title="How much paint is on the brush. Heavier loads build thicker ridges — and past what the medium can hold, gravity takes the excess downhill."><span class="val" id="bLoadV">.60</span></div>
-      <div class="row"><label>Smoothing</label><input type="range" id="bSmooth" title="Stroke smoothing: steadies shaky lines as you draw" min="0" max="95" value="0"><span class="val" id="bSmoothV">.00</span><label style="margin-left:6px;font-size:11px;white-space:nowrap" title="Inference — stroke starts snap to nearby stroke endpoints, and direction locks to VP rays, verticals, or horizontals">◎<input type="checkbox" id="bInfer" title="Inference assist: snaps stroke starts to nearby stroke ends and straightens toward vanishing points" style="vertical-align:middle"></label></div><div class="row"><label title="Ramp the stroke's width in at the start and out at the end — brush-pen feel; recorded into the stroke, so it replays and the joint tools still work on top">Taper</label><input type="range" id="bTaper" min="0" max="50" value="0" title="Fraction of the stroke that ramps at each end (0 = uniform width)"><span class="val" id="bTaperV">.00</span></div><div class="row" id="eModeRow" style="display:none"><label title="What the eraser removes">Eraser</label><select id="eMode" title="Eraser mode — pixels (classic), whole strokes, the topmost stroke only, paint-undo (restore the area to its pre-stroke state), or depth (carve the impasto body first). Shift+E cycles."><option value="pixel">▭ Pixels (classic)</option><option value="erase_strokes">✂ Whole strokes</option><option value="erase_top">≣ Topmost stroke (peel)</option><option value="erase_undo">⤺ Paint undo (history brush)</option><option value="erase_depth">⛏ Depth (carve impasto)</option></select></div>
+      <div class="row"><label>Smoothing</label><input type="range" id="bSmooth" title="Stroke smoothing: steadies shaky lines as you draw" min="0" max="95" value="0" style="min-width:0"><span class="val" id="bSmoothV">.00</span><label style="margin-left:6px;font-size:11px;white-space:nowrap" title="Inference — stroke starts snap to nearby stroke endpoints, and direction locks to VP rays, verticals, or horizontals">◎<input type="checkbox" id="bInfer" title="Inference assist: snaps stroke starts to nearby stroke ends and straightens toward vanishing points" style="vertical-align:middle"></label></div><div class="row"><label title="Ramp the stroke's width in at the start and out at the end — brush-pen feel; recorded into the stroke, so it replays and the joint tools still work on top">Taper</label><input type="range" id="bTaper" min="0" max="50" value="0" title="Fraction of the stroke that ramps at each end (0 = uniform width)"><span class="val" id="bTaperV">.00</span><label style="margin-left:4px;font-size:11px;white-space:nowrap" title="Shape assist: after a freehand stroke, offer to replace it with a clean circle, rectangle or line. Only offers when two independent recognisers agree — it stays quiet rather than guess. Press S to accept.">⬡<input type="checkbox" id="bShapeSnap" title="Shape assist: offer to tidy a freehand circle, rectangle or line into a clean one. Press S to accept the offer; it stays silent unless it is sure." style="vertical-align:middle"></label></div><div class="row" id="eModeRow" style="display:none"><label title="What the eraser removes">Eraser</label><select id="eMode" title="Eraser mode — pixels (classic), whole strokes, the topmost stroke only, paint-undo (restore the area to its pre-stroke state), or depth (carve the impasto body first). Shift+E cycles."><option value="pixel">▭ Pixels (classic)</option><option value="erase_strokes">✂ Whole strokes</option><option value="erase_top">≣ Topmost stroke (peel)</option><option value="erase_undo">⤺ Paint undo (history brush)</option><option value="erase_depth">⛏ Depth (carve impasto)</option></select></div>
       <div class="row"><label>Rail</label><select id="bRail" title="Constrain freehand strokes to slide along this spline"></select><label class="inl" title="Stream strokes to the server while dragging (needs a fast machine). Off: a lightweight preview is drawn and the stroke applies on release.">Live</label><input type="checkbox" id="bLive" title="Send the stroke to the engine WHILE dragging (off = only on release)"><label class="inl" title="Symmetry — every stroke paints twice, mirrored across the canvas centre. Both copies are real strokes: select, nudge, and edit them independently.">⇋</label><select id="bMirror"><option value="">off</option><option value="v">↔</option><option value="h">↕</option><option value="3">3×</option><option value="6">6×</option><option value="8">8×</option></select></div>
       <div class="row"><label>Selection</label><select id="bSel"></select>
         <label style="flex:0 0 auto;display:flex;gap:4px;align-items:center;font-size:11px">
@@ -1028,11 +1038,47 @@ document.addEventListener('click',()=>{ if(!$('addMenu').classList.contains('ope
 function closeTopMenus(except){
   document.querySelectorAll('.tbm').forEach(m=>{ if(m!==except) m.classList.remove('open'); });
 }
+// A dropdown that opens as a sliver -- Devin saw File and Lights render as
+// a tiny scrollbar stub in the toolbar instead of a panel. The panel is
+// styled position:absolute with a max-height of the viewport; if anything
+// upstream leaves it in the document FLOW (a stylesheet that lost the rule,
+// an extension, a browser that resolves calc(100vh - 70px) to ~0 in a short
+// window) it collapses to its scrollbar and sits between the buttons, which
+// is exactly what the screenshot shows.
+//
+// I could not reproduce it in Chromium at any viewport from 600x700 to
+// 1920x1080, so this does not claim to fix a diagnosed cause: it REPAIRS
+// the symptom at the moment of opening and says so, which turns an
+// unreproducible layout failure into a visible, reportable one.
+let _menuRepairs=0;
+function ensureMenuUsable(panel){
+  if(!panel)return;
+  requestAnimationFrame(()=>{
+    const cs=getComputedStyle(panel), r=panel.getBoundingClientRect();
+    const collapsed=(r.height<50&&panel.scrollHeight>60)||r.width<60;
+    const flowed=cs.position!=='absolute';
+    if(!collapsed&&!flowed)return;
+    // setProperty with priority: a plain inline style loses to any
+    // !important rule, and whatever broke the panel may well be one
+    panel.style.setProperty('position','absolute','important');
+    panel.style.setProperty('max-height',Math.max(160,innerHeight-70)+'px','important');
+    panel.style.setProperty('min-width','210px','important');
+    panel.style.setProperty('height','auto','important');
+    panel.style.setProperty('z-index','120','important');
+    panel.style.setProperty('overflow-y','auto','important');
+    if(_menuRepairs++===0){
+      toast('a menu opened collapsed and was repaired — please report your '
+        +'browser and window size ('+innerWidth+'x'+innerHeight+', '
+        +cs.position+', '+Math.round(r.height)+'px)','warn');
+    }
+  });
+}
 [['fileBtn','fileMenu'],['shareBtn','shareMenu'],['lightsBtn','lightsMenu'],['perspBtn','perspMenu']].forEach(([b,p])=>{
   const btn=$(b); if(!btn)return;
   btn.onclick=e=>{ e.stopPropagation();
     const m=btn.parentElement; const wasOpen=m.classList.contains('open');
-    closeTopMenus(m); m.classList.toggle('open',!wasOpen); };
+    closeTopMenus(m); m.classList.toggle('open',!wasOpen);
+    if(!wasOpen)ensureMenuUsable($(p)); };
   if(p!=='lightsMenu'&&p!=='perspMenu')$(p).addEventListener('click',()=>setTimeout(closeTopMenus,0));  // pick = close (lights panel stays open for tuning)
 });
 document.addEventListener('click',()=>closeTopMenus());
@@ -1283,7 +1329,12 @@ function rampEditor(cid, getStops, commit){
 // the rows that follow it (up to the next .subh or section end). State
 // persists per group in localStorage; the advanced groups start
 // closed so the panel's resting height stays short.
-const GROUPS_DEFAULT_CLOSED=new Set(['Shape & pose','Material','Histogram']);
+// Walls joins the closed-by-default set and now sits BELOW the
+// selected-layer controls. It was wedged between the layer list and
+// Blend/Opacity/Thickness -- four rows of a feature most documents
+// never use, standing in front of the ones every document uses.
+const GROUPS_DEFAULT_CLOSED=new Set(['Shape & pose','Material','Histogram',
+                                     'Walls (the room)']);
 function makeSubgroupsCollapsible(){
   document.querySelectorAll('#side .subh').forEach(h=>{
     if(h.dataset.grp)return;                       // already wired
@@ -1350,6 +1401,18 @@ async function cookMedia(steps){
   toast('cooked '+steps+' steps — that is now the starting state at this frame','info');
   drawComposite(); refresh();
 }
+async function cookBy(sign){
+  const n=Math.max(1,Math.min(2400,parseInt($('lCookN').value,10)||24))*sign;
+  const r=await api('/api/media/cook',{...J,body:JSON.stringify({steps:n,layer:sel})});
+  if(r&&r.error){toast(r.error);return;}
+  if(r&&r.warning){toast(r.warning);return;}
+  const i=(r&&r.layers&&r.layers[0])||{};
+  toast(i.steps===0 ? 'already back at the uncooked stroke'
+        : ((i.steps>0?'cooked +':'un-cooked ')+i.steps+' steps — total '+i.total),'info');
+  drawComposite(); refresh();
+}
+$('lCookFwd').onclick=()=>cookBy(1);
+$('lCookBack').onclick=()=>cookBy(-1);
 $('lCookSettle').onclick=async()=>{
   toast('cooking until the simulation settles…','info');
   const r=await api('/api/media/cook',{...J,body:JSON.stringify({until:'settled',layer:sel})});
@@ -1359,8 +1422,6 @@ $('lCookSettle').onclick=async()=>{
                      : ('stopped at the '+info.steps+'-step cap — '+info.why), info.settled?'info':'warn');
   drawComposite(); refresh();
 };
-$('lCook24').onclick=()=>cookMedia(24);
-$('lCook96').onclick=()=>cookMedia(96);
 let _warnedWrap=false;
 function warnIfWrapping(){
   // an engine older than leCore 0.2.9 has no wall boundary: the ink will
@@ -1382,7 +1443,8 @@ $('lFieldStr').oninput=e=>{ $('lFieldStrV').textContent=e.target.value; lProp({f
 let WALLS={front:null,back:null,left:null,right:null}, WALL_EDIT=null;
 async function loadWalls(){
   const r=await api('/api/walls');
-  if(r&&r.walls){ WALLS=r.walls; WALL_EDIT=r.editing||null; }
+  if(r&&r.walls){ WALLS=r.walls; WALL_EDIT=r.editing||null;
+    WALL_SCALE=r.wall_scale||WALL_SCALE; STACK_H=r.stack_height!==undefined?r.stack_height:STACK_H; }
   drawWallSlots();
 }
 function drawWallSlots(){
@@ -1402,12 +1464,26 @@ function drawWallSlots(){
         ? '<span class="mu" style="flex:1;overflow:hidden;text-overflow:ellipsis">'+((l&&l.name)||lid)+'</span>'
           +'<button class="wedit" title="'+(open?'Stand it back up on its plane':'Lay it flat on the canvas and paint it with every ordinary tool')+'">'+(open?'✓ Done':'✎ Edit')+'</button>'
           +'<button class="wclear" title="Take it off the wall and give it back to the canvas">✕</button>'
+          +'</div><div class="row" data-wall="'+s+'" style="gap:4px">'
+          +'<label style="width:60px" title="Vertical scale for this side. The wall\'s own vertical axis is HEIGHT above the canvas, and how far that height reaches across the floor depends on how deep the layer stack is. The stack normalises it automatically (currently '+(STACK_H||0).toFixed(1)+' units deep); this is your multiplier on top.">↕ scale</label>'
+          +'<input type="range" class="wscale" min="5" max="600" value="'+Math.round((WALL_SCALE[s]||1)*100)+'" style="flex:1">'
+          +'<span class="val wscalev">'+(WALL_SCALE[s]||1).toFixed(2)+'×</span>'
         : '<button class="wassign" style="flex:1" title="Put the SELECTED layer on this plane">assign selected</button>')
       +'</div>';
   }).join('');
   host.querySelectorAll('[data-wall]').forEach(row=>{
     const s=row.dataset.wall;
     const a=row.querySelector('.wassign'), e=row.querySelector('.wedit'), c=row.querySelector('.wclear');
+    const sc=row.querySelector('.wscale');
+    if(sc)sc.oninput=async()=>{
+      const v=Math.max(0.05,Math.min(20,sc.value/100));
+      row.querySelector('.wscalev').textContent=v.toFixed(2)+'×';
+      const r=await api('/api/wall',{...J,body:JSON.stringify({action:'scale',side:s,scale:v})});
+      if(r&&r.error){toast(r.error);return;}
+      if(r&&r.wall_scale)WALL_SCALE=r.wall_scale;
+      if(r&&r.stack_height!==undefined)STACK_H=r.stack_height;
+      drawComposite();
+    };
     if(a)a.onclick=async()=>{
       if(!sel){toast('select a layer first, then assign it to a wall');return;}
       const r=await api('/api/wall',{...J,body:JSON.stringify({action:'assign',side:s,layer:sel})});
@@ -2089,6 +2165,13 @@ let graph=[], nid=1;
 async function api(p,opt){
   if(opt&&opt.method!=='GET'&&!/undo|redo|presence|events|state|autosave/.test(p)){
     DIRTY=true; thumbTok=Date.now();   // thumbs refetch only after a real change
+    // ONE choke point for "the document moved on". A shape-assist offer
+    // is only safe to accept while it is still the newest thing that
+    // happened, because accepting it UNDOES the stroke it refers to --
+    // and a blind undo after a layer add deleted the layer. Counting
+    // mutations here catches every path instead of the few I would
+    // have remembered to annotate.
+    if(typeof _strokeMark!=='undefined'&&!/shape\/recognise/.test(p))_strokeMark++;
   }else if(opt&&opt.method!=='GET'){ thumbTok=Date.now(); }
   // Identify the author on EVERY request. The SSE feed skips refreshes where
   // src === my CLIENT_ID -- without this header src was always "" and every
@@ -2382,6 +2465,7 @@ async function refresh(){
   setStatus();
   ensurePlayback();
 }
+let WALL_SCALE={front:1,back:1,left:1,right:1}, STACK_H=0;
 let dragLayerId=null, soloMemo=null;
 async function selectLayerAlpha(lid){
   const r=await api('/api/select',{...J,body:JSON.stringify(
@@ -2464,7 +2548,7 @@ function drawLayers(){
       // selected row (the old row buried the name under seven buttons)
       d.innerHTML=`<input type="checkbox" class="mergechk" title="check this layer for Merge ✓">`+
         `<button class="eye">👁</button><img><span class="nm"></span>`+
-        `<span class="volbadge" title=""></span><span class="stat statlock" title="alpha-locked">🔒</span><span class="stat statclip" title="clipped to the layer below">◒</span>`;
+        `<span class="volbadge" title=""></span><span class="stat statwall" title=""></span><span class="stat statlock" title="alpha-locked">🔒</span><span class="stat statclip" title="clipped to the layer below">◒</span>`;
       d.draggable=true;                     // drag to reorder, like every editor
       d.ondragstart=e=>{ dragLayerId=l.id; e.dataTransfer.effectAllowed='move'; };
       d.ondragover=e=>{ if(dragLayerId&&dragLayerId!==l.id){e.preventDefault();
@@ -2518,6 +2602,14 @@ function drawLayers(){
     d.querySelector('.eye').className='eye'+(l.visible?'':' off');
     d.querySelector('.statlock').style.display=l.alpha_lock?'':'none';
     d.querySelector('.statclip').style.display=l.clip?'':'none';
+    // A layer standing on a wall LEAVES THE PICTURE -- it lights the
+    // room from outside instead. Without a marker in the list that
+    // reads as "my layer vanished", which is the same complaint the
+    // lock badge was added for. Say which side it is on.
+    const wb=d.querySelector('.statwall');
+    if(l.wall){ wb.style.display=''; wb.textContent={left:'◀',right:'▶',back:'▲',front:'▼'}[l.wall]||'▣';
+      wb.title='On the '+l.wall+' wall — it lights the room from outside the canvas, so it is not drawn in the picture. Open Walls (the room) to bring it back.'; }
+    else { wb.style.display='none'; wb.textContent=''; }
     let lk=d.querySelector('.statlockfull');
     if(l.locked&&!lk){ lk=document.createElement('span'); lk.className='statlockfull';
       lk.title='Locked — no edits'; lk.textContent='🔒';
@@ -2754,6 +2846,7 @@ document.addEventListener('keydown',e=>{
   if(e.key==='End'){ e.preventDefault(); tlSetFrame(TL.range[1]); tlSettle(); return; }
   if(e.key===','){ e.preventDefault(); tlStep(-1); return; }
   if(e.key==='.'){ e.preventDefault(); tlStep(1); return; }
+  if(e.key==='s'||e.key==='S'){ if(window._snapCandidate){ e.preventDefault(); applyShapeSnap(); } return; }
 });
 function tlSettle(){                 // one full sync after motion stops
   clearTimeout(_tlSettleT);
@@ -3443,6 +3536,8 @@ async function flushStroke(final){
   try{
     const body=strokeBody(seg,rec); if(liveWhole)body.live=true;
     const r=await api('/api/paint',{...J,body:JSON.stringify(body)}); paintWarn(r);
+    if(final){ _strokeMark++;                      // something happened
+      if(tool==='brush')offerShapeSnap(stroke.map(p=>[p[0],p[1]])); }
     if(r&&r.removed!==undefined){
       // the stroke eraser reports its take -- silence after a miss reads
       // as breakage, so say what happened either way
@@ -5305,7 +5400,7 @@ async function doText(x,y){
   setStatus('✓ '+r.glyphs+' glyphs'+(body.spline?' along the path':''));
   refresh(); refreshNodePreviews();
 }
-const SHORTCUTS=[['Shift+P','perspective guides on/off'],['Shift+Space','Play / pause the timeline'],[', / .','Step one frame back / forward'],['Home / End','Jump to the first / last frame'],["B / E", "Brush / Eraser"], ["S / C", "Smudge / Clone"], ["M / W", "Marquee / Magic wand"], ["N", "Nudge — move strokes, not pixels"], ["K", "Select strokes (Shift-click adds)"], ["I", "Eyedropper (Alt-click while brushing)"], ["Swatch strip", "Click a recent colour to reuse · Alt-click to remove"], ["Del / Backspace", "Clear the selection (whole layer if none)"], ["Ctrl+click thumb", "Load layer alpha as selection"], ["Alt+click eye", "Solo a layer (again restores)"], ["Drag a layer row", "Reorder layers"], ["M (nodes)", "Bypass / re-enable a node"], ["Shift-drag (nodes)", "Box-select nodes"], ["Ctrl+C / V (nodes)", "Copy / paste nodes with their links"], ["Drop a wire on empty space", "Search for a node and auto-connect it"], ["Drop a node on a wire", "Insert it into that link"], ["Ctrl-drag (nodes)", "Slice through wires to cut them"], ["Ctrl+drag (nodes)", "Slash across wires to cut them"], ["Ctrl+Shift+N", "New layer"], ["Ctrl+1", "Zoom 100%"], ["V", "Transform tool"], ["G", "Fill (bucket)"], ["T", "Text tool"], ["P", "Spline pen"], ["Ctrl+C / X / V", "Copy / Cut / Paste selection"], ["Ctrl+J", "Duplicate layer"], ["Ctrl+D", "Deselect · duplicate node (in Nodes)"], ["Ctrl+Z / Shift+Z / Y", "Undo / Redo"], ["Ctrl+S", "Save workspace"], ["Ctrl+O", "Open image"], ["Ctrl+Shift+E", "Merge visible"], ["Esc", "Reset transform → finish spline → deselect"], ["Enter", "Apply transform"], ["[ / ]", "Brush smaller / larger"], ["+ / − / 0", "Zoom in / out / fit"], ["Ctrl+0", "Fit on screen"], ["Stroke panel", "width slider: swells selected joints, or tapers the whole stroke"], ["Strokes selected", "V transform · Ctrl+C/X/V copy/cut/paste · Del delete · panel: duplicate, to layer, smooth"], ["File ▸ Export at size…", "Render at any resolution, not just canvas size"], ["File ▸ Export frame sequence…", "The animation as numbered PNGs — media simulated on the same timeline playback uses, plus an ffmpeg line"], ["F", "Frame nodes (in Nodes)"], ["Del", "Delete node (in Nodes)"], ["?", "This overlay"], ["Drag & drop", "Images → layers · .lews → workspace · .obj/.glb → 3D models"], ["F", "FX brush — strokes grow effects (grass, drips, embers)"], ["Brush ▸ Media", "Impasto — oil/acrylic/watercolor build real thickness; gravity makes heavy loads run"], ["Brush ▸ ⇋", "Symmetry — strokes paint a mirrored twin (its own editable stroke)"], ["Layer row 🔒 / ◒", "Alpha lock · clipping mask (clips to the layer below)"], ["Editors chip", "Who's here — tabs count as one person; the host can kick"]];
+const SHORTCUTS=[['Shift+P','perspective guides on/off'],['S','Accept a shape-assist offer (tidy the stroke)'],['Shift+Space','Play / pause the timeline'],[', / .','Step one frame back / forward'],['Home / End','Jump to the first / last frame'],["B / E", "Brush / Eraser"], ["S / C", "Smudge / Clone"], ["M / W", "Marquee / Magic wand"], ["N", "Nudge — move strokes, not pixels"], ["K", "Select strokes (Shift-click adds)"], ["I", "Eyedropper (Alt-click while brushing)"], ["Swatch strip", "Click a recent colour to reuse · Alt-click to remove"], ["Del / Backspace", "Clear the selection (whole layer if none)"], ["Ctrl+click thumb", "Load layer alpha as selection"], ["Alt+click eye", "Solo a layer (again restores)"], ["Drag a layer row", "Reorder layers"], ["M (nodes)", "Bypass / re-enable a node"], ["Shift-drag (nodes)", "Box-select nodes"], ["Ctrl+C / V (nodes)", "Copy / paste nodes with their links"], ["Drop a wire on empty space", "Search for a node and auto-connect it"], ["Drop a node on a wire", "Insert it into that link"], ["Ctrl-drag (nodes)", "Slice through wires to cut them"], ["Ctrl+drag (nodes)", "Slash across wires to cut them"], ["Ctrl+Shift+N", "New layer"], ["Ctrl+1", "Zoom 100%"], ["V", "Transform tool"], ["G", "Fill (bucket)"], ["T", "Text tool"], ["P", "Spline pen"], ["Ctrl+C / X / V", "Copy / Cut / Paste selection"], ["Ctrl+J", "Duplicate layer"], ["Ctrl+D", "Deselect · duplicate node (in Nodes)"], ["Ctrl+Z / Shift+Z / Y", "Undo / Redo"], ["Ctrl+S", "Save workspace"], ["Ctrl+O", "Open image"], ["Ctrl+Shift+E", "Merge visible"], ["Esc", "Reset transform → finish spline → deselect"], ["Enter", "Apply transform"], ["[ / ]", "Brush smaller / larger"], ["+ / − / 0", "Zoom in / out / fit"], ["Ctrl+0", "Fit on screen"], ["Stroke panel", "width slider: swells selected joints, or tapers the whole stroke"], ["Strokes selected", "V transform · Ctrl+C/X/V copy/cut/paste · Del delete · panel: duplicate, to layer, smooth"], ["File ▸ Export at size…", "Render at any resolution, not just canvas size"], ["File ▸ Export frame sequence…", "The animation as numbered PNGs — media simulated on the same timeline playback uses, plus an ffmpeg line"], ["F", "Frame nodes (in Nodes)"], ["Del", "Delete node (in Nodes)"], ["?", "This overlay"], ["Drag & drop", "Images → layers · .lews → workspace · .obj/.glb → 3D models"], ["F", "FX brush — strokes grow effects (grass, drips, embers)"], ["Brush ▸ Media", "Impasto — oil/acrylic/watercolor build real thickness; gravity makes heavy loads run"], ["Brush ▸ ⇋", "Symmetry — strokes paint a mirrored twin (its own editable stroke)"], ["Layer row 🔒 / ◒", "Alpha lock · clipping mask (clips to the layer below)"], ["Editors chip", "Who's here — tabs count as one person; the host can kick"]];
 function toggleShortcuts(){
   const b=$('shortcutsBack');
   if(b.style.display==='none'){
@@ -5493,6 +5588,61 @@ window.addEventListener('drop',async e=>{
 });
 let TOASTT=null;
 let _lastPaintWarn=0;
+let _lastShapeAt=0, _strokeMark=0;
+function cleanShapePoints(kind, pts){
+  const xs=pts.map(p=>p[0]), ys=pts.map(p=>p[1]);
+  const x0=Math.min(...xs), x1=Math.max(...xs), y0=Math.min(...ys), y1=Math.max(...ys);
+  const cx=(x0+x1)/2, cy=(y0+y1)/2, rx=(x1-x0)/2, ry=(y1-y0)/2, out=[];
+  if(kind==='circle'){ for(let i=0;i<=64;i++){const a=i/64*2*Math.PI; out.push([cx+Math.cos(a)*rx, cy+Math.sin(a)*ry]);} }
+  else if(kind==='rectangle'){
+    const c=[[x0,y0],[x1,y0],[x1,y1],[x0,y1],[x0,y0]];
+    for(let i=0;i<4;i++){ for(let s=0;s<=16;s++){ const u=s/16;
+      out.push([c[i][0]+(c[i+1][0]-c[i][0])*u, c[i][1]+(c[i+1][1]-c[i][1])*u]); } }
+  } else { const a=pts[0], b=pts[pts.length-1];
+    for(let s=0;s<=48;s++){ const u=s/48; out.push([a[0]+(b[0]-a[0])*u, a[1]+(b[1]-a[1])*u]); } }
+  return out;
+}
+async function applyShapeSnap(){
+  const c=window._snapCandidate;
+  if(!c||Date.now()-c.at>15000){ toast('no shape offer to accept'); return; }
+  // NEVER undo blindly. The first version called /api/undo assuming the
+  // top of the stack was the freehand stroke; when it was not -- add a
+  // layer, then accept an older offer -- undo DELETED THE LAYER. An
+  // offer only stays valid while it is still the newest thing that
+  // happened, so record the stroke count at offer time and refuse to
+  // undo if anything has happened since.
+  if(c.strokeMark!==undefined && c.strokeMark!==_strokeMark){
+    window._snapCandidate=null;
+    toast('that shape offer is stale — something else happened since. Draw it again to tidy it.');
+    return;
+  }
+  window._snapCandidate=null;
+  await api('/api/undo',{...J,body:'{}'});          // take the freehand stroke back
+  const pts=cleanShapePoints(c.shape, c.points);
+  const body=strokeBody(pts.map(p=>[p[0],p[1],1]), true);
+  const r=await api('/api/paint',{...J,body:JSON.stringify(body)});
+  paintWarn(r);
+  toast('replaced with a clean '+c.shape+' — undo twice to get your own line back','info');
+  drawComposite(); refresh();
+}
+async function offerShapeSnap(pts){
+  // OFFER, never impose: the recogniser stays silent unless its two
+  // independent opinions agree (measured 99% right when they do, on 70%
+  // of strokes), and even then the artist chooses.
+  // read the checkbox directly rather than mirroring it into a
+  // variable: the mirror's onchange binding was attached to an anchor
+  // that did not exist, so the toggle silently did nothing. One source
+  // of truth, and it is the thing the artist actually clicked.
+  const on=$('bShapeSnap')&&$('bShapeSnap').checked;
+  if(!on||!pts||pts.length<12)return;
+  if(Date.now()-_lastShapeAt<1200)return;
+  _lastShapeAt=Date.now();
+  const r=await api('/api/shape/recognise',{...J,body:JSON.stringify({points:pts})});
+  if(!r||!r.confident||!r.shape)return;
+  toast('that looks like a '+r.shape+' — press S to replace it with a clean one','info');
+  window._snapCandidate={shape:r.shape, points:pts, at:Date.now(),
+                         strokeMark:_strokeMark};
+}
 function paintWarn(r){
   // a stroke that cannot show gets a DIAGNOSIS, throttled so a long
   // stroke doesn't spam — professional trust: no silent no-ops

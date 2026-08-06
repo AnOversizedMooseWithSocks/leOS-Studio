@@ -148,6 +148,25 @@ console.log('\nclick-and-hold');
     ok(`'${t}' section lives in group A`, s.length > 0);
   });
 
+  // NO DROPDOWN WRAPPER MAY CLIP ITS OWN PANEL. One CSS selector once
+  // gave .tbm (the ~46x25 box around a toolbar button) overflow-y:auto,
+  // which clipped the absolutely positioned menu inside it down to a
+  // scrollbar stub. This gate reads the stylesheet, so a selector that
+  // reintroduces overflow on a positioning wrapper fails here rather
+  // than in a screenshot.
+  const css = HTML.slice(HTML.indexOf('<style'), HTML.indexOf('</style>'));
+  const rules = css.split('}');
+  rules.forEach(r => {
+    const sel = r.split('{')[0] || '';
+    const body = r.split('{')[1] || '';
+    if (!/overflow(-y)?\s*:\s*(auto|scroll|hidden)/.test(body)) return;
+    ok(`'${sel.trim().slice(0, 42)}' does not clip a menu wrapper`,
+      !/(^|,)\s*\.tbm\s*(,|$)/.test(sel),
+      'a dropdown wrapper with overflow clips the panel inside it');
+  });
+  ok('the dropdown PANEL is what scrolls',
+    /#addMenu[^{]*\.tbp[^{]*\{[^}]*overflow-y:auto/.test(css));
+
   console.log(`\n${passes} passed, ${fails} failed`);
   process.exit(fails ? 1 : 0);
 })();

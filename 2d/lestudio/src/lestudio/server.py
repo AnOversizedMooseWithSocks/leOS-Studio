@@ -2762,7 +2762,12 @@ def comp_png():
         # runs at full resolution (1.5x the pixels of the display buffer)
         # and then still needs a downscale. Compositing straight at display
         # size wins. Left alone on purpose.
-        c = composite_display(DOC.layers, DOC.height, DOC.width,
+        # canvas_layers(), not layers: a layer standing on a WALL is not
+        # canvas content. This path had the raw list, so a wall's paint
+        # was still drawn flat on the picture AND projected as light --
+        # the same strokes twice, which is what made the wall look like
+        # an overlay with embossing.
+        c = composite_display(DOC.canvas_layers(), DOC.height, DOC.width,
                               {m.id: m for m in DOC.masks}, maxw)
     # checker-through-alpha handled client-side; export straight RGBA
     resp = _png(c)
@@ -3534,7 +3539,9 @@ def walls_get():
     """The four perpendicular planes: {walls: {front, back, left, right},
     editing: side|None}. Empty by default -- a document is a flat canvas
     until an artist puts a layer on a wall."""
-    return jsonify(walls=dict(getattr(DOC, "walls", {})),
+    return jsonify(wall_scale=dict(getattr(DOC, "wall_scale", {}) or {}),
+                   stack_height=DOC.stack_height(),
+                   walls=dict(getattr(DOC, "walls", {})),
                    editing=getattr(DOC, "wall_edit", None))
 
 
@@ -3545,7 +3552,13 @@ def wall_post():
     that side (it keeps its strokes, thickness, volume, fields and
     lights, and stands on exactly one wall); clear gives it back to the
     canvas; edit opens a side for painting, where it lies flat and every
-    ordinary tool works on it unchanged -- pass side null to close."""
+    ordinary tool works on it unchanged -- pass side null to close.
+    scale sets that side's VERTICAL scale (0.05-20): a wall's own
+    vertical axis is height above the canvas, and how far that height
+    reaches across the floor depends on how deep the layer stack is.
+    The stack's depth normalises it automatically; this is the artist's
+    multiplier on top -- raise it for a cathedral window, lower it for
+    a slide under glass."""
     d = request.json or {}
     act = d.get("action")
     try:
@@ -3554,6 +3567,10 @@ def wall_post():
             return jsonify(ok=True, walls=w)
         if act == "clear":
             return jsonify(ok=True, walls=DOC.clear_wall(d.get("side")))
+        if act == "scale":
+            sc = DOC.set_wall_scale(d.get("side"), d.get("scale", 1.0))
+            return jsonify(ok=True, wall_scale=sc,
+                           stack_height=DOC.stack_height())
         if act == "edit":
             s = DOC.edit_wall(d.get("side"))
             return jsonify(ok=True, editing=s,
@@ -3563,6 +3580,25 @@ def wall_post():
     except ValueError as e:
         return jsonify(error=str(e)), 400
     return jsonify(error="unknown action"), 400
+
+
+@app.post("/api/shape/recognise")
+def shape_recognise():
+    """What shape was that stroke? {"points": [[x, y], ...]} ->
+    {shape: "circle"|"rectangle"|"line"|null, confident, why}. Two
+    independent opinions (leCore's HRNN trajectory readout and a
+    circularity test) must AGREE before a shape is claimed; when they
+    disagree the answer is null with the reason, because an unasked-for
+    shape replacement that guesses wrong is worse than no feature."""
+    from . import recognise_shape
+    d = request.json or {}
+    pts = d.get("points") or []
+    if not isinstance(pts, list) or len(pts) < 2:
+        return jsonify(error="points must be a list of [x, y]"), 400
+    try:
+        return jsonify(ok=True, **recognise_shape(pts))
+    except Exception as e:
+        return jsonify(error=str(e)), 400
 
 
 @app.post("/api/media/cook")
@@ -3583,8 +3619,7 @@ def media_cook():
         steps = int(d.get("steps", 24))
     except (TypeError, ValueError):
         return jsonify(error="steps must be an integer"), 400
-    if steps < 1:
-        return jsonify(error="steps must be at least 1"), 400
+    # negatives are meaningful now: they UN-cook
     if str(d.get("until", "")) == "settled":
         from . import cook_until_settled
         r = cook_until_settled(DOC, layer=d.get("layer") or None)
@@ -3594,12 +3629,17 @@ def media_cook():
                                    "media layer (ink, smoke, fire) "
                                    "first"), 200
         return jsonify(ok=True, **r)
-    n = cook_media(DOC, steps=steps, layer=d.get("layer") or None)
-    if n == 0:
+    if steps == 0:
+        return jsonify(error="steps must not be zero"), 400
+    if abs(steps) > 2400:
+        return jsonify(error="that is %d steps; the limit is 2400"
+                             % abs(steps)), 400
+    r = cook_media(DOC, steps=steps, layer=d.get("layer") or None)
+    if r["cooked"] == 0:
         return jsonify(ok=True, cooked=0,
                        warning="nothing to cook -- paint into a media "
                                "layer (ink, smoke, fire) first"), 200
-    return jsonify(ok=True, cooked=n)
+    return jsonify(ok=True, **r)
 
 
 @app.get("/api/export/frames.zip")

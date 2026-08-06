@@ -12773,7 +12773,12 @@ def test_new_user_feedback_sweep():
                             "lestudio", "__init__.py")).read()
     assert 'if not getattr(self, "_replaying", False):' in eng and \
         "read-only PROBE" in eng, "the replay-patch fix must stay"
-    assert "#addMenu,#lightChip,.tbm,#presenceChip,#accelChip" in ui and \
+    # Floating containers stay capped -- but note this assertion used to
+    # pin the LITERAL selector, `.tbm` included, and `.tbm` was the bug:
+    # capping the dropdown WRAPPER clipped the panel inside it to a
+    # scrollbar stub. A test that pins a string rather than a property
+    # will happily hold a bug in place, which is what happened here.
+    assert "#addMenu,#lightChip,.tbp,#presenceChip,#accelChip" in ui and \
         "panels off screen" in ui, "floating containers stay capped"
     for frag in ('id="bSize" title=', 'id="bSmooth" title=',
                  'id="lOp" min="0" max="100" value="100" title=',
@@ -15680,7 +15685,10 @@ def test_cook_and_live_media_clocks():
     d.edit_layer(l, thickness=10.0, vol_kind="inkwater")
     d.paint(l, [(120.0, 90.0)], color=(0.1, 0.1, 0.7), radius=9)
     raw = spread(d, l)
-    assert cook_media(d, steps=30) == 1
+    # cook_media now returns {cooked, layers:[...]} rather than a bare
+    # count, because a reversible cook has to report the running TOTAL
+    # per layer, not just how many it touched
+    assert cook_media(d, steps=30)["cooked"] == 1
     cooked = spread(d, l)
     assert cooked > raw * 1.3, "cooking advances the simulation"
     assert d.frame == 0.0, "cooking must NOT move the playhead"
@@ -15751,10 +15759,57 @@ def test_cook_and_live_media_clocks():
     assert c.post("/api/media/cook", json={"steps": 0}).status_code == 400
     WS.close(mine)
 
+    # REVERSIBLE cooking with a custom amount (Devin: "no way to do a
+    # custom number of frames, or go backwards"). Cooking was one-way:
+    # it advanced, rebaselined, dropped the cache, and -- measured --
+    # undo did not bring it back either. The first cook now stores the
+    # UNCOOKED state, so a negative cook restores that and replays the
+    # remainder. The solver has no reverse, but it is deterministic, so
+    # replaying IS the reverse.
+    d4 = Document(240, 180)
+    l4 = d4.add_layer("rev").id
+    d4.layer(l4).pixels[...] = 0.0
+    d4.edit_layer(l4, thickness=10.0, vol_kind="inkwater")
+    d4.paint(l4, [(120.0, 90.0)], color=(0.1, 0.1, 0.7), radius=9)
+    base_state = {k: np.array(v, copy=True)
+                  for k, v in d4.layer(l4)._media.items()}
+    cook_media(d4, steps=16, layer=l4)
+    at16 = d4.layer(l4).pixels.copy()
+    cook_media(d4, steps=8, layer=l4)
+    r_back = cook_media(d4, steps=-8, layer=l4)
+    assert float(np.abs(at16 - d4.layer(l4).pixels).max()) == 0.0, \
+        "+16 +8 -8 must land byte-identically back on +16"
+    assert r_back["layers"][0]["total"] == 16
+    # custom amounts compose exactly
+    cook_media(d4, steps=-16, layer=l4)
+    cook_media(d4, steps=7, layer=l4)
+    cook_media(d4, steps=3, layer=l4)
+    ten_split = d4.layer(l4).pixels.copy()
+    cook_media(d4, steps=-10, layer=l4)
+    cook_media(d4, steps=10, layer=l4)
+    assert float(np.abs(ten_split - d4.layer(l4).pixels).max()) == 0.0, \
+        "7+3 must equal 10 in one go"
+    # all the way back restores the MEDIUM exactly (the pixels are the
+    # slab's render of it, as at any step-0 scrub -- not the crisp stamp)
+    cook_media(d4, steps=-10, layer=l4)
+    st4 = d4.layer(l4)._media
+    assert all(np.array_equal(base_state[k], st4[k]) for k in base_state), \
+        "rewinding to zero restores the uncooked medium exactly"
+    clamp = cook_media(d4, steps=-50, layer=l4)
+    assert clamp["layers"][0]["total"] == 0 \
+        and clamp["layers"][0]["steps"] == 0, \
+        "it clamps at the uncooked state and says it moved nothing"
+
+    r5 = c.post("/api/media/cook", json={"steps": 0})
+    assert r5.status_code == 400, "zero steps is refused"
+    assert c.post("/api/media/cook",
+                  json={"steps": 99999}).status_code == 400
+
     ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
                            "static", "index.html")).read()
-    for frag in ('id="lMediaTime"', 'id="lCook24"', 'id="lCook96"',
-                 "lProp({media_time:", "function cookMedia"):
+    for frag in ('id="lMediaTime"', 'id="lCookN"', 'id="lCookFwd"',
+                 'id="lCookBack"', "lProp({media_time:",
+                 "function cookBy"):
         assert frag in ui, frag
 
 
@@ -16366,3 +16421,602 @@ def test_cook_until_settled_hrnn():
                             "BACKLOG-hrnn.md")).read()
     assert "Deliberately NOT doing" in doc, \
         "the rejected uses are part of the record"
+
+
+def test_shape_assist_recognition():
+    """Backlog H2 (docs/BACKLOG-hrnn.md): leCore 0.2.9's HRNN
+    TrajectoryReadout put to work recognising what an artist just drew.
+
+    MEASURED BEFORE BUILDING. On held-out synthetic strokes (partial
+    sweeps, either direction, ellipses and oblongs, arbitrary rotation,
+    1-6% hand jitter): the HRNN readout scores 94%, a plain geometric
+    test 72%. The HRNN earns its place -- its chirality and
+    arrival-time features are doing work geometry cannot.
+
+    But 94% is not good enough to ACT on unasked. So two independent
+    opinions must agree: the readout and a circularity test
+    (4*pi*area/perimeter^2 -- 1.0 for a circle, 0.785 for a square).
+    Measured on 240 held-out strokes they agree on ~70% of them and are
+    right 99% of the time when they do. Disagreement means silence.
+    An unasked-for shape replacement that guesses wrong is worse than
+    no feature, and 30% silence is the price of the other 99%.
+
+    Two corrections the measurements forced:
+    - the geometric opinion started as radial standard deviation, which
+      cannot separate a square from an ellipse (both wobble ~0.13), so
+      rectangles were being abstained on. Circularity separates them:
+      measured medians 0.84 circle / 0.62 rectangle.
+    - accepting an offer UNDOES the freehand stroke, and the first
+      version undid blindly. With a layer added after the offer, that
+      undo DELETED THE LAYER. Offers now carry a mutation mark taken at
+      offer time, counted at the single api() choke point so every path
+      is covered, and a stale offer refuses with a reason instead of
+      destroying something."""
+    import warnings
+    warnings.filterwarnings("ignore")
+    from lestudio import recognise_shape, _shape_training_set, \
+        _shape_geometry, _SHAPE_KINDS
+
+    t = np.linspace(0, 1, 50)
+    rng = np.random.default_rng(1)
+    circle = np.stack([np.cos(2 * np.pi * t),
+                       np.sin(2 * np.pi * t)], 1) * 100 + [300, 200]
+    line = np.stack([t * 200 + 50, t * 60 + 100], 1)
+    rect = np.vstack([
+        np.stack([np.linspace(-1, 1, 14), -np.ones(14)], 1),
+        np.stack([np.ones(14), np.linspace(-1, 1, 14)], 1),
+        np.stack([np.linspace(1, -1, 14), np.ones(14)], 1),
+        np.stack([-np.ones(14), np.linspace(1, -1, 14)], 1)]) * 80 + [250, 250]
+    for pts, want in ((circle, "circle"), (rect, "rectangle"),
+                      (line, "line")):
+        r = recognise_shape(pts + rng.normal(0, 2, pts.shape))
+        assert r["shape"] == want and r["confident"], \
+            "%s -> %s (%s)" % (want, r["shape"], r["why"])
+        assert r["why"], "a verdict carries its reason"
+
+    # silence where it should be silent
+    scribble = rng.normal(0, 50, (40, 2))
+    assert recognise_shape(scribble)["shape"] is None
+    assert recognise_shape(np.array([[0, 0], [1, 1]]))["shape"] is None
+
+    # the agreement gate: high precision, partial coverage, by design
+    X, y = _shape_training_set(seed=4242, per_class=40)
+    y = np.array(y)
+    res = [recognise_shape(np.asarray(x)) for x in X]
+    conf = np.array([r["confident"] for r in res])
+    pred = np.array([_SHAPE_KINDS.index(r["shape"]) if r["shape"] else -1
+                     for r in res])
+    assert conf.mean() > 0.45, \
+        "the gate must still fire often enough to be useful (%.0f%%)" % (
+            100 * conf.mean())
+    assert float((pred[conf] == y[conf]).mean()) > 0.92, \
+        "when it speaks it must be right (%.0f%%)" % (
+            100 * float((pred[conf] == y[conf]).mean()))
+    # and the HRNN is genuinely carrying the result, not the geometry
+    gp = np.array([_shape_geometry(np.asarray(x)) for x in X])
+    assert float((gp == y).mean()) < 0.85, \
+        "geometry alone is the weaker opinion -- if this ever passes, " \
+        "the HRNN may no longer be earning its place"
+
+    from lestudio.server import app, WS
+    c = app.test_client()
+    assert c.post("/api/new", json={"name": "sh", "width": 400,
+                                    "height": 300}).json["ok"]
+    mine = WS.active
+    r = c.post("/api/shape/recognise",
+               json={"points": (circle * 0.8).tolist()})
+    assert r.json["shape"] == "circle" and r.json["confident"]
+    assert c.post("/api/shape/recognise",
+                  json={"points": [[0, 0]]}).status_code == 400
+    WS.close(mine)
+
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html")).read()
+    for frag in ('id="bShapeSnap"', "function offerShapeSnap",
+                 "async function applyShapeSnap", "cleanShapePoints",
+                 "NEVER undo blindly", "_strokeMark",
+                 "['S','Accept a shape-assist offer (tidy the stroke)']"):
+        assert frag in ui, frag
+
+
+def test_top_menu_opens_as_a_panel():
+    """Devin: 'if I click on a menu like File, or Lights, instead of
+    seeing a drop down menu, I see a tiny scrollbar.' FOUND AND FIXED.
+
+    THE BUG, one selector:
+
+        #addMenu,#lightChip,.tbm,#presenceChip,#accelChip{
+            max-height:calc(100vh - 70px); overflow-y:auto; ... }
+
+    `.tbm` is the WRAPPER -- a ~46x25 box around the toolbar button --
+    not the dropdown. Giving it overflow-y:auto made it clip its own
+    absolutely positioned panel to the button's height, so opening File
+    showed the wrapper's SCROLLBAR where the menu should be. On Windows,
+    whose scrollbars carry arrow buttons, that stub reads as a number
+    spinner wedged between the buttons, which is exactly what the
+    screenshots showed -- and it moved to sit beside whichever button
+    was clicked, which is what identified it. The scrolling belongs to
+    `.tbp`, the panel, which is the thing that gets long.
+
+    WHY THE FIRST ATTEMPT MISSED IT, worth keeping: I measured
+    getBoundingClientRect and read 210x503, concluded the menus were
+    fine, could not reproduce, and shipped a defensive repair for a
+    symptom I had not diagnosed. getBoundingClientRect reports an
+    element's OWN box even when an ancestor clips it to nothing -- it
+    can never see this class of bug. elementFromPoint at the panel's
+    centre can, and that is what this test uses: it asks whether the
+    place the menu appears to occupy actually belongs to the menu.
+    Before the fix that hit the CANVAS; after it, the menu."""
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html")).read()
+    import re
+    m = re.search(r"#addMenu,#lightChip,([^{]*)\{[^}]*overflow-y:auto", ui)
+    assert m, "the scrollable-panel rule must still exist"
+    assert ".tbm" not in m.group(1), \
+        "the dropdown WRAPPER must never get overflow -- it clips the menu"
+    assert ".tbp" in m.group(1), "the panel is what scrolls"
+    # the wrapper keeps only its positioning role
+    assert ".tbm{position:relative;display:inline-block}" in ui
+    assert "NB .tbp, NOT .tbm" in ui, "the why stays where it would recur"
+
+    # the repair guard stays as a belt-and-braces, but must not fire on
+    # a healthy menu -- a 'repair' that triggers normally is worse than
+    # the bug it guards
+    assert "function ensureMenuUsable" in ui
+    assert "if(!collapsed&&!flowed)return;" in ui
+
+
+
+
+def test_wall_transmission_projects_the_picture():
+    """Devin: 'the walls don't work correctly. They're supposed to be
+    perpendicular, but instead it seems like they're overlaying. The
+    idea was... light could pass through and be influenced by colors,
+    like the light was passing through glass/paper with an image on
+    it.'
+
+    THE GAP: walls existed as slots and contributed light, but through
+    _wall_bounce ONLY -- which averages the entire layer to a single
+    colour and washes it across the canvas with a distance gradient. A
+    stained-glass window and a plain red sheet produced identical
+    output. Nothing about the wall's PICTURE reached the scene, which
+    is why it read as an overlay: it was a tint, not a projection.
+
+    _wall_transmission adds the missing half. The mapping is what makes
+    it perpendicular rather than overlaid: a left wall stands on the
+    canvas's left edge, so its own horizontal axis runs INTO the scene
+    (canvas y) and its vertical axis is height above the canvas, which
+    becomes DISTANCE from the wall (canvas x) -- a ray entering high up
+    travels further before it lands. The wall's image therefore arrives
+    transposed and stretched, which is how a window's pattern falls
+    across a floor.
+
+    The filter is subtractive (transmitted = 1 - a*(1 - rgb)), so
+    opaque black is a shadow, opaque red passes red only, and unpainted
+    wall passes everything. It MULTIPLIES the shade rather than adding,
+    which is the difference between light being filtered and paint
+    being laid on top.
+
+    Measured with a wall carrying a red band, a blue band, and an
+    opaque bar: red lands at R 0.89 against G/B 0.44 in its predicted
+    strip, blue lands further out (its band is higher on the wall), and
+    the bar's shadow falls at canvas row 89 -- inside the 75-97 the
+    mapping predicts. _wall_bounce is kept: ambient bounce and
+    transmission are different physics and a room has both."""
+    import warnings
+    warnings.filterwarnings("ignore")
+    from lestudio import composite_lit, _MUT_REV, _wall_transmission
+
+    def room():
+        d = Document(320, 240)
+        bg = d.layers[0].id
+        d.layer(bg).pixels[..., :3] = 0.85
+        d.layer(bg).pixels[..., 3] = 1.0
+        wl = d.add_layer("window").id
+        p = d.layer(wl).pixels
+        p[...] = 0.0
+        p[40:90, :, :3] = np.array([0.9, 0.15, 0.15], np.float32)
+        p[40:90, :, 3] = 1.0
+        p[140:190, :, :3] = np.array([0.15, 0.3, 0.95], np.float32)
+        p[140:190, :, 3] = 1.0
+        p[:, 100:130, :3] = 0.0
+        p[:, 100:130, 3] = 1.0
+        d.add_light(kind="directional", azimuth=0, elevation=45,
+                    intensity=1.2)
+        return d, wl
+
+    d, wl = room()
+    plain = composite_lit(d)                 # no wall assigned yet
+    d.assign_wall("left", wl)
+    _MUT_REV[0] += 1
+    img = composite_lit(d)
+    assert float(np.abs(img - plain).max()) > 0.05, \
+        "assigning a wall must change the render"
+
+    # The PICTURE arrives, not an average. Locate the bands rather than
+    # hard-coding columns: where they land depends on the room's height,
+    # which the stack's depth now normalises -- the first version of
+    # this test pinned literal columns and broke the moment that
+    # normalisation was added, for a rendering that was still correct.
+    redness = (img[..., 0] - img[..., 1]).mean(0)
+    blueness = (img[..., 2] - img[..., 0]).mean(0)
+    assert float(redness.max()) > 0.2, \
+        "the red band lands somewhere as red light (max %.2f)" % (
+            redness.max())
+    assert float(blueness.max()) > 0.03, \
+        "and the blue band lands as blue light (max %.2f)" % (
+            blueness.max())
+    assert int(np.argmax(blueness)) > int(np.argmax(redness)), \
+        "blue sits higher on the wall, so it lands further out"
+
+    # the opaque bar is a SHADOW, and it lands where the mapping says
+    # the opaque bar is a SHADOW, and it runs along the depth axis --
+    # the wall's horizontal axis maps to canvas y, so the shadow is a
+    # ROW band, which is the perpendicular mapping made visible
+    # measure the shadow WHERE THE PATTERN FALLS. Averaging across the
+    # whole width dilutes it below threshold, because the wall only
+    # lights the strip near itself -- the first version of this
+    # assertion measured the full row and failed on a correct render.
+    lit_cols = max(30, int(np.argmax(
+        (img[..., 0] - img[..., 1]).mean(0))) * 2)
+    lum = img[..., :3].mean(-1)
+    prof = lum[:, :lit_cols].mean(1)
+    dark = int(np.argmin(prof))
+    wall_bar_rows = (100 * 240 // 319, 130 * 240 // 319)
+    assert wall_bar_rows[0] - 20 <= dark <= wall_bar_rows[1] + 20, \
+        "the bar's shadow falls where the mapping puts it (row %d, " \
+        "predicted %s)" % (dark, wall_bar_rows)
+    assert float(prof.max() - prof.min()) > 0.2, "and it is a real shadow"
+
+    # an unpainted wall transmits everything -- clear glass, not a tint
+    d2 = Document(120, 90)
+    empty = d2.add_layer("clear").id
+    d2.layer(empty).pixels[...] = 0.0
+    d2.assign_wall("right", empty)
+    _MUT_REV[0] += 1
+    t = _wall_transmission(d2)
+    assert t is None or float(np.abs(t - 1.0).max()) < 1e-6, \
+        "an empty wall must not darken the room"
+
+    # walls act while hidden -- being hidden is what walls DO
+    d3, wl3 = room()
+    d3.assign_wall("left", wl3)
+    d3.edit_layer(wl3, visible=False)
+    _MUT_REV[0] += 1
+    hidden = composite_lit(d3)
+    assert float(np.abs(hidden - plain).max()) > 0.05, \
+        "a hidden wall still filters the light"
+
+    # MATERIAL decides what gets through. Devin: "like a stained glass
+    # window, or paper that casts shadows, it depends on the layer's
+    # background and thickness." Beer-Lambert in the thickness, with
+    # the absorption coefficient set by the material: glass barely
+    # absorbs (it passes its own colour), paper absorbs hard (thick
+    # stock is a silhouette, thin stock glows).
+    def pane(kind, T, colour=(0.9, 0.15, 0.15)):
+        d = Document(300, 220)
+        bg = d.layers[0].id
+        d.layer(bg).pixels[..., :3] = 0.85
+        d.layer(bg).pixels[..., 3] = 1.0
+        wl = d.add_layer("pane").id
+        p = d.layer(wl).pixels
+        p[...] = 0.0
+        p[:, :, :3] = np.array(colour, np.float32)
+        p[:, :, 3] = 1.0
+        d.edit_layer(wl, thickness=T, vol_kind=kind)
+        d.assign_wall("left", wl)
+        d.add_light(kind="directional", azimuth=0, elevation=45,
+                    intensity=1.2)
+        _MUT_REV[0] += 1
+        return composite_lit(d)[:, :60]
+
+    glass = pane("glass", 3.0)
+    thick_glass = pane("glass", 10.0)
+    paper = pane("none", 8.0)
+    assert float(glass[..., 0].mean()) > float(glass[..., 1].mean()) + 0.3, \
+        "glass passes its own colour"
+    assert float(thick_glass[..., :3].mean()) < float(glass[..., :3].mean()), \
+        "thicker glass absorbs more"
+    assert float(paper[..., :3].mean()) < float(glass[..., :3].mean()), \
+        "thick paper blocks far more than glass of any thickness"
+    paper_sat = float(paper[..., 0].mean() - paper[..., 1].mean())
+    glass_sat = float(glass[..., 0].mean() - glass[..., 1].mean())
+    assert paper_sat < glass_sat, \
+        "and paper reads as a silhouette, not as coloured light"
+
+    # VERTICAL SCALE. The wall's own vertical axis is height above the
+    # canvas; how far that height reaches across the floor depends on
+    # how deep the stack is, which varies per document. The stack's
+    # depth normalises it and wall_scale multiplies on top.
+    def band_reach(scale, stack=1.0):
+        d = Document(300, 220)
+        bg = d.layers[0].id
+        d.layer(bg).pixels[..., :3] = 0.9
+        d.layer(bg).pixels[..., 3] = 1.0
+        d.edit_layer(bg, thickness=stack)
+        wl = d.add_layer("pane").id
+        p = d.layer(wl).pixels
+        p[...] = 0.0
+        p[:60, :, :3] = np.array([0.9, 0.1, 0.1], np.float32)
+        p[:60, :, 3] = 1.0
+        d.edit_layer(wl, thickness=2.0, vol_kind="glass")
+        d.assign_wall("left", wl)
+        d.set_wall_scale("left", scale)
+        d.add_light(kind="directional", azimuth=0, elevation=45,
+                    intensity=1.2)
+        _MUT_REV[0] += 1
+        img = composite_lit(d)
+        cols = (img[..., 0] - img[..., 1]).mean(0)
+        hit = np.where(cols > 0.05)[0]
+        return int(hit.max()) if len(hit) else 0
+
+    r1, r2, r4 = band_reach(1.0), band_reach(2.0), band_reach(4.0)
+    assert r1 < r2 < r4, \
+        "scale spreads the pattern further (%d %d %d)" % (r1, r2, r4)
+    shallow, deep = band_reach(1.0, stack=2.0), band_reach(1.0, stack=20.0)
+    assert deep > shallow * 1.5, \
+        "a deeper stack means a taller room, so the pattern reaches " \
+        "further without touching the dial (%d vs %d)" % (deep, shallow)
+
+    d6 = Document(120, 90)
+    d6.add_layer("a")
+    d6.edit_layer(d6.layers[-1].id, thickness=6.0)
+    d6.add_layer("b")
+    d6.edit_layer(d6.layers[-1].id, thickness=4.0, relief=0.5)
+    assert abs(d6.stack_height() - 9.0) < 1e-6, \
+        "stack_height sums thickness weighted by relief (bg 1 + 6 + 2)"
+    wl6 = d6.add_layer("w").id
+    d6.edit_layer(wl6, thickness=5.0)
+    d6.assign_wall("left", wl6)
+    assert abs(d6.stack_height() - 9.0) < 1e-6, \
+        "a wall is not part of the floor it lights"
+    try:
+        d6.set_wall_scale("left", 99)
+        raise AssertionError("scale must be bounded")
+    except ValueError:
+        pass
+
+    from lestudio import save_workspace, load_workspace
+    d6.set_wall_scale("left", 2.5)
+    docs, _, act, _ = load_workspace(save_workspace({d6.id: d6}, {},
+                                                    d6.id))
+    assert abs(docs[act].wall_scale["left"] - 2.5) < 1e-6, \
+        "the scale persists"
+
+    from lestudio.server import app, WS
+    c = app.test_client()
+    assert c.post("/api/new", json={"name": "ws", "width": 160,
+                                    "height": 120}).json["ok"]
+    mine = WS.active
+    r = c.post("/api/wall", json={"action": "scale", "side": "left",
+                                  "scale": 2.0})
+    assert r.json["wall_scale"]["left"] == 2.0
+    assert "stack_height" in r.json
+    assert c.post("/api/wall", json={"action": "scale", "side": "left",
+                                     "scale": 99}).status_code == 400
+    assert "stack_height" in c.get("/api/walls").json
+    WS.close(mine)
+
+    # a side OPEN FOR PAINTING lies flat on the canvas and must not
+    # also filter the light -- otherwise the artist paints against a
+    # darkened copy of their own strokes. Caught by the older
+    # perpendicular-wall test when transmission first went in.
+    d7 = Document(200, 150)
+    w7 = d7.add_layer("red").id
+    p7 = d7.layer(w7).pixels
+    p7[..., :3] = np.array([0.9, 0.1, 0.1], np.float32)
+    p7[..., 3] = 1.0
+    d7.assign_wall("left", w7)
+    d7.edit_wall("left")
+    _MUT_REV[0] += 1
+    assert composite_lit(d7)[90, 10, 0] > 0.7, \
+        "an open wall paints flat, it does not also tint the room"
+
+    eng = open(os.path.join(os.path.dirname(__file__), "..", "src",
+                            "lestudio", "__init__.py")).read()
+    assert "_wall_transmission" in eng and "shade = shade * wt" in eng, \
+        "transmission MULTIPLIES -- filtered light, not paint on top"
+    assert "def _wall_bounce" in eng, \
+        "ambient bounce stays: a room has both"
+    assert "def stack_height" in eng and "def set_wall_scale" in eng
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html")).read()
+    assert "wscale" in ui and "action:'scale'" in ui
+
+
+def test_wall_ux_sweep():
+    """UX sweep of the walls feature, plus Devin: 'the UI for the walls
+    is kind of in the way of the more common layer property settings.'
+
+    PLACEMENT. "Walls (the room)" sat between the layer LIST and
+    Blend/Opacity/Thickness -- four rows of a feature most documents
+    never touch, standing in front of the ones every document uses. It
+    now sits BELOW the selected-layer controls and joins the
+    closed-by-default set, so the panel's resting state is the common
+    case and the room is one click away.
+
+    DISCOVERABILITY, found by the sweep: a layer assigned to a wall
+    LEAVES THE PICTURE -- it lights the room from outside -- and the
+    layer list said nothing about it. That reads as "my layer
+    vanished", which is exactly the complaint the lock badge was added
+    for. The row now carries a side glyph and an explanation. (The
+    badge is a separate span, not appended into the name: writing into
+    the name node is how a previous badge got wiped by textContent.)
+
+    The edge cases below were all exercised and all already correct;
+    they are pinned so the feature cannot quietly lose them."""
+    import warnings
+    warnings.filterwarnings("ignore")
+    from lestudio import composite_lit, _MUT_REV
+
+    # a layer stands on exactly one wall
+    d = Document(160, 120)
+    w = d.add_layer("p").id
+    d.assign_wall("left", w)
+    d.assign_wall("right", w)
+    assert d.walls["left"] is None and d.walls["right"] == w
+
+    # deleting the layer clears the slot
+    d.remove_layer(w)
+    assert all(v is None for v in d.walls.values())
+
+    # assigning is undoable
+    d3 = Document(160, 120)
+    w3 = d3.add_layer("q").id
+    d3.assign_wall("left", w3)
+    d3.undo()
+    assert d3.walls.get("left") is None, "assigning a wall is undoable"
+
+    # four walls at once render finite
+    d4 = Document(200, 150)
+    for s in ("left", "right", "back", "front"):
+        l = d4.add_layer(s).id
+        q = d4.layer(l).pixels
+        q[..., :3] = 0.5
+        q[..., 3] = 1.0
+        d4.edit_layer(l, thickness=2.0, vol_kind="glass")
+        d4.assign_wall(s, l)
+    _MUT_REV[0] += 1
+    assert bool(np.isfinite(composite_lit(d4)).all()), \
+        "a full room composites cleanly"
+
+    # a wall layer keeps its own life: its medium still simulates
+    d5 = Document(160, 120)
+    w5 = d5.add_layer("ink").id
+    d5.layer(w5).pixels[...] = 0.0
+    d5.edit_layer(w5, thickness=8.0, vol_kind="inkwater")
+    d5.paint(w5, [(80.0, 60.0)], color=(0.1, 0.1, 0.7), radius=8)
+    d5.assign_wall("left", w5)
+    n0 = int((d5.layer(w5).pixels[..., 3] > 0.05).sum())
+    d5.set_frame(20.0)
+    assert int((d5.layer(w5).pixels[..., 3] > 0.05).sum()) > n0, \
+        "assigning a layer to a wall does not freeze its simulation"
+
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html")).read()
+    # the walls group is closed by default and BELOW the common controls
+    assert "'Walls (the room)'" in ui and "GROUPS_DEFAULT_CLOSED" in ui
+    sel_i = ui.find('<div class="subh">Selected layer</div>')
+    wall_i = ui.find('>Walls (the room)</div>')
+    assert sel_i > 0 and wall_i > sel_i, \
+        "the room sits below the selected-layer controls, not above them"
+    # the vanished-layer badge
+    assert 'class="stat statwall"' in ui and "lights the room from outside" in ui
+    assert "wb.textContent=" in ui, \
+        "the badge is its own span, not written into the layer name"
+
+
+def test_wall_layers_leave_the_floor():
+    """Devin, with a screenshot: 'there is embossing from the wall layer
+    that shouldn't exist. The blue wiggly line should just be getting
+    projected like stained glass, or causing a shadow like paper.'
+
+    TWO BUGS, both of them the same mistake in different places: a
+    layer standing on a wall was still being treated as canvas content.
+
+    1. THE HEIGHT FIELD. _doc_surface, _doc_emission, _light_gel and
+       _doc_caustics all walked every optically active layer, wall or
+       not. A 6-unit sheet on the back wall still raised the canvas
+       surface to 7.0, so the strokes painted on it came back as
+       embossed ridges casting shadows across the floor -- on top of
+       the light they were supposed to be projecting. That is the
+       embossing in the screenshot. All four now ask _on_floor().
+
+    2. THE FLAT COMPOSITE. Document.composite() correctly used
+       canvas_layers(), but the server's DOWNSCALED display path --
+       the one an artist actually looks at -- passed the raw
+       DOC.layers, so the wall's paint was drawn flat on the picture
+       AND projected as light: the same strokes twice.
+
+    The side OPEN FOR PAINTING stays on the floor in both cases,
+    because it is lying flat by definition; that is what makes Edit
+    work with every ordinary tool."""
+    import warnings
+    warnings.filterwarnings("ignore")
+    from lestudio import (_doc_surface, composite_lit, _MUT_REV,
+                          _on_floor)
+
+    d = Document(200, 150)
+    bgl = d.layers[0].id
+    d.layer(bgl).pixels[..., :3] = 0.85
+    d.layer(bgl).pixels[..., 3] = 1.0
+    w = d.add_layer("pane").id
+    p = d.layer(w).pixels
+    p[40:60, 40:160, :3] = np.array([0.2, 0.4, 0.9], np.float32)
+    p[40:60, 40:160, 3] = 1.0
+    d.edit_layer(w, thickness=6.0, vol_kind="glass")
+
+    on_canvas = float(_doc_surface(d).max())
+    assert on_canvas > 5.0, "on the canvas it is a real sheet"
+    d.assign_wall("back", w)
+    _MUT_REV[0] += 1
+    assert float(_doc_surface(d).max()) < 2.0, \
+        "a wall must not emboss the floor it lights"
+    assert not _on_floor(d, d.layer(w))
+
+    # ...but it still lights the room
+    d.add_light(kind="directional", azimuth=0, elevation=45,
+                intensity=1.2)
+    _MUT_REV[0] += 1
+    lit = composite_lit(d)
+    bare = Document(200, 150)
+    bare.layer(bare.layers[0].id).pixels[..., :3] = 0.85
+    bare.layer(bare.layers[0].id).pixels[..., 3] = 1.0
+    bare.add_light(kind="directional", azimuth=0, elevation=45,
+                   intensity=1.2)
+    _MUT_REV[0] += 1
+    assert float(np.abs(lit - composite_lit(bare)).max()) > 0.02, \
+        "it still projects light, it just does not stand on the floor"
+
+    # open for painting: flat again, and back on the floor
+    d.edit_wall("back")
+    _MUT_REV[0] += 1
+    assert float(_doc_surface(d).max()) > 5.0, \
+        "an open wall lies flat and behaves like any other layer"
+    assert _on_floor(d, d.layer(w))
+    d.edit_wall(None)
+
+    # the DISPLAY path must agree with the flat one
+    from lestudio.server import app, WS
+    import lestudio as _L
+    c = app.test_client()
+    assert c.post("/api/new", json={"name": "wf", "width": 240,
+                                    "height": 180}).json["ok"]
+    mine = WS.active
+    lid = c.post("/api/layer", json={"action": "add",
+                                     "name": "pane"}).json["id"]
+    lay = WS.doc.layer(lid)
+    lay.pixels[40:70, 40:200, :3] = np.array([0.2, 0.4, 0.9], np.float32)
+    lay.pixels[40:70, 40:200, 3] = 1.0
+    c.post("/api/layer", json={"action": "edit", "id": lid,
+                               "thickness": 6.0})
+    _L._MUT_REV[0] += 1
+
+    def blueness():
+        import io
+        from PIL import Image as _I
+        resp = c.get("/api/composite.png?maxw=240")
+        a = np.asarray(_I.open(io.BytesIO(resp.data)).convert("RGB"),
+                       float) / 255
+        return float(a[55, 120, 2] - a[55, 120, 0])
+
+    assert blueness() > 0.3, "on the canvas the stroke is drawn"
+    c.post("/api/wall", json={"action": "assign", "side": "back",
+                              "layer": lid})
+    _L._MUT_REV[0] += 1
+    assert blueness() < 0.05, \
+        "on a wall it leaves the picture -- the downscaled display " \
+        "path had the raw layer list and drew it anyway"
+    c.post("/api/wall", json={"action": "edit", "side": "back"})
+    _L._MUT_REV[0] += 1
+    assert blueness() > 0.3, "open for painting, it is flat again"
+    WS.close(mine)
+
+    srv = open(os.path.join(os.path.dirname(__file__), "..", "src",
+                            "lestudio", "server.py")).read()
+    assert "composite_display(DOC.canvas_layers()" in srv, \
+        "the display path must not use the raw layer list"
+    eng = open(os.path.join(os.path.dirname(__file__), "..", "src",
+                            "lestudio", "__init__.py")).read()
+    assert eng.count("_on_floor(doc, l)") >= 4, \
+        "every floor pass shares one predicate"
