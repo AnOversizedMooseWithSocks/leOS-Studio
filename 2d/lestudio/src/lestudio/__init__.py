@@ -259,6 +259,22 @@ def _rgb(img):
     return np.clip(a, 0.0, 1.0)
 
 
+def _gauss_blur_reflect(img, sigma, pad=8):
+    """Gaussian blur with REFLECT boundaries. _gauss_blur is an FFT --
+    circular convolution -- so blurring a height field coupled the
+    canvas's opposite edges: painting impasto at the right edge subtly
+    changed the LEFT edge's lighting, and the window-patch cache could
+    never agree with a full recompute. Reflect-pad, blur, crop."""
+    a = _f32(img)
+    single = a.ndim == 2
+    if single:
+        a = a[:, :, None]
+    p = int(max(2, pad))
+    ap = np.pad(a, ((p, p), (p, p), (0, 0)), mode="reflect")
+    out = _gauss_blur(ap, sigma)[p:-p, p:-p]
+    return out[..., 0] if single else out
+
+
 def _gauss_blur(img, sigma):
     """Separable Gaussian by FFT per channel -- the spectral blur the postfx algebra fuses."""
     if sigma <= 0:
@@ -277,6 +293,9 @@ def _gauss_blur(img, sigma):
     return out[:, :, 0] if single else out
 
 
+_RESIZE_TAB = {}
+
+
 def _resize(img, h, w):
     """Bilinear resample to (h, w) -- used to conform node inputs to the document size."""
     a = _f32(img)
@@ -286,16 +305,66 @@ def _resize(img, h, w):
     H, W = a.shape[:2]
     if (H, W) == (h, w):
         return a[:, :, 0] if single else a
-    ys = np.linspace(0, H - 1, h)
-    xs = np.linspace(0, W - 1, w)
-    y0 = np.floor(ys).astype(int); y1 = np.minimum(y0 + 1, H - 1); fy = (ys - y0)[:, None, None]
-    x0 = np.floor(xs).astype(int); x1 = np.minimum(x0 + 1, W - 1); fx = (xs - x0)[None, :, None]
+    # the sampling GRID depends only on the shapes, never on the pixels,
+    # yet it was rebuilt on every call -- and _resize sits under every
+    # media frame render (twice: density and dye), every node-input
+    # conform, mask fit, and FX upsample. Profiled at 1000x750 it was
+    # the single largest cost in a playback frame. Cache the tables.
+    ck = (H, W, h, w)
+    tab = _RESIZE_TAB.get(ck)
+    if tab is None:
+        ys = np.linspace(0, H - 1, h)
+        xs = np.linspace(0, W - 1, w)
+        y0 = np.floor(ys).astype(int)
+        y1 = np.minimum(y0 + 1, H - 1)
+        # keep the float64 weights: an existing pin requires this to be
+        # BIT-identical to the pre-separable algorithm, and casting the
+        # weights to float32 changes the arithmetic
+        fy = (ys - y0)[:, None, None]
+        x0 = np.floor(xs).astype(int)
+        x1 = np.minimum(x0 + 1, W - 1)
+        fx = (xs - x0)[None, :, None]
+        if len(_RESIZE_TAB) > 24:
+            _RESIZE_TAB.clear()
+        tab = _RESIZE_TAB[ck] = (y0, y1, fy, x0, x1, fx)
+    y0, y1, fy, x0, x1, fx = tab
     # bilinear is SEPARABLE: rows first, then columns -- the same sampling
     # grid and the same arithmetic, but two medium gathers instead of four
     # full-image ones. The old form profiled at 0.65 s per call at 1024x768
     # and sat on top of every node-input conform, mask fit, and FX upsample.
     rows = a[y0] * (1 - fy) + a[y1] * fy          # (h, W, C)
     out = rows[:, x0] * (1 - fx) + rows[:, x1] * fx
+    out = np.ascontiguousarray(out, np.float32)
+    return out[:, :, 0] if single else out
+
+
+def _resize_window(img, h, w, box):
+    """Bilinear resample to (h, w) but COMPUTE ONLY the output window
+    box=(y0, y1, x0, x1). Bilinear is separable and every output pixel
+    depends only on its own sample position, so slicing the cached
+    tables gives results BYTE-IDENTICAL to the full resize -- verified,
+    because a seam here would be exactly the kind of artifact this
+    round is meant to remove. Used by the media render, where the dye
+    occupies a fraction of the canvas for most of a simulation."""
+    a = _f32(img)
+    single = a.ndim == 2
+    if single:
+        a = a[:, :, None]
+    H, W = a.shape[:2]
+    y0b, y1b, x0b, x1b = box
+    _resize(a[:1, :1], 1, 1)              # ensure the table cache exists
+    ck = (H, W, h, w)
+    tab = _RESIZE_TAB.get(ck)
+    if tab is None:
+        _resize(a, h, w)
+        tab = _RESIZE_TAB[ck]
+    y0, y1, fy, x0, x1, fx = tab
+    ys0, ys1 = y0[y0b:y1b], y1[y0b:y1b]
+    fys = fy[y0b:y1b]
+    xs0, xs1 = x0[x0b:x1b], x1[x0b:x1b]
+    fxs = fx[:, x0b:x1b]
+    rows = a[ys0] * (1 - fys) + a[ys1] * fys
+    out = rows[:, xs0] * (1 - fxs) + rows[:, xs1] * fxs
     out = np.ascontiguousarray(out, np.float32)
     return out[:, :, 0] if single else out
 
@@ -465,6 +534,15 @@ def composite_display(layers, h, w, masks=None, max_w=None):
     # halve only while the result still has AT LEAST as many pixels as the
     # screen is showing -- never send the canvas fewer pixels than it displays
     if not max_w or (w >> 1) < max_w:
+        # Reduction is POWER-OF-TWO only, and that is deliberate. A 1200 px
+        # document in a 984 px pane therefore composites at full size, which
+        # looks like an obvious waste -- it is not. MEASURED: reducing every
+        # layer to 984 with the bilinear resampler and compositing there took
+        # 730 ms against 412 ms for the full-resolution composite. The
+        # halving path is cheap because _box_half is a strided mean; an
+        # arbitrary ratio needs a real resample of every layer, and five
+        # 1200x900x4 resamples cost more than the composite they save.
+        # Fidelity was fine (max 0.0001) -- it is purely a speed loss.
         return composite(layers, h, w, masks)
     # Reducing before compositing only commutes for the NORMAL blend. Measured
     # worst-case error of a half-reduction, per blend mode:
@@ -540,7 +618,7 @@ def _relief_shade(px, height, gloss=0.3, shin=16.0):
     # from a slightly smoothed surface. Raw mask edges made near-vertical
     # normals, and every stroke boundary inside a blob shaded as a hard dark
     # vein -- the "glitchy" creases in the user's screenshot.
-    smooth = _gauss_blur(height.astype(np.float32)[..., None], 1.4)[..., 0]
+    smooth = _gauss_blur_reflect(height.astype(np.float32), 1.4)
     gy, gx = np.gradient(smooth)
     nz = np.ones_like(height, np.float32)
     inv = 1.0 / np.sqrt(gx * gx + gy * gy + 1.0)
@@ -583,15 +661,39 @@ def _media_state(doc, l):
     """Per-layer persistent fluid: dye (RGB) + density + velocity on a
     capped grid. The state SURVIVES between strokes, so a second stroke
     stirs the water the first one set moving."""
-    gw = min(192, max(48, doc.width // 4))
+    # SIMULATION DETAIL is the artist's call, because it is a straight
+    # trade of fidelity against frame time. Measured at 1000x750 with
+    # the windowed render in place:
+    #   coarse  128 cells  ~11 ms/frame   7.8 canvas px per fluid cell
+    #   normal  192 cells  ~18 ms/frame   5.2 px per cell   (default)
+    #   fine    320 cells  ~45 ms/frame   3.1 px per cell
+    # Fine roughly halves the cell size -- visibly finer filaments --
+    # for about 2.5x the cost. Nobody is forced to pay it.
+    div, cap = {"coarse": (6, 128), "fine": (3, 320)}.get(
+        str(getattr(l, "media_res", "normal")), (4, 192))
+    gw = min(cap, max(48, doc.width // div))
     gh = max(36, int(round(gw * doc.height / max(doc.width, 1))))
     st = getattr(l, "_media", None)
-    if st is None or st["den"].shape != (gh, gw):
+    if st is None:
         st = {"den": np.zeros((gh, gw), np.float32),
               "dye": np.zeros((gh, gw, 3), np.float32),
               "vx": np.zeros((gh, gw), np.float32),
               "vy": np.zeros((gh, gw), np.float32)}
         l._media = st
+    elif st["den"].shape != (gh, gw):
+        # RESAMPLE, never wipe: changing the detail (or resizing the
+        # document) used to silently zero the medium -- an artist's
+        # swirling ink vanished on a settings change. Carry the state
+        # across; velocity scales with the new cell size.
+        oh, ow = st["den"].shape
+        sx, sy = gw / float(ow), gh / float(oh)
+        st = {"den": _resize(st["den"][..., None], gh, gw)[..., 0],
+              "dye": _resize(st["dye"], gh, gw),
+              "vx": _resize(st["vx"][..., None], gh, gw)[..., 0] * sx,
+              "vy": _resize(st["vy"][..., None], gh, gw)[..., 0] * sy}
+        l._media = st
+        l._media_frame_cache = {}      # cached states are the old shape
+        l._media_win = None
     return st, gh, gw
 
 
@@ -614,10 +716,181 @@ def _media_inject(doc, l, x0, y0, x1, y1, strength=1.0):
     ga = ga * float(strength)
     st["den"] = np.clip(st["den"] + ga, 0.0, 2.0)
     st["dye"] = st["dye"] + gc * ga[..., None]
-    rng = np.random.default_rng((hash(l.id) + _MUT_REV[0]) & 0x7fffffff)
+    # STABLE seed: Python's hash() of a str is salted PER PROCESS, so
+    # this turbulence differed between app launches for the same
+    # document and the same actions -- media replays were only
+    # reproducible within one run. crc32 is the same everywhere.
+    import zlib as _zlib
+    # seed by a PER-LAYER INJECTION COUNTER, not the global revision:
+    # _MUT_REV differs between otherwise-identical documents (and
+    # between replays of the same document), so the same stroke got
+    # different turbulence -- an invisible reproducibility leak that
+    # also invalidated a batch-vs-singles purity experiment.
+    n = int(getattr(l, "_media_inject_n", 0))
+    l._media_inject_n = n + 1
+    rng = np.random.default_rng(
+        (_zlib.crc32(l.id.encode()) ^ (n * 2654435761)) & 0x7fffffff)
     kick = (rng.random((gh, gw)) - 0.5).astype(np.float32) * 2.0
     st["vx"] += kick * ga * 1.5
     st["vy"] += np.abs(kick) * ga * -0.5
+    # fresh dye changes all FUTURE evolution: drop cached states past
+    # the current frame and baseline the cache here, so a later rewind
+    # lands on the world as it was when this stroke went in
+    # T6: a stroke does NOT reset the medium's clock. Injection used to
+    # write marks=[(now, 0.0)] and wipe the cache, so every stroke threw
+    # away the accumulated time and every earlier state -- scrubbing back
+    # after a new stroke could not restore what the ink had been doing,
+    # and the medium's elapsed time silently jumped to zero. Keep the
+    # accumulated fractional steps, invalidate only the FUTURE, and
+    # rebaseline the cache at where we actually are.
+    # a stroke writes CRISP pixels directly, outside the render's dirty
+    # window bookkeeping. Drop the window so the next render clears the
+    # whole layer once and re-establishes the invariant 'pixels = the
+    # slab render, everything else zero'. Without this, whether a stale
+    # painted region survived depended on the scrub PATH -- the same
+    # frame reached two ways differed.
+    l._media_win = None
+    now = float(getattr(doc, "frame", 0.0))
+    marks = getattr(l, "_media_marks", None)
+    if marks:
+        i = len(marks) - 1
+        while i > 0 and marks[i][0] > now + 1e-9:
+            i -= 1
+        f0, s0 = marks[i]
+        rate = float(getattr(l, "media_rate", 1.0))
+        tmul = float(getattr(doc, "time_scale", 1.0))
+        here = max(0.0, s0 + max(0.0, now - f0) * rate * 0.8 * tmul)
+    else:
+        here = 0.0
+    l._media_marks = [(now, here)]
+    cache = getattr(l, "_media_frame_cache", None) or {}
+    step = int(round(here))
+    # the new dye invalidates every FUTURE state; the past is gone too
+    # (it was a different world), but this step is the truth right now
+    l._media_frame_cache = {}
+    _media_cache_put(doc, l, step)
+
+
+def _layer_fields_grid(doc, l, gh, gw):
+    """Sum a layer's FIELD OBJECTS into force components on the media
+    grid. Returns (fx, fy) arrays or None. Point fields push away from
+    (or toward, negative strength) their centre inside their radius;
+    direct pushes uniformly along its angle; vortex swirls about the
+    centre. Falloff is a smooth quadratic to the radius edge."""
+    fs = [f for f in getattr(doc, "fields", [])
+          if f.get("layer") == l.id]
+    if not fs:
+        return None
+    h, w = doc.height, doc.width
+    yy, xx = np.mgrid[0:gh, 0:gw].astype(np.float32)
+    X = (xx + 0.5) * (w / gw)
+    Y = (yy + 0.5) * (h / gh)
+    fx = np.zeros((gh, gw), np.float32)
+    fy = np.zeros((gh, gw), np.float32)
+    for f in fs:
+        dx = X - float(f["x"])
+        dy = Y - float(f["y"])
+        r = np.sqrt(dx * dx + dy * dy)
+        R = max(float(f["radius"]), 8.0)
+        fall = np.clip(1.0 - (r / R) ** 2, 0.0, 1.0)
+        # sign convention, second visit: the original negation was
+        # tuned under the PERIODIC solve; with the reflective wall
+        # band feeding the global pressure projection, the effective
+        # response flipped back. Empirical ground truth (pinned in the
+        # fields test): positive strength pushes along the angle.
+        # 30 -> 105 for leCore 0.2.9's WALL boundary. This is physics,
+        # not tuning: in a SEALED box a uniform body force is balanced
+        # by the pressure gradient, so the same dial that moved a blob
+        # 120 -> 201 on the periodic solver moved it only 120 -> 132.
+        # The field now circulates the medium rather than sliding it
+        # off-canvas, which is correct -- but the dial has to be
+        # rescaled so a given strength still means what it meant to the
+        # artist. Measured: x3.5 restores the old response.
+        s = float(f["strength"]) * 105.0
+        if f["kind"] == "direct":
+            a = np.deg2rad(float(f.get("angle", 0.0)))
+            fx += np.cos(a) * s * fall
+            fy += np.sin(a) * s * fall
+        elif f["kind"] == "vortex":
+            nr = np.maximum(r, 1e-3)
+            fx += (-dy / nr) * s * fall
+            fy += (dx / nr) * s * fall
+        else:  # point
+            nr = np.maximum(r, 1e-3)
+            fx += (dx / nr) * s * fall
+            fy += (dy / nr) * s * fall
+    return fx, fy
+
+
+def _apply_point_fields(doc, l, st, gh, gw, steps):
+    """Point (radial) fields CANNOT act through the solver force path:
+    a radial push is pure divergence and the incompressible pressure
+    projection cancels it exactly (watched it do nothing while vortex
+    -- pure curl -- and direct -- uniform -- worked fine). So point
+    fields displace the density and dye directly: a small
+    semi-Lagrangian warp along the radial map per step, outside the
+    projection. strength>0 repels, <0 attracts."""
+    fs = [f for f in getattr(doc, "fields", [])
+          if f.get("layer") == l.id and f.get("kind") == "point"
+          and abs(float(f.get("strength", 0.0))) > 1e-6]
+    if not fs:
+        return
+    h, w = doc.height, doc.width
+    yy, xx = np.mgrid[0:gh, 0:gw].astype(np.float32)
+    X = (xx + 0.5) * (w / gw)
+    Y = (yy + 0.5) * (h / gh)
+    ox = np.zeros((gh, gw), np.float32)
+    oy = np.zeros((gh, gw), np.float32)
+    for f in fs:
+        dx = X - float(f["x"])
+        dy = Y - float(f["y"])
+        r = np.sqrt(dx * dx + dy * dy)
+        R = max(float(f["radius"]), 8.0)
+        fall = np.clip(1.0 - (r / R) ** 2, 0.0, 1.0)
+        nr = np.maximum(r, 1e-3)
+        # per-iteration displacement, capped below one cell for
+        # bilinear stability (1.4-cell hops still bled mass)
+        # 0.55 -> 0.85 per iteration (still under one cell, the
+        # bilinear-stability limit). leCore 0.2.9's wall boundary and the
+        # reflect-padded blur changed how fast the medium spreads on its
+        # own, and at 0.55 an ATTRACT field no longer out-pulled that
+        # spread -- the blob ended 3.6%% wider than the control instead
+        # of tighter.
+        k = float(np.clip(f["strength"] * 0.85, -0.9, 0.9))
+        ox += (dx / nr) * fall * k * (gw / w)
+        oy += (dy / nr) * fall * k * (gh / h)
+    # ITERATIVE small steps: one huge displacement made attract sample
+    # from beyond the field edge (empty cells) and the dye vanished --
+    # advect gently, several times
+    iters = max(1, min(int(steps), 12))
+    # sample upstream: value at p comes from p - offset
+    sx = np.clip(xx - ox, 0, gw - 1.001)
+    sy = np.clip(yy - oy, 0, gh - 1.001)
+    x0 = sx.astype(np.int32); y0 = sy.astype(np.int32)
+    fx_ = sx - x0; fy_ = sy - y0
+    x1 = np.minimum(x0 + 1, gw - 1); y1 = np.minimum(y0 + 1, gh - 1)
+
+    def samp(A):
+        if A.ndim == 2:
+            return (A[y0, x0] * (1 - fx_) * (1 - fy_)
+                    + A[y0, x1] * fx_ * (1 - fy_)
+                    + A[y1, x0] * (1 - fx_) * fy_
+                    + A[y1, x1] * fx_ * fy_)
+        return np.stack([samp(A[..., c]) for c in range(A.shape[-1])], -1)
+
+    for _ in range(iters):
+        # MASS CONSERVATION PER ITERATION: inward sampling compresses
+        # density into few texels and bilinear + clipping quietly loses
+        # it (a strong attract once left ZERO alpha; a single post-loop
+        # rescale capped at 4x could not recover a 22x loss)
+        s0 = float(st["den"].sum())
+        st["den"] = samp(st["den"]).astype(np.float32)
+        st["dye"] = samp(st["dye"]).astype(np.float32)
+        s1 = float(st["den"].sum())
+        if s1 > 1e-6 and s0 > 1e-6:
+            k2 = min(s0 / s1, 2.0)
+            st["den"] = np.clip(st["den"] * k2, 0.0, 2.0)
+            st["dye"] = st["dye"] * k2
 
 
 def _media_slab_step(doc, l, steps):
@@ -669,9 +942,23 @@ def _media_slab_step(doc, l, steps):
         fgxr = _resize(lfld[1][..., None], gh, gw)[..., 0]
         fgyr = _resize(lfld[2][..., None], gh, gw)[..., 0]
         lfld = (F0r, fgxr, fgyr, gw, gh)
+    objf = _layer_fields_grid(doc, l, gh, gw)
+    _apply_point_fields(doc, l, st, gh, gw, steps)
+    # THE CANVAS EDGES ARE WALLS -- now enforced INSIDE the solver.
+    # leCore 0.2.9 added boundary="wall" (our P3): a Neumann pressure
+    # projection on a mirrored domain, so zero normal flow is a property
+    # of the projection rather than a patch applied after it. That
+    # replaced ~30 lines here that rewrote the outer 4 cells as a
+    # mirrored band every iteration. Measured on the new solver: 100% of
+    # the mass is kept when flow is driven into a wall, against 0% for
+    # our band and 5% for the old solid-mask workaround.
     for _ in range(max(1, int(steps))):
         fx = curl[0][cgy, cgx] * swirl
         fy = curl[1][cgy, cgx] * swirl * 0.6 + buoy * st["den"]
+        if objf is not None:
+            # field OBJECTS parented to this layer join the solve
+            fx = fx + objf[0]
+            fy = fy + objf[1]
         if geo_fx is not None:
             fx = fx + geo_fx * st["den"]
             fy = fy + geo_fy * st["den"]
@@ -679,23 +966,59 @@ def _media_slab_step(doc, l, steps):
             # the layer's own field herds its MEDIUM: ink drawn to a mask,
             # smoke fenced inside a selection, fire pulled along a stroke
             F0, fgx, fgy, _, _ = lfld
+            # signs flipped with the reflective-wall regime: the wall
+            # band feeding the global pressure projection reversed the
+            # effective force response (see the object-field note)
             if lmode == "repel":
-                fx = fx - fgx * lstr
-                fy = fy - fgy * lstr
-            elif lmode == "flow":
-                fx = fx + -fgy * lstr
-                fy = fy + fgx * lstr
-            elif lmode == "contain":
-                oa = np.clip(0.85 - F0, 0.0, 1.0) * 2.2
-                fx = fx + fgx * lstr * oa
-                fy = fy + fgy * lstr * oa
-            else:
                 fx = fx + fgx * lstr
                 fy = fy + fgy * lstr
+            elif lmode == "flow":
+                fx = fx + fgy * lstr
+                fy = fy + -fgx * lstr
+            elif lmode == "contain":
+                # contain goes through the DISPLACEMENT WARP, not the
+                # force path: under the reflective-wall regime the
+                # pressure projection ate the containment force from
+                # either sign (measured 0.22 and 0.01 in-region vs
+                # 0.41 free). Like the point fields, a direct
+                # semi-Lagrangian nudge of den/dye toward the region
+                # is immune to the projection.
+                oa = np.clip(0.85 - F0, 0.0, 1.0)
+                # 0.8 -> 1.3: with leCore 0.2.9's wall boundary the
+                # medium no longer bleeds off the canvas, so a firmer
+                # containment nudge stays inside the picture. At 0.8 the
+                # in-region share was +0.089 over the free control --
+                # right on the pin's 0.08 margin.
+                k = min(lstr, 600.0) / 600.0 * 1.3
+                # sampling at p-ox moves content ALONG +ox (see the
+                # point-field warp): offset points INTO the region
+                ox = fgx * oa * k
+                oy = fgy * oa * k
+                _yy, _xx = np.mgrid[0:gh, 0:gw].astype(np.float32)
+                sx_ = np.clip(_xx - ox, 0, gw - 1.001)
+                sy_ = np.clip(_yy - oy, 0, gh - 1.001)
+                x0_ = sx_.astype(np.int32)
+                y0_ = sy_.astype(np.int32)
+                fx_ = sx_ - x0_
+                fy_ = sy_ - y0_
+                x1_ = np.minimum(x0_ + 1, gw - 1)
+                y1_ = np.minimum(y0_ + 1, gh - 1)
+
+                def _sampc(A):
+                    if A.ndim == 2:
+                        return (A[y0_, x0_] * (1 - fx_) * (1 - fy_)
+                                + A[y0_, x1_] * fx_ * (1 - fy_)
+                                + A[y1_, x0_] * (1 - fx_) * fy_
+                                + A[y1_, x1_] * fx_ * fy_)
+                    return np.stack([_sampc(A[..., c])
+                                     for c in range(A.shape[-1])], -1)
+                st["den"] = _sampc(st["den"]).astype(np.float32)
+                st["dye"] = _sampc(st["dye"]).astype(np.float32)
+            else:
+                fx = fx - fgx * lstr
+                fy = fy - fgy * lstr
         try:
-            vx, vy, den = m.fluid_step(st["vx"], st["vy"], st["den"],
-                                       dt=0.06, viscosity=visc,
-                                       fx=fx, fy=fy)
+            vx, vy, den = _fluid_step_walled(m, st, visc, fx, fy)
         except Exception:
             vx = st["vx"] + fx * 0.06
             vy = st["vy"] + fy * 0.06
@@ -704,20 +1027,316 @@ def _media_slab_step(doc, l, steps):
                               np.asarray(vy, np.float32))
         st["den"] = np.clip(np.asarray(den, np.float32), 0.0, 2.0) * diss
         try:
-            for c in range(3):
-                st["dye"][..., c] = np.asarray(
-                    m.advect_field(st["dye"][..., c], st["vx"], st["vy"],
-                                   dt=0.06), np.float32)
+            # one (H, W, 3) advect instead of three scalar calls (P2),
+            # with WALL boundaries so the dye is contained like the
+            # density. The mind() facade does not forward `boundary`, so
+            # go to the field module directly when it is importable and
+            # fall back to the facade otherwise -- without this the
+            # velocity respected the walls but the COLOUR still wrapped
+            # (measured: 73.8 units of ink reappearing on the far edge).
+            st["dye"] = np.asarray(
+                _advect_walled(m, st["dye"], st["vx"], st["vy"], 0.06,
+                               roi=_media_active_roi(st, st["vx"],
+                                                     st["vy"], 0.06)),
+                np.float32)
         except Exception:
             pass
         st["dye"] *= dyediss
         if kind == "inkwater":
             # molecular diffusion: ink TENDRILS soften and creep even where
             # the flow is still
-            st["den"] = _gauss_blur(st["den"][..., None], 0.55)[..., 0]
-            st["dye"] = _gauss_blur(st["dye"], 0.55)
-    den = _resize(st["den"][..., None], doc.height, doc.width)[..., 0]
-    dye = _resize(st["dye"], doc.height, doc.width)
+            # _gauss_blur is an FFT, i.e. CIRCULAR convolution: with the
+            # solver's walls now doing their job, this was the last path
+            # that still wrapped, bleeding a faint 73-unit ghost of the
+            # ink onto the opposite edge. Reflect-pad by 3 sigma, blur,
+            # crop -- a mirrored border is exactly the no-flux condition
+            # the wall boundary enforces elsewhere.
+            st["den"] = _gauss_blur_reflect(st["den"], 0.55)
+            st["dye"] = _gauss_blur_reflect(st["dye"], 0.55)
+    _media_render(doc, l, st, kind)
+
+
+def cook_until_settled(doc, layer=None, block=8, max_steps=320):
+    """Cook a medium until it SETTLES, instead of guessing a step count.
+
+    Cook(+24/+96) makes the artist estimate how long a simulation needs
+    to look right, which is a question the simulation can answer itself.
+    leCore 0.2.9's HRNN ships regime detection; run it on the medium's
+    own change-per-step signal and stop when that signal has entered a
+    final, low, stable regime.
+
+    Returns {cooked, steps, settled, why} -- `settled` False with a
+    reason when it hit the cap instead, because "we stopped because you
+    told us to stop" and "we stopped because it stopped moving" are
+    different facts and an artist deserves to know which one happened.
+    """
+    m = mind()
+    out = []
+    for l in doc.layers:
+        if getattr(l, "vol_kind", "none") not in _MEDIA_KINDS:
+            continue
+        if layer is not None and l.id != layer:
+            continue
+        if getattr(l, "_media", None) is None:
+            continue
+        deltas = []
+        done = 0
+        settled = False
+        why = "reached the step cap without settling"
+        prev = np.array(l._media["den"], copy=True)
+        while done < max_steps:
+            _media_slab_step(doc, l, block)
+            done += block
+            cur = l._media["den"]
+            deltas.append(float(np.abs(cur - prev).mean()))
+            prev = np.array(cur, copy=True)
+            if len(deltas) < 6:
+                continue
+            try:
+                segs = m.detect_regimes(np.asarray(deltas, np.float64),
+                                        min_seg=3)["segments"]
+            except Exception:
+                break                      # no regime faculty: cap rules
+            if len(segs) < 2:
+                continue
+            first, last = segs[0]["mean"], segs[-1]["mean"]
+            # settled = the change per step has entered a final regime an
+            # order quieter than the opening one, and has STAYED there
+            # for more than one block (a single quiet block is noise)
+            if (last < first * 0.15
+                    and segs[-1]["length"] >= 2
+                    and segs[-1]["stop"] >= len(deltas)):
+                settled = True
+                why = ("change per step fell to %.0f%% of its opening "
+                       "rate and held" % (100.0 * last / max(first, 1e-12)))
+                break
+        now = float(getattr(doc, "frame", 0.0))
+        l._media_marks = [(now, 0.0)]
+        l._media_frame_cache = {}
+        l._media_win = None
+        _media_cache_put(doc, l, 0)
+        out.append({"layer": l.id, "steps": done, "settled": settled,
+                    "why": why})
+    _MUT_REV[0] += 1
+    return {"cooked": len(out), "layers": out}
+
+
+def cook_media(doc, steps=24, layer=None):
+    """Let a simulation COOK: advance its media by `steps` solver steps
+    WITHOUT moving the playhead.
+
+    Devin: 'sometimes we don't want to start a timeline until a
+    simulation or effect has had time to cook a bit first.' A puff of
+    smoke at frame 0 is a hard-edged blob; what an artist wants at
+    frame 0 is smoke that has already been drifting for a while. This
+    bakes that settling in as the layer's new starting state -- the
+    cooked state becomes step 0 at the CURRENT frame, so scrubbing
+    forward evolves from it and scrubbing back does not undo it.
+
+    Returns the number of layers cooked."""
+    n = 0
+    for l in doc.layers:
+        if getattr(l, "vol_kind", "none") not in _MEDIA_KINDS:
+            continue
+        if layer is not None and l.id != layer:
+            continue
+        if getattr(l, "_media", None) is None:
+            continue          # nothing injected yet: nothing to cook
+        _media_slab_step(doc, l, max(1, min(int(steps), 240)))
+        now = float(getattr(doc, "frame", 0.0))
+        l._media_marks = [(now, 0.0)]     # the cooked state IS the start
+        l._media_frame_cache = {}
+        l._media_win = None
+        _media_cache_put(doc, l, 0)
+        n += 1
+    _MUT_REV[0] += 1
+    return n
+
+
+def _media_cache_put(doc, l, step):
+    """Remember this layer's slab state keyed by ABSOLUTE STEP COUNT
+    from the injection baseline. Keying by frames made scrub and jump
+    disagree at rounding boundaries; keying by steps makes state a
+    pure function of total_steps(t). Grids are coarse (<=96x96): a
+    generous cache is a few MB."""
+    st = getattr(l, "_media", None)
+    if st is None:
+        return
+    cache = getattr(l, "_media_frame_cache", None)
+    if cache is None:
+        cache = l._media_frame_cache = {}
+    s = int(step)
+    cache[s] = {k: np.array(st[k], copy=True)
+                for k in ("den", "dye", "vx", "vy") if k in st}
+    l._media_cache_at = s
+    # size the cache by MEMORY, not by an arbitrary count: a coarse
+    # state is 288 KB and a fine one 1.8 MB, so a flat 48 entries meant
+    # 14 MB or 86 MB depending on a setting the artist chose for a
+    # different reason entirely. ~48 MB buys ~166 coarse / ~74 normal /
+    # ~27 fine states -- enough that an ordinary 96-frame range replays
+    # almost entirely from cache at normal detail.
+    st0 = cache.get(s) or next(iter(cache.values()), None)
+    per = sum(a.nbytes for a in st0.values()) if st0 else (1 << 20)
+    CAP = int(np.clip((48 << 20) // max(per, 1), 24, 240))
+    if len(cache) > CAP:
+        # STRIDED retention. The old policy kept the HIGHEST steps, so
+        # replaying a range evicted each freshly-computed early step
+        # the instant it was stored: every frame re-solved from step 0
+        # and replay was O(n^2) -- measured only 2.2x faster than the
+        # first pass despite a full cache. Keep step 0, the newest few
+        # (scrubbing is usually local), and an evenly spaced spread
+        # over everything else, so ANY target is a few steps from a
+        # cached state.
+        steps = sorted(cache.keys())
+        newest = steps[-12:]
+        rest = [s for s in steps[:-12] if s != 0]
+        room = CAP - len(newest) - 1
+        if len(rest) > room and room > 0:
+            idx = np.linspace(0, len(rest) - 1, room).round()
+            rest = [rest[int(i)] for i in sorted(set(idx.tolist()))]
+        keep = set(rest) | set(newest) | {0}
+        for k in [k for k in cache.keys() if k not in keep]:
+            del cache[k]
+
+
+def _media_restore_to_step(doc, l, step):
+    """Restore the newest cached slab state at or before `step` and
+    re-render pixels; l._media_cache_at records where we are (the
+    caller advances any remainder)."""
+    cache = getattr(l, "_media_frame_cache", None) or {}
+    eligible = [s for s in cache.keys() if s <= int(step)]
+    if not eligible:
+        l._media_cache_at = None
+        return False
+    s = max(eligible)
+    st, gh, gw = _media_state(doc, l)
+    for k, v in cache[s].items():
+        st[k] = np.array(v, copy=True)
+    # bump BEFORE rendering: the render patches the composite cache and
+    # marks it current, so any bump AFTER it left the cache one
+    # revision behind -- and the very next patch attempt was rejected
+    # as stale, which is why playback still paid a full re-composite
+    # every frame despite the patching path existing.
+    _MUT_REV[0] += 1
+    l._media_cache_at = s
+    _media_render(doc, l, st)
+    return True
+
+
+def _media_active_roi(st, vx, vy, dt, margin_extra=2):
+    """The window the dye can possibly occupy after this step: the cells
+    that hold anything now, grown by how far the flow can carry them
+    (max|v|*dt) plus a cell for the bilinear tap. Outside it the field is
+    zero and stays zero, so advecting only this window is EXACT, not an
+    approximation -- leCore 0.2.9's roi= (our P4) makes it expressible."""
+    gh, gw = st["den"].shape
+    occ = (st["den"] > 1e-4) | (np.abs(st["dye"]).max(-1) > 1e-4)
+    if not occ.any():
+        return None
+    ys, xs = np.where(occ)
+    reach = int(np.ceil(max(float(np.abs(vx).max()),
+                            float(np.abs(vy).max())) * abs(dt))) \
+        + int(margin_extra)
+    y0 = max(0, int(ys.min()) - reach); y1 = min(gh, int(ys.max()) + reach + 1)
+    x0 = max(0, int(xs.min()) - reach); x1 = min(gw, int(xs.max()) + reach + 1)
+    if (y1 - y0) * (x1 - x0) > 0.6 * gh * gw:
+        return None                      # most of the grid: no saving
+    return (y0, y1, x0, x1)
+
+
+_MEDIA_WALL_SOLVE = None
+
+
+def _fluid_step_walled(m, st, visc, fx, fy):
+    """fluid_step with WALL boundaries, degrading in STEPS rather than
+    all at once. boundary="wall" needs leCore >= 0.2.9; on an older core
+    that is a TypeError, and the single catch-all around this call
+    dropped straight to a forward-Euler nudge with no advection and no
+    projection -- the fluid solver would vanish silently rather than
+    merely lose its walls. Try walls, fall back to the periodic solve
+    (still a real solve), and only then let the caller's guard take
+    over. _MEDIA_WALL_SOLVE records which one we got, so 'why does my
+    ink wrap?' has an answer in the state instead of a shrug."""
+    global _MEDIA_WALL_SOLVE
+    if _MEDIA_WALL_SOLVE is not False:
+        try:
+            out = m.fluid_step(st["vx"], st["vy"], st["den"], dt=0.06,
+                               viscosity=visc, fx=fx, fy=fy,
+                               boundary="wall")
+            _MEDIA_WALL_SOLVE = True
+            return out
+        except TypeError:
+            _MEDIA_WALL_SOLVE = False      # old core: no boundary arg
+    return m.fluid_step(st["vx"], st["vy"], st["den"], dt=0.06,
+                        viscosity=visc, fx=fx, fy=fy)
+
+
+def _advect_walled(m, field, vx, vy, dt, roi=None):
+    """Advect with WALL boundaries, multi-channel in one call.
+
+    leCore 0.2.9 grew boundary="wall" and (H, W, C) support on advect,
+    but the mind() facade's advect_field still has the old
+    (field, vx, vy, dt) signature, so the new arguments are only
+    reachable on the module. Try that, and fall back to the facade
+    (wrap) if the module moves -- a contained medium is better than a
+    crash, and _MEDIA_WALL_OK records which path we got."""
+    global _MEDIA_WALL_OK
+    try:
+        from holographic.misc import holographic_fields as _HF
+        out = _HF.advect(field, vx, vy, dt, boundary="wall",
+                         roi=roi) if roi is not None else \
+            _HF.advect(field, vx, vy, dt, boundary="wall")
+        _MEDIA_WALL_OK = True
+        return out
+    except Exception:
+        _MEDIA_WALL_OK = False
+        return m.advect_field(field, vx, vy, dt=dt)
+
+
+_MEDIA_WALL_OK = None
+
+
+def _media_render(doc, l, st, kind=None):
+    """Slab state -> layer.pixels. Split out of the step so a CACHED
+    state can be restored and re-rendered without advancing time."""
+    if kind is None:
+        kind = getattr(l, "vol_kind", "inkwater")
+    # ONE upsample, not two: density and dye share the same sampling
+    # grid, so stacking them into a single 4-channel gather halves the
+    # per-frame allocation and indexing work (this call is the single
+    # largest cost in a playback frame at canvas resolution)
+    src = np.concatenate([st["den"][..., None], st["dye"]], axis=-1)
+    H, W = doc.height, doc.width
+    gh, gw = st["den"].shape
+    # DIRTY WINDOW: the dye occupies a fraction of the canvas for most
+    # of a simulation, so upsample only the region it reaches (plus a
+    # 2-cell margin). _resize_window is byte-identical to slicing the
+    # full resize, so this is pure speed with no seam risk. Pixels
+    # outside are cleared once, using the window written last frame.
+    occ = st["den"] > 1e-4
+    if occ.any():
+        ys, xs = np.where(occ)
+        gy0 = max(0, int(ys.min()) - 2); gy1 = min(gh, int(ys.max()) + 3)
+        gx0 = max(0, int(xs.min()) - 2); gx1 = min(gw, int(xs.max()) + 3)
+        y0p = max(0, int(np.floor(gy0 * H / gh)) - 1)
+        y1p = min(H, int(np.ceil(gy1 * H / gh)) + 1)
+        x0p = max(0, int(np.floor(gx0 * W / gw)) - 1)
+        x1p = min(W, int(np.ceil(gx1 * W / gw)) + 1)
+    else:
+        y0p = y1p = x0p = x1p = 0
+    prev = getattr(l, "_media_win", None)
+    if prev != (y0p, y1p, x0p, x1p):
+        if prev is not None:
+            l.pixels[prev[0]:prev[1], prev[2]:prev[3], :] = 0.0
+        else:
+            l.pixels[...] = 0.0
+        l._media_win = (y0p, y1p, x0p, x1p)
+    if y1p <= y0p or x1p <= x0p:
+        _MUT_REV[0] += 1
+        return
+    _up = _resize_window(src, H, W, (y0p, y1p, x0p, x1p))
+    den = _up[..., 0]
+    dye = _up[..., 1:4]
     d01 = np.clip(den, 0.0, 1.0)
     if kind == "fire":
         # the heat ramp: dense core white -> yellow -> orange -> deep red
@@ -736,9 +1355,32 @@ def _media_slab_step(doc, l, steps):
         sd = np.maximum(den, 1e-5)[..., None]
         col = np.clip(dye / sd, 0.0, 1.0)
         a = np.clip(den * 1.6, 0.0, 1.0)
-    l.pixels[..., :3] = np.clip(col, 0.0, 1.0).astype(np.float32)
-    l.pixels[..., 3] = a.astype(np.float32)
+    win = l.pixels[y0p:y1p, x0p:x1p]
+    # patch relative to the CACHE's own revision, not the global one.
+    # composite_patch's contract is "the cache was current before this
+    # edit", and the cache tracks PIXEL state -- but set_frame bumps the
+    # revision for its own bookkeeping without touching a pixel, so
+    # comparing against the global counter rejected every patch and
+    # playback kept paying a full re-composite. Any real pixel mutation
+    # (paint, fill, clear) either patches or invalidates the cache
+    # itself, so the cache's revision remains the honest reference.
+    _cc = getattr(doc, "_ccache", None)
+    rev_entry = _cc["rev"] if _cc else _MUT_REV[0]
+    win[..., :3] = np.clip(col, 0.0, 1.0).astype(np.float32)
+    win[..., 3] = a.astype(np.float32)
     _MUT_REV[0] += 1
+    # PATCH the cached frame over just this window. Playback used to
+    # invalidate the whole composite every frame and pay a full-canvas
+    # re-composite on the next serve -- 106 ms at 1200x900, the single
+    # largest cost in a playback round-trip, for a change covering a
+    # fraction of a percent of the canvas.
+    if prev is not None and prev == (y0p, y1p, x0p, x1p):
+        composite_patch(doc, x0p, y0p, x1p, y1p, rev_entry)
+    elif prev is not None:
+        # the window moved: patch the union so the vacated area is
+        # rebuilt too, never leaving a ghost of the old frame
+        composite_patch(doc, min(prev[2], x0p), min(prev[0], y0p),
+                        max(prev[3], x1p), max(prev[1], y1p), rev_entry)
 
 
 def _fiber_grain(doc, l=None):
@@ -797,6 +1439,56 @@ def soak_region(doc, lid, x0, y0, x1, y1, amount):
     _MUT_REV[0] += 1
 
 
+def _cast_shadow_radial(S, lx, ly, lz, h, w, steps=26, step_px=8.0):
+    """2.5D cast shadows for POSITIONAL lights (spot/point): from every
+    pixel, march toward the light's (x, y); where the surface rises
+    above the climbing ray, the pixel is shaded. Per-pixel directions,
+    gathered with bilinear sampling -- the directional light's uniform
+    shift trick cannot bend around a point source."""
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    dx = np.float32(lx) - xx
+    dy = np.float32(ly) - yy
+    dist = np.sqrt(dx * dx + dy * dy) + 1e-3
+    ux, uy = dx / dist, dy / dist
+    S35 = S * 0.35
+    lz35 = float(lz)                # light height in surface units
+    sdw = np.zeros((h, w), np.float32)
+    for t in range(1, steps + 1):
+        d = step_px * t
+        px = np.clip(xx + ux * d, 0, w - 1.001)
+        py = np.clip(yy + uy * d, 0, h - 1.001)
+        x0 = px.astype(np.int32); y0 = py.astype(np.int32)
+        fx = px - x0; fy = py - y0
+        x1 = np.minimum(x0 + 1, w - 1); y1 = np.minimum(y0 + 1, h - 1)
+        blk = (S35[y0, x0] * (1 - fx) * (1 - fy)
+               + S35[y0, x1] * fx * (1 - fy)
+               + S35[y1, x0] * (1 - fx) * fy
+               + S35[y1, x1] * fx * fy)
+        f = np.clip(d / dist, 0.0, 1.0)
+        ray_h = S35 * (1 - f) + lz35 * f + 0.4
+        # penumbra: farther blockers shade more softly
+        sdw = np.maximum(sdw, np.clip((blk - ray_h) / (1.2 + 0.25 * t),
+                                      0.0, 1.0))
+        past = d >= dist
+        if past.all():
+            break
+        sdw = np.where(past, sdw, sdw)
+    return sdw
+
+
+def _optically_active(l):
+    """Does this layer take part in the PHYSICS of the scene?
+
+    Visibility hides PIGMENT; it should not delete a body from the
+    world. A sheet of rippled water may be hidden -- you do not want
+    its blue wash over the picture -- while its surface still bends
+    light, throws caustics on the sand below, and casts a shadow. Set
+    `optical=True` to keep a hidden layer in the light simulation
+    (Devin: 'layers should be able to have an effect on
+    light/refraction/shadows while having the layer still hidden')."""
+    return bool(l.visible) or bool(getattr(l, "optical", False))
+
+
 def _doc_surface(doc):
     """The document's TOP surface z(x, y): the running maximum over every
     visible layer of base plane + effective thickness + relief -- the same
@@ -806,7 +1498,7 @@ def _doc_surface(doc):
     surf = np.zeros((h, w), np.float32)
     z_top = 0.0
     for l in doc.layers:
-        if not l.visible:
+        if not _optically_active(l):
             continue
         base = _layer_base_plane(l, h, w) + z_top
         T0 = max(float(getattr(l, "thickness", 0.0)), 0.0)
@@ -814,10 +1506,38 @@ def _doc_surface(doc):
         top = base + T0 * (fm if fm is not None else 1.0)
         if l.height_map is not None:
             top = top + np.asarray(l.height_map, np.float32)
-        # only where the layer HAS content does its body shape the surface
-        occ = (l.pixels[..., 3] > 0.04) | (T0 <= 0)
-        cand = np.where(occ, np.asarray(top, np.float32), 0.0)
-        surf = np.maximum(surf, cand)
+        # only where the layer HAS content does its body shape the
+        # surface. The old '| (T0 <= 0)' let an EMPTY zero-thickness
+        # layer claim the whole canvas at its base height -- raising a
+        # small shelf silently raised the surface everywhere, cancelling
+        # its lamp's lift.
+        # SMOOTH occupancy: the old binary threshold (alpha > 0.04)
+        # raised a full-thickness CLIFF at every soft dab's edge, and
+        # the lights rimmed each cliff with a specular halo -- Devin's
+        # 'weird glassy loops' were the shadow layer's soft dabs
+        # wearing those halos. A translucent wash is a thin film: its
+        # body rises with its opacity, so soft edges slope instead of
+        # step and there is nothing to rim.
+        a = l.pixels[..., 3]
+        aa = np.clip((a - 0.04) / 0.56, 0.0, 1.0).astype(np.float32)
+        aa = aa * aa * (3.0 - 2.0 * aa)          # smoothstep
+        # soften the occupancy ramp a touch further: silhouettes get a
+        # shoulder instead of a crease ('the embossing is a little
+        # strange around the edges')
+        aa = _gauss_blur_reflect(aa, 1.6)
+        # RELIEF is the layer's say in how much body it shows the
+        # light: 1 = full physical thickness, 0 = optically flat
+        # (paint contributes colour but no emboss)
+        rlf = float(np.clip(getattr(l, "relief", 1.0), 0.0, 1.0))
+        base_f = np.asarray(base, np.float32)
+        top_f = np.asarray(top, np.float32)
+        cand = base_f + (top_f - base_f) * aa * rlf
+        # REPLACE, don't max: the topmost material OWNS the surface.
+        # np.maximum let an 8-unit smoke slab's swirled filaments
+        # emboss THROUGH the opaque table painted above it -- Devin's
+        # glassy loops on the tabletop were the haze's relief poking
+        # through a layer that visually covered it completely.
+        surf = surf * (1.0 - aa) + cand * aa
         z_top += T0
     return surf
 
@@ -827,9 +1547,18 @@ def _doc_emission(doc):
     (a 300%-red pixel glows red), and a layer's `emissive` dial makes its
     whole colour radiate. Returns (h, w, 3) of emitted light, or None."""
     h, w = doc.height, doc.width
+    # CHEAP REJECT: this ran a full-canvas HDR scan of every layer on
+    # every lit serve -- 27 ms/frame during playback on a document with
+    # no emissive layer at all. A max() per layer is orders cheaper than
+    # the per-pixel arithmetic it guards.
+    live = [l for l in doc.layers if _optically_active(l)]
+    if not any(float(getattr(l, "emissive", 0.0)) > 0
+               or float(l.pixels[..., :3].max(initial=0.0)) > 1.0
+               for l in live):
+        return None
     E = None
     for l in doc.layers:
-        if not l.visible:
+        if not _optically_active(l):
             continue
         a = l.pixels[..., 3:4]
         em = np.maximum(l.pixels[..., :3] - 1.0, 0.0) * a
@@ -1008,7 +1737,7 @@ def _light_gel(doc, li):
     gel = None
     z_top = 0.0
     for l in doc.layers:
-        if not l.visible:
+        if not _optically_active(l):
             continue
         T = max(float(getattr(l, "thickness", 0.0)), 0.0)
         kind = getattr(l, "vol_kind", "none")
@@ -1052,6 +1781,51 @@ def _light_gel(doc, li):
     return gel
 
 
+def _wall_bounce(doc):
+    """Light bouncing off the four perpendicular planes.
+
+    A wall is not a backdrop -- it is a surface in the room, and a red
+    wall to the left throws red into everything near it. Each assigned
+    wall contributes its own average colour, falling off with distance
+    from its edge; strength comes from how opaque and how thick the
+    wall layer is, so a thin wash tints faintly and a heavy slab
+    dominates. Walls act whether or not they are visible, exactly like
+    an `optical` layer -- being hidden is what walls DO."""
+    walls = doc.wall_layers() if hasattr(doc, "wall_layers") else {}
+    if not walls:
+        return None
+    h, w = doc.height, doc.width
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    out = np.zeros((h, w, 3), np.float32)
+    any_ = False
+    for side, l in walls.items():
+        a = l.pixels[..., 3]
+        cover = float(a.mean())
+        if cover < 1e-3:
+            continue                       # an empty wall throws nothing
+        wsum = float(a.sum()) + 1e-6
+        col = np.array([float((l.pixels[..., c] * a).sum() / wsum)
+                        for c in range(3)], np.float32)
+        T = max(float(getattr(l, "thickness", 0.0)), 0.0)
+        # measured: 0.35+0.05T drove the shade past 1.5 and every
+        # channel clipped, so the falloff that makes bounce READ as
+        # bounce was invisible. Keep the whole term inside a stop.
+        k = cover * float(getattr(l, "opacity", 1.0)) \
+            * (0.10 + 0.015 * min(T, 12.0))
+        reach = 0.55
+        if side == "left":
+            f = np.clip(1.0 - xx / (w * reach), 0.0, 1.0)
+        elif side == "right":
+            f = np.clip(1.0 - (w - 1 - xx) / (w * reach), 0.0, 1.0)
+        elif side == "back":
+            f = np.clip(1.0 - yy / (h * reach), 0.0, 1.0)
+        else:                              # front: nearest the viewer
+            f = np.clip(1.0 - (h - 1 - yy) / (h * reach), 0.0, 1.0)
+        out += (f ** 2)[..., None] * col[None, None, :] * k
+        any_ = True
+    return out if any_ else None
+
+
 def _doc_caustics(doc, lights):
     """Ray-density caustics from rippled water/glass: the refraction bend
     field's inverse Jacobian says where parallel light CONVERGES after
@@ -1064,12 +1838,20 @@ def _doc_caustics(doc, lights):
     total = None
     z_top = 0.0
     for l in doc.layers:
-        if not l.visible:
+        if not _optically_active(l):
             z_top += max(float(getattr(l, "thickness", 0.0)), 0.0)
             continue
         T = max(float(getattr(l, "thickness", 0.0)), 0.0)
         kind = getattr(l, "vol_kind", "none")
         hm = getattr(l, "height_map", None)
+        if hm is None and T > 0 and kind in ("water", "glass"):
+            # THE PAINTED RIPPLE IS THE RIPPLE. height_map only exists
+            # when impasto or a displacement op made one, so a water
+            # sheet an artist simply PAINTED produced no caustics at
+            # all -- the feature looked broken for its most obvious
+            # use. Fall back to the layer's own alpha as the surface
+            # relief, scaled by thickness.
+            hm = _gauss_blur(l.pixels[..., 3:4], 1.0)[..., 0] * T
         if T > 0 and kind in ("water", "glass") and hm is not None \
                 and float(np.ptp(np.asarray(hm))) > 0.1:
             a = l.pixels[..., 3]
@@ -1107,7 +1889,79 @@ def _doc_caustics(doc, lights):
     return total
 
 
-def composite_lit(doc, view="flat"):
+def _light_base_z(doc, li):
+    """A LAYER light rides its host layer: its height is measured from
+    the layer's posed base plane at the light's own (x, y), so tilting or
+    raising the slab carries its lamps along. Global lights measure from
+    the document floor."""
+    pl = li.get("layer")
+    if not pl:
+        return 0.0
+    try:
+        host = doc.layer(pl)
+    except KeyError:
+        return 0.0
+    h, w = doc.height, doc.width
+    base = _layer_base_plane(host, h, w)
+    ix = int(np.clip(li["x"], 0, w - 1))
+    iy = int(np.clip(li["y"], 0, h - 1))
+    z_below = 0.0
+    for l in doc.layers:
+        if l is host:
+            break
+        z_below += max(float(getattr(l, "thickness", 0.0)), 0.0)
+    return float(base[iy, ix] + z_below) * 0.35
+
+
+def _underwater(doc, img, lights, ca):
+    """Look UP from beneath a refracting sheet. Above the surface you
+    see the sheet's own pigment plus what it reflects and refracts;
+    below it, the surface is a moving CEILING -- everything beyond is
+    displaced by the ripple's own gradient, split into colour by
+    dispersion, and the caustic filaments swim toward the eye instead
+    of landing on the floor (Devin: 'a view from below the surface
+    instead, with the caustics and dispersion and so on')."""
+    h, w = doc.height, doc.width
+    sheets = [l for l in doc.layers
+              if _optically_active(l)
+              and max(float(getattr(l, "thickness", 0.0)), 0.0) > 0.5]
+    if not sheets:
+        return img
+    S = np.zeros((h, w), np.float32)
+    disp = 0.0
+    for l in sheets:
+        a = np.clip((l.pixels[..., 3] - 0.04) / 0.56, 0.0, 1.0)
+        S = S + a * max(float(getattr(l, "thickness", 0.0)), 0.0)             * float(np.clip(getattr(l, "relief", 1.0), 0.0, 1.0))
+        disp = max(disp, float(getattr(l, "dispersion", 0.0)))
+    S = _gauss_blur(S[..., None], 1.2)[..., 0]
+    gy, gx = np.gradient(S)
+    ior = max(float(getattr(sheets[-1], "vol_ior", 1.33)), 1.0)
+    # bend scale in PIXELS: (ior-1)*6 put the per-channel dispersion
+    # offsets under one pixel, so the split was invisible -- measured
+    # and raised until the fringe actually reads
+    bend = (ior - 1.0) * 22.0
+    out = np.array(img, np.float32, copy=True)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    # per-channel offset = DISPERSION: red bends least, blue most
+    for c, k in ((0, 1.0 - 1.1 * disp), (1, 1.0), (2, 1.0 + 1.1 * disp)):
+        sx = np.clip(xx + gx * bend * k, 0, w - 1.001)
+        sy = np.clip(yy + gy * bend * k, 0, h - 1.001)
+        x0 = sx.astype(np.int32); y0 = sy.astype(np.int32)
+        fx = sx - x0; fy = sy - y0
+        x1 = np.minimum(x0 + 1, w - 1); y1 = np.minimum(y0 + 1, h - 1)
+        A = img[..., c]
+        out[..., c] = (A[y0, x0] * (1 - fx) * (1 - fy)
+                       + A[y0, x1] * fx * (1 - fy)
+                       + A[y1, x0] * (1 - fx) * fy
+                       + A[y1, x1] * fx * fy)
+    if ca is not None:
+        # from below the filaments come AT the eye: brighter, and they
+        # ride the whole frame rather than only the lit floor
+        out[..., :3] = out[..., :3] + np.asarray(ca, np.float32) * 1.6
+    return out
+
+
+def composite_lit(doc, view="flat", vantage="above"):
     """The lit composite: environment lights (view / directional / point,
     any number, summed) shade the document's height-field surface --
     directionals march REAL cast shadows across the canvas -- and emissive
@@ -1116,13 +1970,25 @@ def composite_lit(doc, view="flat"):
     composite BYTE-IDENTICAL."""
     base = (composite_volumetric(doc, view) if view in ("ortho", "persp")
             else composite_cached(doc))
-    lights = [li for li in getattr(doc, "lights", []) if li.get("enabled")]
+    lights = []
+    for li in getattr(doc, "lights", []):
+        if not li.get("enabled"):
+            continue
+        pl = li.get("layer")
+        if pl:
+            try:
+                host = doc.layer(pl)
+            except KeyError:
+                continue                      # orphaned: host gone
+            if not host.visible:
+                continue                      # hidden layer, dark lamp
+        lights.append(li)
     E = _doc_emission(doc)
     if not lights and E is None:
         return base
     h, w = doc.height, doc.width
     S = _doc_surface(doc)
-    Sb = _gauss_blur(S[..., None], 1.4)[..., 0]
+    Sb = _gauss_blur_reflect(S, 1.4)
     gy, gx = np.gradient(Sb)
     nz = 1.0 / np.sqrt(gx * gx + gy * gy + 1.0)
     nx, ny = -gx * nz, -gy * nz
@@ -1148,7 +2014,8 @@ def composite_lit(doc, view="flat"):
             elif li["kind"] == "spot":
                 dx = li["x"] - xx
                 dy = li["y"] - yy
-                dz = max(float(li["z"]), 4.0) - S * 0.35
+                dz = max(float(li["z"]), 4.0) + _light_base_z(doc, li) \
+                    - S * 0.35
                 dist = np.sqrt(dx * dx + dy * dy + dz * dz)
                 Lx, Ly, Lz = dx / dist, dy / dist, dz / dist
                 ax = li.get("aim_x", w / 2.0) - li["x"]
@@ -1164,17 +2031,32 @@ def composite_lit(doc, view="flat"):
                 conew = np.clip((cosang - ca_full)
                                 / max(inner - ca_full, 1e-4), 0, 1)
                 diff = np.clip(nx * Lx + ny * Ly + nz * Lz, 0, 1)
-                reach = max(float(li["z"]), 4.0) * 4.0
+                reach = max(float(li["z"]), 4.0) * 4.0 \
+                    * max(float(li.get("scale", 1.0)), 0.05)
                 diff = (diff * conew / (1.0 + (dist / reach) ** 2))[..., None]
+                if li.get("shadows", True):
+                    sdw = _cast_shadow_radial(
+                        S, li["x"], li["y"],
+                        max(float(li["z"]), 4.0)
+                        + _light_base_z(doc, li), h, w)
+                    diff = diff * (1.0 - 0.8 * sdw)[..., None]
             elif li["kind"] == "point":
                 dx = li["x"] - xx
                 dy = li["y"] - yy
-                dz = max(float(li["z"]), 4.0) - S * 0.35
+                dz = max(float(li["z"]), 4.0) + _light_base_z(doc, li) \
+                    - S * 0.35
                 dist = np.sqrt(dx * dx + dy * dy + dz * dz)
                 Lx, Ly, Lz = dx / dist, dy / dist, dz / dist
                 diff = np.clip(nx * Lx + ny * Ly + nz * Lz, 0, 1)
-                reach = max(float(li["z"]), 4.0) * 4.0
+                reach = max(float(li["z"]), 4.0) * 4.0 \
+                    * max(float(li.get("scale", 1.0)), 0.05)
                 diff = (diff / (1.0 + (dist / reach) ** 2))[..., None]
+                if li.get("shadows", True):
+                    sdw = _cast_shadow_radial(
+                        S, li["x"], li["y"],
+                        max(float(li["z"]), 4.0)
+                        + _light_base_z(doc, li), h, w)
+                    diff = diff * (1.0 - 0.8 * sdw)[..., None]
             else:                                        # directional
                 az = np.deg2rad(float(li["azimuth"]))
                 el = np.deg2rad(np.clip(float(li["elevation"]), 4.0, 89.0))
@@ -1229,6 +2111,10 @@ def composite_lit(doc, view="flat"):
     else:
         shade = np.ones((h, w, 3), np.float32)
         ca = _doc_caustics(doc, lights)
+        if ca is not None and vantage == "below":
+            # handed to _underwater instead: from below they are not
+            # floor patterns, they are the light coming at you
+            ca_below, ca = ca, None
         if ca is not None:
             # CAUSTICS: rippled water bends parallel light; where the
             # refracted rays CONVERGE the floor brightens into filaments.
@@ -1251,6 +2137,10 @@ def composite_lit(doc, view="flat"):
             occ = occ * below
         k = float(gcfg.get("opacity", 0.5))
         shade = shade * (1.0 - k * occ[..., None])
+    wb = _wall_bounce(doc)
+    if wb is not None:
+        # the room's own light: walls tint what stands near them
+        shade = shade + wb
     out = base.copy()
     if E is not None:
         # emitted light falls on the NEIGHBOURHOOD: a wide blur of the
@@ -1261,6 +2151,9 @@ def composite_lit(doc, view="flat"):
     out[..., :3] = base[..., :3] * np.clip(shade, 0.0, 4.0)
     if E is not None:
         out[..., :3] = out[..., :3] + E + _gauss_blur(E, 5.0) * 0.6
+    if vantage == "below":
+        out = _underwater(doc, out, lights,
+                          locals().get("ca_below"))
     out[..., :3] = np.clip(out[..., :3], 0.0, 1.0)
     return out
 
@@ -1284,12 +2177,43 @@ def _layer_base_plane(l, h, w):
     z = (z0 + np.tan(np.deg2rad(tx)) * (h / 2.0 - yy)
          + np.tan(np.deg2rad(ty)) * (xx - w / 2.0))
     if abs(cv) > 1e-6:
-        nx = (xx - w / 2.0) / (w / 2.0)
-        z = z + cv * (1.0 - nx * nx)
+        prof = getattr(l, "curve_profile", None)
+        axis = getattr(l, "curve_axis", "x")
+        if prof:
+            # PROFILE-DRIVEN curve: a user ramp of SIGNED depth stops
+            # [t, v] along one axis (t 0..1, v -1..1) -- the bend can
+            # reverse direction as many times as the ramp does. `curve`
+            # is the amplitude in canvas depth units. np.interp holds
+            # flat beyond the outermost stops.
+            ts = np.asarray([p[0] for p in prof], np.float32)
+            vs = np.asarray([p[1] for p in prof], np.float32)
+            o = np.argsort(ts)
+            ts, vs = ts[o], vs[o]
+            t = (xx / max(w - 1, 1)) if axis == "x" else (yy / max(h - 1, 1))
+            z = z + cv * np.interp(t, ts, vs).astype(np.float32)
+        else:
+            # legacy: a single cylindrical arc across x
+            nx = (xx - w / 2.0) / (w / 2.0)
+            z = z + cv * (1.0 - nx * nx)
     if abs(dm) > 1e-6:
-        nr2 = (((xx - w / 2.0) / (w / 2.0)) ** 2
-               + ((yy - h / 2.0) / (h / 2.0)) ** 2)
-        z = z + dm * np.clip(1.0 - nr2, 0.0, 1.0)
+        prof = getattr(l, "dome_profile", None)
+        if prof:
+            # PROFILE-DRIVEN dome: the SAME kind of ramp read as a
+            # RADIUS profile -- t is normalised distance from the
+            # centre (1.0 at min(w,h)/2), and the ramp is swept through
+            # a full turn to a uniform radial map. `dome` is the
+            # amplitude; beyond the last stop the surface holds flat.
+            ts = np.asarray([p[0] for p in prof], np.float32)
+            vs = np.asarray([p[1] for p in prof], np.float32)
+            o = np.argsort(ts)
+            ts, vs = ts[o], vs[o]
+            r = np.sqrt((xx - w / 2.0) ** 2 + (yy - h / 2.0) ** 2) \
+                / (min(w, h) / 2.0)
+            z = z + dm * np.interp(r, ts, vs).astype(np.float32)
+        else:
+            nr2 = (((xx - w / 2.0) / (w / 2.0)) ** 2
+                   + ((yy - h / 2.0) / (h / 2.0)) ** 2)
+            z = z + dm * np.clip(1.0 - nr2, 0.0, 1.0)
     return z.astype(np.float32)
 
 
@@ -1444,7 +2368,9 @@ def composite_volumetric(doc, view="ortho", fov=28.0):
     h, w = doc.height, doc.width
     out = np.zeros((h, w, 4), np.float32)
     D = (h / 2.0) / np.tan(np.deg2rad(fov / 2.0))
-    stack = [l for l in doc.layers if l.visible]
+    stack = [l for l in doc.layers if l.visible
+             and getattr(l, "wall", None) in
+             (None, getattr(doc, "wall_edit", None))]
     depths, z_top = [], 0.0
     surf_below = None            # the running TOP surface of the stack
     clips, fmuls, zmeans = [], [], []
@@ -1611,7 +2537,9 @@ def composite_cached(doc):
     cc = getattr(doc, "_ccache", None)
     if cc is not None and cc["rev"] == _MUT_REV[0]             and cc["buf"].shape[:2] == (doc.height, doc.width):
         return cc["buf"]
-    buf = composite(doc.layers, doc.height, doc.width, doc.mask_map())
+    buf = composite(doc.canvas_layers() if hasattr(doc, "canvas_layers")
+                    else doc.layers,
+                    doc.height, doc.width, doc.mask_map())
     doc._ccache = {"rev": _MUT_REV[0], "buf": buf}
     return buf
 
@@ -1621,6 +2549,15 @@ def composite_patch(doc, x0, y0, x1, y1, rev_before):
     was current before this edit and the edit stayed inside the window."""
     cc = getattr(doc, "_ccache", None)
     if cc is None or cc["rev"] != rev_before             or cc["buf"].shape[:2] != (doc.height, doc.width):
+        return
+    # RE-BASE periodically: each window re-blend rounds in float32, and
+    # ~30 mixed ops accumulated a 2.3/255 drift against a fresh
+    # composite -- exactly the faint 'sometimes' tile artifacts. Every
+    # 20 patches the cache is dropped and the next serve pays one full
+    # composite, so drift can never build past a quantum.
+    cc["n"] = cc.get("n", 0) + 1
+    if cc["n"] > 20:
+        doc._ccache = None
         return
     x0, y0 = max(0, int(x0)), max(0, int(y0))
     x1, y1 = min(doc.width, int(x1)), min(doc.height, int(y1))
@@ -1635,9 +2572,22 @@ def composite_patch(doc, x0, y0, x1, y1, rev_before):
         __slots__ = ("data",)
 
     wl = []
-    for l in doc.layers:
+    for l in doc.canvas_layers() if hasattr(doc, "canvas_layers") else doc.layers:
         o = _W()
         o.pixels = _shaded_pixels(l)[y0:y1, x0:x1]
+        fill = _layer_bg_fill(l, doc.height, doc.width)
+        if fill is not None:
+            # merge the window over a CROP of the full-canvas backing --
+            # a window-sized texture would misalign with the full frame,
+            # and the un-backed shim was exactly how patched strokes
+            # dropped their layer's backing (the pile-up artifact class:
+            # the cache window disagreed with the true composite)
+            fw = fill[y0:y1, x0:x1]
+            px = o.pixels
+            a = px[..., 3:4]
+            merged = px * a + fw * (1.0 - a)
+            merged[..., 3:4] = a + fw[..., 3:4] * (1.0 - a)
+            o.pixels = merged
         o.visible, o.opacity, o.blend = l.visible, l.opacity, l.blend
         o.mask = getattr(l, "mask", None)
         o.mask_invert = getattr(l, "mask_invert", False)
@@ -1683,10 +2633,24 @@ def _shade_patch(lyr, x0, y0, x1, y1, rev_before):
     if getattr(lyr, "_shade_rev", None) != rev_before or not hasattr(lyr, "_shaded"):
         return                                    # stale anyway: full on demand
     H, W = lyr.height_map.shape
-    pad = 8
+    # pad = trim + the shading influence radius (3-sigma blur = 5, plus
+    # the gradient's 1). With pad 8 the TRUSTED interior stopped inside
+    # the ring the stroke actually re-lit, so a 6 px stale seam of old
+    # shading survived around every impasto stroke -- Devin's
+    # 'broken artifacts show up sometimes' with paint media active.
+    pad = 14
     ex0, ey0 = max(0, x0 - pad), max(0, y0 - pad)
     ex1, ey1 = min(W, x1 + pad), min(H, y1 + pad)
     if ex1 <= ex0 or ey1 <= ey0:
+        return
+    if ex0 == 0 or ey0 == 0 or ex1 == W or ey1 == H:
+        # CANVAS-EDGE strokes cannot be window-patched honestly: the
+        # blur is an FFT, so the window's wrap mixes the stroke with
+        # itself while the full frame's wrap mixes in the OPPOSITE
+        # CANVAS EDGE -- the two disagree in the untrimmed edge zone
+        # (measured 2.3/255, healing only on the next full rebuild).
+        # Invalidate instead; the next serve recomputes the full shade.
+        lyr._shade_rev = None
         return
     win = _relief_shade(lyr.pixels[ey0:ey1, ex0:ex1],
                         lyr.height_map[ey0:ey1, ex0:ex1],
@@ -1701,6 +2665,42 @@ def _shade_patch(lyr, x0, y0, x1, y1, rev_before):
         return
     lyr._shaded[ty0:ty1, tx0:tx1] = win[ty0 - ey0:ty1 - ey0, tx0 - ex0:tx1 - ex0]
     lyr._shade_rev = _MUT_REV[0]
+
+
+def _layer_bg_fill(lyr, h, w):
+    """The layer's own backing sheet: a solid colour or a procedural
+    paper/canvas/noise texture, composited UNDER the layer's pixels.
+    Cached per revision and size."""
+    bg = getattr(lyr, "bg", None)
+    if not bg:
+        return None
+    ck = (_MUT_REV[0], h, w)
+    if getattr(lyr, "_bg_ck", None) == ck:
+        return lyr._bg_fill
+    col = np.asarray(bg.get("color", [1, 1, 1, 1]), np.float32)
+    fill = np.empty((h, w, 4), np.float32)
+    fill[...] = col
+    if bg.get("kind") == "texture":
+        rng = np.random.default_rng(7)
+        sc = max(float(bg.get("scale", 3.0)), 0.5)
+        gh, gw = max(int(h / sc / 4), 2), max(int(w / sc / 4), 2)
+        g = rng.random((gh, gw), np.float32)
+        n = _resize(np.repeat(g[..., None], 3, -1), h, w)[..., 0]
+        tex = bg.get("tex", "paper")
+        if tex == "canvas":                  # woven: two crossed sines
+            yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+            n = 0.5 + 0.25 * np.sin(xx / sc) * np.sin(yy / sc) \
+                + 0.35 * (n - 0.5)
+        elif tex == "noise":
+            pass                             # raw field
+        else:                                # paper: soft fibrous mottle
+            n = 0.72 + 0.28 * n
+        fill[..., :3] *= n[..., None] * 0.35 + 0.72
+    try:
+        lyr._bg_ck, lyr._bg_fill = ck, fill
+    except AttributeError:
+        pass
+    return fill
 
 
 def composite(layers, h, w, masks=None):
@@ -1719,7 +2719,8 @@ def composite(layers, h, w, masks=None):
             if lyr._empty:
                 continue
         else:
-            empty = not bool(lyr.pixels[..., 3].any())
+            empty = (not bool(lyr.pixels[..., 3].any())
+                     and not getattr(lyr, "bg", None))
             try:
                 lyr._empty, lyr._empty_rev = empty, _MUT_REV[0]
             except AttributeError:
@@ -1727,6 +2728,12 @@ def composite(layers, h, w, masks=None):
             if empty:
                 continue
         px = _shaded_pixels(lyr)
+        fill = _layer_bg_fill(lyr, px.shape[0], px.shape[1])
+        if fill is not None:
+            # the layer's pixels sit ON their backing sheet
+            a = px[..., 3:4]
+            px = px * a + fill * (1.0 - a)
+            px[..., 3:4] = a + fill[..., 3:4] * (1.0 - a)
         if px.shape[0] != h or px.shape[1] != w:
             # render_at() evaluates the graph at a target resolution by
             # changing the document size, but layers keep their own pixel
@@ -1782,11 +2789,18 @@ class Layer:
         self.mask = None          # a Mask id, or None
         self.mask_invert = False
         self.height_map = None    # impasto: per-pixel paint thickness, lazy
+        self.wall = None          # which perpendicular plane this stands on
         self.paint_gloss = 0.3    # specular strength of the last media used
         self.alpha_lock = False   # paint recolors existing pixels only
         self.clip = False         # composite clips to the layer below's alpha
         # --- the physical layer: a slab, not a film -------------------------
-        self.thickness = 0.0      # depth of the slab, canvas units; 0 = 2-D
+        # depth of the slab in canvas units, 1 unit = 0.1 mm. EVERY layer
+        # is a physical sheet: the default is paper (0.1 mm) and nothing
+        # may be thinner than 0.01 mm -- there is no zero-thickness.
+        self.thickness = 1.0
+        self.bg = None            # None=transparent, or {"kind":"color"|
+                                  # "texture", "color":[...], "tex":..,
+                                  # "scale":..}
         self.vol_kind = "none"    # none|water|glass|fog|absorb|puff
         self.vol_ior = 1.33       # refraction index (water 1.33, glass 1.5)
         self.vol_density = 0.5    # how strongly the medium absorbs/scatters
@@ -1795,6 +2809,7 @@ class Layer:
         self.emissive_color = None  # [r,g,b]: emit THIS colour (else pixels)
         self.reflect = 0.0        # water/glass: mirror the scene above
         self.dispersion = 0.0     # per-channel refraction: rainbow fringes
+        self.media_rate = 1.0     # media sim speed vs the timeline (keyable)
         self.z_off = 0.0          # lift/lower the whole slab in the stack
         self.tilt_x = 0.0         # degrees about the x-axis: z varies with y
         self.tilt_y = 0.0         # degrees about the y-axis: z varies with x
@@ -1824,6 +2839,8 @@ class Layer:
                 "emissive_color": getattr(self, "emissive_color", None),
                 "reflect": float(getattr(self, "reflect", 0.0)),
                 "dispersion": float(getattr(self, "dispersion", 0.0)),
+                "media_rate": float(getattr(self, "media_rate", 1.0)),
+                "bg": json.loads(json.dumps(getattr(self, "bg", None))),
                 "z_off": float(getattr(self, "z_off", 0.0)),
                 "tilt_x": float(getattr(self, "tilt_x", 0.0)),
                 "tilt_y": float(getattr(self, "tilt_y", 0.0)),
@@ -1833,7 +2850,20 @@ class Layer:
                 "field_mode": getattr(self, "field_mode", "attract"),
                 "field_strength": float(getattr(self, "field_strength",
                                                 120.0)),
-                "placed": getattr(self, "source", None) is not None}
+                "placed": getattr(self, "source", None) is not None,
+                "place": json.loads(json.dumps(getattr(self, "place",
+                                                       None))),
+                "locked": bool(getattr(self, "locked", False)),
+                "relief": float(getattr(self, "relief", 1.0)),
+                "optical": bool(getattr(self, "optical", False)),
+                "media_res": str(getattr(self, "media_res", "normal")),
+                "media_time": str(getattr(self, "media_time", "timeline")),
+                "wall": getattr(self, "wall", None),
+                "curve_axis": getattr(self, "curve_axis", "x"),
+                "curve_profile": json.loads(json.dumps(
+                    getattr(self, "curve_profile", None))),
+                "dome_profile": json.loads(json.dumps(
+                    getattr(self, "dome_profile", None)))}
 
 
 class Brush:
@@ -2001,11 +3031,26 @@ class Document:
         self.brushes = _standard_brushes()
         self.stamps = []
         self.lights = []          # environment lights: dicts, see add_light
+        self.fields = []          # force-field objects: dicts, see add_field
+        # THE ROOM. Four planes perpendicular to the canvas, outside it:
+        # front, back, left, right. Each slot holds a normal layer id or
+        # None, and starts empty -- a document is a flat canvas until an
+        # artist decides otherwise. A wall layer is painted like any
+        # other (that is the point: no special editor), and is hidden
+        # from the canvas except while its slot is being edited.
+        self.walls = {"front": None, "back": None,
+                      "left": None, "right": None}
+        self.wall_edit = None     # which side is open for painting
+        self.frame = 0.0          # the global playhead, in frames
+        self.fps = 24.0
+        self.frame_range = [0.0, 96.0]
+        self.tracks = {}          # "kind:id:prop" -> [[t, v], ...] sorted
         self.persp = {"enabled": False, "vps": [], "horizon": None,
                       "snap": False,
                       "ground": {"enabled": False, "grid": False,
                                  "opacity": 0.5}}
         self._lnext = 1
+        self._fnext = 1
         self._undo, self._redo = [], []
         bg = Layer(self.height, self.width, "Background")
         if background is None:
@@ -2062,12 +3107,66 @@ class Document:
                 "stamps": [(s.id, s.name, s.pixels.copy())
                            for s in self.stamps],
                 "lights": [dict(li) for li in getattr(self, "lights", [])],
+                "fields": [dict(f) for f in getattr(self, "fields", [])],
+                "walls": dict(getattr(self, "walls", {})),
+                "wall_edit": getattr(self, "wall_edit", None),
                 "persp": json.loads(json.dumps(getattr(self, "persp", {}))),
+                "tracks": json.loads(json.dumps(getattr(self, "tracks",
+                                                        {}))),
+                # rec[11] = the PHYSICAL SHEET: before it existed, every
+                # undo rebuilt bare Layer objects and silently reset
+                # thickness, volume kind, backing, pose, optics, and
+                # placement to defaults across the whole document. `source`
+                # rides by REFERENCE (it is never mutated in place), so
+                # snapshots stay cheap.
                 "layers": [(l.id, l.name, l.visible, l.opacity, l.blend,
                             l.mask, l.mask_invert,
                             _px(l), _hg(l),
                             getattr(l, "paint_gloss", 0.3),
-                            getattr(l, "paint_media", None))
+                            getattr(l, "paint_media", None),
+                            {"thickness": float(getattr(l, "thickness", 1.0)),
+                             "vol_kind": getattr(l, "vol_kind", "none"),
+                             "vol_ior": float(getattr(l, "vol_ior", 1.33)),
+                             "vol_density": float(getattr(l, "vol_density",
+                                                          0.5)),
+                             "absorbency": float(getattr(l, "absorbency",
+                                                         0.0)),
+                             "emissive": float(getattr(l, "emissive", 0.0)),
+                             "emissive_color": getattr(l, "emissive_color",
+                                                       None),
+                             "reflect": float(getattr(l, "reflect", 0.0)),
+                             "dispersion": float(getattr(l, "dispersion",
+                                                         0.0)),
+                             "media_rate": float(getattr(l, "media_rate",
+                                                         1.0)),
+                             "bg": json.loads(json.dumps(getattr(l, "bg",
+                                                                 None))),
+                             "z_off": float(getattr(l, "z_off", 0.0)),
+                             "tilt_x": float(getattr(l, "tilt_x", 0.0)),
+                             "tilt_y": float(getattr(l, "tilt_y", 0.0)),
+                             "curve": float(getattr(l, "curve", 0.0)),
+                             "dome": float(getattr(l, "dome", 0.0)),
+                             "field": getattr(l, "field", ""),
+                             "field_mode": getattr(l, "field_mode",
+                                                   "attract"),
+                             "field_strength": float(getattr(
+                                 l, "field_strength", 120.0)),
+                             "alpha_lock": bool(getattr(l, "alpha_lock",
+                                                        False)),
+                             "clip": bool(getattr(l, "clip", False)),
+                             "place": json.loads(json.dumps(
+                                 getattr(l, "place", None))),
+                             "locked": bool(getattr(l, "locked", False)),
+                             "relief": float(getattr(l, "relief", 1.0)),
+                             "optical": bool(getattr(l, "optical", False)),
+                             "media_res": str(getattr(l, "media_res", "normal")),
+                             "media_time": str(getattr(l, "media_time", "timeline")),
+                             "curve_axis": getattr(l, "curve_axis", "x"),
+                             "curve_profile": json.loads(json.dumps(
+                                 getattr(l, "curve_profile", None))),
+                             "dome_profile": json.loads(json.dumps(
+                                 getattr(l, "dome_profile", None))),
+                             "source": getattr(l, "source", None)})
                            for l in self.layers],
                 # Stroke PATHS are document state too. Without them undo put the
                 # pixels back but left the paths where the edit moved them, so a
@@ -2095,10 +3194,17 @@ class Document:
                 if len(rec) > 5:
                     b.follow, b.j_angle, b.j_size, b.j_scatter = rec[5:9]
                 self.brushes.append(b)
+        if "tracks" in snap:
+            self.tracks = json.loads(json.dumps(snap["tracks"]))
         if "persp" in snap and snap["persp"]:
             self.persp = json.loads(json.dumps(snap["persp"]))
         if "lights" in snap:
             self.lights = [dict(li) for li in snap["lights"]]
+        if "fields" in snap:
+            self.fields = [dict(f) for f in snap["fields"]]
+        if "walls" in snap:
+            self.walls = dict(snap["walls"])
+            self.wall_edit = snap.get("wall_edit")
         if "stamps" in snap:
             self.stamps = []
             for sid, name, pxs in snap["stamps"]:
@@ -2169,6 +3275,17 @@ class Document:
             l.paint_gloss = gloss
             if pmedia:
                 l.paint_media = pmedia
+            xa = rec[11] if len(rec) > 11 else None
+            if xa:
+                for k, v in xa.items():
+                    if k == "source":
+                        if v is not None:
+                            l.source = v
+                    elif v is not None or k in ("bg", "place",
+                                                "emissive_color",
+                                                "curve_profile",
+                                                "dome_profile"):
+                        setattr(l, k, v)
             self.layers.append(l)
 
     def record(self, label="Edit", only=None, region=None):
@@ -2268,7 +3385,17 @@ class Document:
 
     PLACED_BUDGET = 256 * 1024 * 1024      # bytes of native source pixels kept
 
-    def add_layer(self, name=None, pixels=None, record=True, placed=False):
+    def add_layer(self, name=None, pixels=None, record=True, placed=False,
+                  below=None):
+        """below=<layer id> inserts the new layer UNDER that one --
+        found the hard way while dogfooding: a shadow painted after the
+        apple landed ON TOP of it, because new layers only ever stacked
+        highest.
+
+        USE THE RETURN VALUE. With below=, the new layer is NOT last,
+        so the old idiom layers[-1].id grabs the WRONG layer -- one
+        script wiped its own leaves that way (edited + erased the last
+        layer believing it was the fresh one)."""
         _MUT_REV[0] += 1
         if record:
             self.record("Add layer", only=[])
@@ -2289,7 +3416,15 @@ class Document:
         if src is not None:
             l.source = src
             self._trim_placed()
-        self.layers.append(l)
+        if below is not None:
+            idx = next((i for i, x in enumerate(self.layers)
+                        if x.id == below), None)
+            if idx is None:
+                self.layers.append(l)
+            else:
+                self.layers.insert(idx, l)
+        else:
+            self.layers.append(l)
         return l
 
     def _trim_placed(self):
@@ -2300,6 +3435,81 @@ class Document:
             victim = held.pop(0)          # oldest placement loses its source
             total -= victim.source.nbytes
             victim.source = None
+
+    def flip_layer(self, lid, axis="x", record=True):
+        """Mirror this layer along one axis (x = left/right, y =
+        up/down) -- call twice or once per axis for both. Destructive
+        and undoable; the impasto height map and a placed layer's
+        retained source flip too, so replays and re-placements stay
+        consistent with what is on screen."""
+        self._locked_guard(lid)
+        l = self.layer(lid)
+        if record:
+            self.record("Flip layer", only=[lid])
+        ax = 1 if axis == "x" else 0
+        l.pixels = np.flip(l.pixels, axis=ax).copy()
+        hm = getattr(l, "height_map", None)
+        if hm is not None:
+            l.height_map = np.flip(hm, axis=ax).copy()
+        src = getattr(l, "source", None)
+        if src is not None:
+            l.source = np.flip(src, axis=ax).copy()
+        _MUT_REV[0] += 1
+        return True
+
+    def place_source(self, lid, x=None, y=None, scale=None, rot=None,
+                     record=True):
+        """Re-rasterise a PLACED layer from its original pixels with a
+        transform: centre (x, y) in document coordinates -- anywhere,
+        including outside the canvas -- uniform scale (1.0 = the source's
+        own pixels), and rotation in degrees. Nothing is ever cropped
+        away: the source stays whole, the canvas just shows what falls
+        inside it, and moving or shrinking the placement later brings
+        hidden regions back."""
+        self._locked_guard(lid)
+        l = self.layer(lid)
+        src = getattr(l, "source", None)
+        if src is None:
+            return False
+        pl = dict(getattr(l, "place", None)
+                  or {"x": self.width / 2.0, "y": self.height / 2.0,
+                      "scale": 1.0, "rot": 0.0})
+        if x is not None:
+            pl["x"] = float(x)
+        if y is not None:
+            pl["y"] = float(y)
+        if scale is not None:
+            pl["scale"] = max(float(scale), 0.02)
+        if rot is not None:
+            pl["rot"] = float(rot)
+        if record:
+            self.record("Place image", only=[lid])
+        l.place = pl
+        sh, sw = src.shape[:2]
+        ys, xs = np.mgrid[0:self.height, 0:self.width].astype(np.float32)
+        # inverse map: doc pixel -> source pixel
+        dx = xs - pl["x"]
+        dy = ys - pl["y"]
+        th = np.deg2rad(-pl["rot"])
+        rx = dx * np.cos(th) - dy * np.sin(th)
+        ry = dx * np.sin(th) + dy * np.cos(th)
+        sx = rx / pl["scale"] + sw / 2.0
+        sy = ry / pl["scale"] + sh / 2.0
+        inside = (sx >= 0) & (sx <= sw - 1) & (sy >= 0) & (sy <= sh - 1)
+        x0 = np.clip(np.floor(sx), 0, sw - 2).astype(np.int32)
+        y0 = np.clip(np.floor(sy), 0, sh - 2).astype(np.int32)
+        fx = np.clip(sx - x0, 0, 1)[..., None]
+        fy = np.clip(sy - y0, 0, 1)[..., None]
+        s00 = src[y0, x0]
+        s01 = src[y0, x0 + 1]
+        s10 = src[y0 + 1, x0]
+        s11 = src[y0 + 1, x0 + 1]
+        out = (s00 * (1 - fx) * (1 - fy) + s01 * fx * (1 - fy)
+               + s10 * (1 - fx) * fy + s11 * fx * fy).astype(np.float32)
+        out[~inside] = 0.0
+        l.pixels = out
+        _MUT_REV[0] += 1
+        return True
 
     def replace_from_source(self, lid):
         """Re-render a placed layer from its ORIGINAL pixels at the current
@@ -2322,6 +3532,17 @@ class Document:
             g["layers"] = [x for x in g["layers"] if x != lid]
 
     # --- groups -----------------------------------------------------------------
+        if getattr(self, "lights", None):
+            self.lights = [li for li in self.lights
+                           if li.get("layer") != lid]
+        if getattr(self, "fields", None):
+            self.fields = [f for f in self.fields
+                           if f.get("layer") != lid]
+        for s, cur in getattr(self, "walls", {}).items():
+            if cur == lid:
+                self.walls[s] = None
+                if self.wall_edit == s:
+                    self.wall_edit = None
     def group(self, gid):
         for g in self.groups:
             if g["id"] == gid:
@@ -2389,11 +3610,42 @@ class Document:
         for k in ("name", "visible", "opacity", "blend", "mask_invert",
                   "alpha_lock", "clip", "thickness", "vol_kind", "vol_ior",
                   "vol_density", "absorbency", "emissive",
-                  "emissive_color", "reflect", "dispersion", "z_off",
+                  "emissive_color", "reflect", "dispersion",
+                  "media_rate", "z_off",
                   "tilt_x", "tilt_y",
-                  "curve", "dome", "field", "field_mode", "field_strength"):
+                  "curve", "dome", "field", "field_mode", "field_strength",
+                  "curve_axis", "locked", "relief", "optical",
+                  "media_res", "media_time"):
             if k in props and props[k] is not None:
-                setattr(l, k, props[k])
+                v = props[k]
+                if k == "thickness":
+                    v = max(float(v), 0.1)       # >= 0.01 mm, always
+                elif k in ("tilt_x", "tilt_y"):
+                    # past +/-90 the slab faces away and reads as a
+                    # mirrored image -- use Flip for that instead
+                    v = float(np.clip(float(v), -90.0, 90.0))
+                setattr(l, k, v)
+        for pk in ("curve_profile", "dome_profile"):
+            # None = untouched (the route sends None for absent keys);
+            # an explicit EMPTY list clears back to the legacy arc
+            if pk in props and props[pk] is not None:
+                pr = props[pk]
+                if pr:
+                    pr = [[float(np.clip(t, 0.0, 1.0)),
+                           float(np.clip(v, -1.0, 1.0))]
+                          for t, v in pr][:16]   # bounded, like everything
+                    setattr(l, pk, pr)
+                else:
+                    setattr(l, pk, None)
+        if "bg" in props:                        # None clears -> transparent
+            b = props["bg"]
+            if b:
+                b = {"kind": str(b.get("kind", "color")),
+                     "color": [float(c) for c in b.get("color",
+                                                       [1, 1, 1, 1])][:4],
+                     "tex": str(b.get("tex", "paper")),
+                     "scale": float(b.get("scale", 3.0))}
+            l.bg = b or None
         if "mask" in props:                      # None / "" detaches
             l.mask = props["mask"] or None
 
@@ -2459,7 +3711,8 @@ class Document:
     def add_light(self, kind="directional", color=(1.0, 1.0, 1.0),
                   intensity=1.0, azimuth=315.0, elevation=45.0,
                   x=None, y=None, z=60.0, aim_x=None, aim_y=None,
-                  cone=30.0, soft=0.5, color2=(0.25, 0.22, 0.18)):
+                  cone=30.0, soft=0.5, color2=(0.25, 0.22, 0.18),
+                  layer=None, scale=1.0, shadows=True):
         """A light in the environment. Kinds: "view" (aligned with the
         viewer -- frontal, like a camera lamp), "directional" (casts
         ACROSS the canvas from a compass azimuth at an elevation, with
@@ -2478,13 +3731,126 @@ class Document:
               "aim_y": float(aim_y if aim_y is not None
                              else self.height / 2.0),
               "cone": float(cone), "soft": float(soft),
+              "shadows": bool(shadows),
               "color2": [float(c) for c in color2],
+              "layer": layer,           # a LAYER light lives inside one
+              "scale": float(scale),    # physical size: broadens the pool
               "enabled": True}
         self._lnext += 1
         self.record("Add light", only=[])
         self.lights.append(li)
         _MUT_REV[0] += 1
         return li
+
+
+    WALL_SIDES = ("front", "back", "left", "right")
+
+    def assign_wall(self, side, lid):
+        """Put an ordinary layer on one of the four perpendicular
+        planes. The layer keeps everything it had -- strokes, thickness,
+        volume, fields, lights -- it simply now stands off the canvas on
+        that side. Assigning does not copy or convert anything, so the
+        artist can pull it back to the canvas with clear_wall and lose
+        nothing."""
+        if side not in self.WALL_SIDES:
+            raise ValueError("side must be one of %s" % (self.WALL_SIDES,))
+        l = self.layer(lid)                    # raises if unknown
+        self.record("Assign wall")
+        for s, cur in self.walls.items():      # a layer stands on one wall
+            if cur == lid and s != side:
+                self.walls[s] = None
+        self.walls[side] = lid
+        l.wall = side
+        _MUT_REV[0] += 1
+        return dict(self.walls)
+
+    def clear_wall(self, side):
+        """Take the layer off that plane and give it back to the canvas."""
+        if side not in self.WALL_SIDES:
+            raise ValueError("side must be one of %s" % (self.WALL_SIDES,))
+        lid = self.walls.get(side)
+        self.record("Clear wall")
+        self.walls[side] = None
+        if lid:
+            try:
+                self.layer(lid).wall = None
+            except KeyError:
+                pass
+        if self.wall_edit == side:
+            self.wall_edit = None
+        _MUT_REV[0] += 1
+        return dict(self.walls)
+
+    def edit_wall(self, side):
+        """Open a wall for painting: while a side is being edited its
+        layer shows on the canvas like any other, so every existing tool
+        works on it unchanged. Pass None to close and let it stand back
+        up on its plane."""
+        if side is not None and side not in self.WALL_SIDES:
+            raise ValueError("side must be one of %s" % (self.WALL_SIDES,))
+        self.wall_edit = side
+        _MUT_REV[0] += 1
+        return side
+
+    def wall_layers(self):
+        """{side: layer} for the assigned planes, skipping empty slots."""
+        out = {}
+        for s in self.WALL_SIDES:
+            lid = self.walls.get(s)
+            if not lid:
+                continue
+            try:
+                out[s] = self.layer(lid)
+            except KeyError:
+                pass
+        return out
+
+    def add_field(self, kind="point", layer=None, x=None, y=None,
+                  radius=120.0, strength=1.0, angle=0.0):
+        """A FORCE FIELD as a first-class object, parented to a layer
+        like a light child: it rides the layer's visibility and dies
+        with it. Kinds: "point" (radial push/pull -- strength sign
+        chooses attract vs repel), "direct" (uniform push along angle
+        degrees), "vortex" (swirl about the centre). Fields shape the
+        layer's LIVING MEDIA each timeline step; several sum."""
+        self.record("Add field", only=[])
+        f = {"id": "F%d" % self._fnext,
+             "kind": kind, "layer": layer,
+             "x": float(x if x is not None else self.width / 2.0),
+             "y": float(y if y is not None else self.height / 2.0),
+             "radius": max(8.0, float(radius)),
+             "strength": float(strength), "angle": float(angle)}
+        self._fnext += 1
+        self.fields.append(f)
+        _MUT_REV[0] += 1
+        return f
+
+    def field_by_id(self, fid):
+        for f in self.fields:
+            if f["id"] == fid:
+                return f
+        return None
+
+    def edit_field(self, fid, **kw):
+        f = self.field_by_id(fid)
+        if f is None:
+            raise KeyError(fid)
+        self.record("Edit field", only=[])
+        for k, v in kw.items():
+            if v is None or k not in ("kind", "layer", "x", "y",
+                                      "radius", "strength", "angle"):
+                continue
+            f[k] = v if k in ("kind", "layer") else float(v)
+        f["radius"] = max(8.0, float(f["radius"]))
+        _MUT_REV[0] += 1
+        return f
+
+    def delete_field(self, fid):
+        self.record("Remove field", only=[])
+        n = len(self.fields)
+        self.fields = [f for f in self.fields if f["id"] != fid]
+        _MUT_REV[0] += 1
+        return len(self.fields) < n
 
     def edit_light(self, lid, **kw):
         for li in self.lights:
@@ -2495,13 +3861,20 @@ class Document:
                         li[k] = str(v)
                     elif k == "color":
                         li[k] = [float(c) for c in v]
-                    elif k == "enabled":
+                    elif k in ("enabled", "shadows"):
                         li[k] = bool(v)
                     elif k == "color2":
                         li[k] = [float(c) for c in v]
+                    elif k == "layer":
+                        li[k] = v
+                    elif k in ("aim_x", "aim_y"):
+                        # a light always TARGETS a point inside the
+                        # document bounds -- it can orbit anywhere, but
+                        # it never shines off into nothing
+                        lim = self.width if k == "aim_x" else self.height
+                        li[k] = float(np.clip(float(v), 0.0, lim))
                     elif k in ("intensity", "azimuth", "elevation",
-                               "x", "y", "z", "aim_x", "aim_y", "cone",
-                               "soft"):
+                               "x", "y", "z", "cone", "soft", "scale"):
                         li[k] = float(v)
                 _MUT_REV[0] += 1
                 return li
@@ -2553,6 +3926,200 @@ class Document:
         else:
             raise KeyError(name)
         return self.lights
+
+    # --- the timeline: keyframed properties + a global playhead --------
+    ANIMATABLE = {"layer": ("opacity", "z_off", "tilt_x", "tilt_y",
+                            "thickness", "emissive", "reflect",
+                            "dispersion", "media_rate"),
+                  "light": ("intensity", "azimuth", "elevation",
+                            "x", "y", "z", "cone"),
+                  "node": ()}       # any numeric param, checked live
+
+    def _track_target(self, kind, tid):
+        if kind == "node":
+            g = getattr(self, "graph_ref", None)
+            if g is None or tid not in g.nodes:
+                raise KeyError(tid)
+            return g.nodes[tid]
+        if kind == "layer":
+            return self.layer(tid)
+        if kind == "light":
+            for li in self.lights:
+                if li["id"] == tid:
+                    return li
+            raise KeyError(tid)
+        raise KeyError(kind)
+
+    def _prop_get(self, kind, tid, prop):
+        tgt = self._track_target(kind, tid)
+        if kind == "node":
+            return float((tgt.get("params") or {}).get(prop, 0.0))
+        if kind == "light":
+            return float(tgt[prop])
+        if prop == "media_rate":
+            return float(getattr(tgt, "media_rate", 1.0))
+        return float(getattr(tgt, prop, 0.0))
+
+    def _prop_set(self, kind, tid, prop, v):
+        tgt = self._track_target(kind, tid)
+        if kind == "node":
+            tgt.setdefault("params", {})[prop] = float(v)
+        elif kind == "light":
+            tgt[prop] = float(v)
+        else:
+            setattr(tgt, prop, float(v))
+
+    def set_key(self, kind, tid, prop, t=None, v=None):
+        """Set a KEYFRAME: pin this property to a value at a frame (both
+        default to right now / the live value). Re-keying an existing
+        frame moves its value. Undoable."""
+        if kind == "node":
+            n = self._track_target(kind, tid)     # raises if absent
+            od = OPS.get(n.get("type"), {})
+            kinds = {pp["name"]: pp.get("kind", "float")
+                     for pp in od.get("params", [])}
+            if kinds.get(prop) not in ("float", "int"):
+                raise KeyError(prop)
+        elif prop not in self.ANIMATABLE.get(kind, ()):
+            raise KeyError(prop)
+        t = float(self.frame if t is None else t)
+        v = float(self._prop_get(kind, tid, prop) if v is None else v)
+        self.record("Set key", only=[])
+        key = "%s:%s:%s" % (kind, tid, prop)
+        ks = [k for k in self.tracks.get(key, []) if abs(k[0] - t) > 1e-6]
+        ks.append([t, v])
+        ks.sort(key=lambda k: k[0])
+        self.tracks[key] = ks
+        _MUT_REV[0] += 1
+        return ks
+
+    def del_key(self, kind, tid, prop, t=None):
+        """Delete the keyframe at a frame (default: the playhead).
+        Deleting the last key removes the track and the property stays at
+        its live value. Undoable."""
+        t = float(self.frame if t is None else t)
+        key = "%s:%s:%s" % (kind, tid, prop)
+        ks = [k for k in self.tracks.get(key, [])
+              if abs(k[0] - t) > 1e-6]
+        self.record("Delete key", only=[])
+        if ks:
+            self.tracks[key] = ks
+        else:
+            self.tracks.pop(key, None)
+        _MUT_REV[0] += 1
+
+    def track_eval(self, key, t):
+        """A track's value at time t: linear between keys, held flat
+        before the first and after the last."""
+        ks = self.tracks.get(key)
+        if not ks:
+            return None
+        if t <= ks[0][0]:
+            return ks[0][1]
+        if t >= ks[-1][0]:
+            return ks[-1][1]
+        for i in range(1, len(ks)):
+            if t <= ks[i][0]:
+                a, b = ks[i - 1], ks[i]
+                f = (t - a[0]) / max(b[0] - a[0], 1e-6)
+                return a[1] * (1 - f) + b[1] * f
+        return ks[-1][1]
+
+    def set_frame(self, t, record=False):
+        """Move the PLAYHEAD: every keyframed property takes its
+        interpolated value, and living media (ink/smoke/fire) advance by
+        the elapsed frames times their (keyable) media_rate -- so a
+        medium whose rate is keyed 0 until frame 30 simply waits, then
+        starts. Media are forward-only: scrubbing backward re-poses the
+        keyed properties exactly but cannot un-simulate fluid."""
+        t = float(np.clip(t, self.frame_range[0], self.frame_range[1]))
+        dt = t - float(getattr(self, "frame", 0.0))
+        self.frame = t
+        # bump FIRST so anything below that patches the composite
+        # cache leaves it marked current (see the note at the end)
+        _MUT_REV[0] += 1
+        for key in list(self.tracks.keys()):
+            kind, tid, prop = key.split(":", 2)
+            try:
+                v = self.track_eval(key, t)
+                if v is not None:
+                    self._prop_set(kind, tid, prop, v)
+            except KeyError:
+                continue                      # target deleted; track idles
+        if dt != 0:
+            for l in self.layers:
+                if getattr(l, "vol_kind", "none") in _MEDIA_KINDS:
+                    if str(getattr(l, "media_time", "timeline")) == "live":
+                        # LIVE media are timeline-INDEPENDENT: they cook
+                        # on their own clock and are never restored to a
+                        # past state. Some sources genuinely cannot be
+                        # rewound -- a live video feed is the honest
+                        # example -- and pretending otherwise would be a
+                        # lie the rest of the timeline machinery has to
+                        # keep. Scrubbing simply does not touch them.
+                        continue
+                    rate = float(getattr(l, "media_rate", 1.0))
+                    # THICKNESS scales time: a deep dish holds more
+                    # fluid, so the same elapsed frames move it further
+                    # -- this used to live in the per-stroke burst
+                    # (8 + thickness); with the playhead as the only
+                    # clock, the dial rides the frame advance instead.
+                    tmul = float(np.clip(
+                        getattr(l, "thickness", 8.0) / 8.0, 0.25, 3.0))
+                    # ONE TIME MODEL, both directions: media time is
+                    # FRACTIONAL STEPS integrated along the playhead's
+                    # visited path, recorded as (frame, fsteps) marks.
+                    # The target for any t extends from the last mark
+                    # at or before t under the CURRENT rate, so rate
+                    # edits (including media_rate 0 = freeze in place)
+                    # start a new segment instead of rewriting
+                    # history; fractional nudges accumulate without
+                    # loss (the old per-dt rounding lost 85% of the
+                    # medium's time under a slow drag); and rewind
+                    # restores the recorded past byte-identically.
+                    marks = getattr(l, "_media_marks", None)
+                    if marks is None:
+                        continue            # nothing injected yet
+                    i = len(marks) - 1
+                    while i > 0 and marks[i][0] > t + 1e-9:
+                        i -= 1
+                    f0, s0 = marks[i]
+                    target_f = max(0.0, s0 + max(0.0, t - f0)
+                                   * rate * 0.8 * tmul)
+                    tgt = int(round(target_f))
+                    cur = getattr(l, "_media_cache_at", None)
+                    if cur is not None and tgt == cur:
+                        # time did not move for this layer: touch
+                        # NOTHING (a restore re-renders pixels from
+                        # the slab, which is not byte-equal to a
+                        # freshly painted stamp)
+                        del marks[i + 1:]
+                        if abs(marks[i][0] - t) < 1e-9:
+                            marks[i] = (t, target_f)
+                        else:
+                            marks.append((t, target_f))
+                        continue
+                    _media_restore_to_step(self, l, tgt)
+                    at = getattr(l, "_media_cache_at", None)
+                    if at is None:
+                        continue
+                    if tgt > at:
+                        _media_slab_step(self, l, min(tgt - at, 64))
+                        _media_cache_put(self, l, tgt)
+                    # record the mark (replace same-frame, drop future)
+                    del marks[i + 1:]
+                    if abs(marks[i][0] - t) < 1e-9:
+                        marks[i] = (t, target_f)
+                    else:
+                        marks.append((t, target_f))
+                    if len(marks) > 600:
+                        del marks[1:len(marks) - 500]
+        # NOTE the bump is at the TOP of this method, not here. Bumping
+        # after the media renders left the composite cache exactly one
+        # revision stale at serve time, so every playback frame paid a
+        # full-canvas re-composite even though the media path had just
+        # patched the changed window correctly.
+        return t
 
     def place_stamp(self, lid, sid, x, y, scale=1.0, rotation=0.0,
                     opacity=1.0, record=True):
@@ -3038,6 +4605,72 @@ class Document:
         if op in ("rot90", "rot270"):
             self.width, self.height = h, w
 
+    def fill_layer(self, lid, content, record=True, respect_alpha=False):
+        """Wash the WHOLE layer with generated content in one call --
+        {"kind": "solid", "color": [r,g,b,(a)]},
+        {"kind": "gradient", "from": [...], "to": [...], "angle": deg}, or
+        {"kind": "radial", "inner": [...], "outer": [...],
+         "cx"?, "cy"?, "radius"?}.
+        Dogfooding friction: a background vignette took ~40 overlapping
+        soft stamps because there was no field fill. respect_alpha=True
+        recolours only where the layer already has pixels (a one-call
+        glaze). Locked layers refuse; undoable."""
+        self._locked_guard(lid)
+        l = self.layer(lid)
+        if record:
+            self.record("Fill layer", only=[lid])
+        h, w = self.height, self.width
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        kind = content.get("kind", "solid")
+
+        def col(c, default=(0, 0, 0, 1)):
+            c = list(c if c is not None else default)
+            if len(c) == 3:
+                c = c + [1.0]
+            return np.asarray(c, np.float32)
+
+        if kind == "solid":
+            field = np.broadcast_to(col(content.get("color")),
+                                    (h, w, 4)).copy()
+        elif kind == "gradient":
+            a = np.deg2rad(float(content.get("angle", 0.0)))
+            t = ((xx - w / 2) * np.cos(a) + (yy - h / 2) * np.sin(a))
+            t = (t - t.min()) / max(t.max() - t.min(), 1e-6)
+            c0, c1 = col(content.get("from")), col(content.get("to"))
+            field = c0[None, None] * (1 - t[..., None])                 + c1[None, None] * t[..., None]
+        elif kind == "radial":
+            cx = float(content.get("cx", w / 2.0))
+            cy = float(content.get("cy", h / 2.0))
+            rad = float(content.get("radius", max(w, h) / 2.0))
+            t = np.clip(np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) / rad,
+                        0.0, 1.0)
+            c0, c1 = col(content.get("inner")), col(content.get("outer"))
+            field = c0[None, None] * (1 - t[..., None])                 + c1[None, None] * t[..., None]
+        else:
+            raise ValueError("unknown fill kind %r" % kind)
+        field = field.astype(np.float32)
+        if respect_alpha:
+            keep = l.pixels[..., 3:4]
+            l.pixels = np.concatenate(
+                [field[..., :3] * field[..., 3:4]
+                 + l.pixels[..., :3] * (1 - field[..., 3:4]),
+                 keep], -1).astype(np.float32)
+        else:
+            # normal source-over onto the existing pixels
+            fa = field[..., 3:4]
+            l.pixels = np.concatenate(
+                [field[..., :3] * fa + l.pixels[..., :3]
+                 * l.pixels[..., 3:4] * (1 - fa),
+                 fa + l.pixels[..., 3:4] * (1 - fa)], -1)
+            nz = l.pixels[..., 3:4] > 1e-6
+            l.pixels[..., :3] = np.where(
+                nz, l.pixels[..., :3] / np.maximum(l.pixels[..., 3:4],
+                                                   1e-6),
+                l.pixels[..., :3])
+            l.pixels = l.pixels.astype(np.float32)
+        _MUT_REV[0] += 1
+        return True
+
     def flood_fill(self, lid, x, y, content, tolerance=0.12, contiguous=True,
                    selection=None):
         """Paint-bucket: fill the region of layer `lid` around (x, y) with
@@ -3048,6 +4681,7 @@ class Document:
         Filled pixels become opaque. Pass a selection id in `selection` to
         confine the fill to that selection (Photoshop/GIMP behaviour: the
         bucket never spills past the marquee). Returns the filled count."""
+        self._locked_guard(lid)
         self.record("Fill", only=[lid])
         l = self.layer(lid)
         h, w = l.pixels.shape[:2]
@@ -3698,6 +5332,7 @@ class Document:
 
         Refuses (returns 0) unless a faithful replay is possible, so it can
         never eat content it did not draw."""
+        self._locked_guard(lid)
         if len(path) < 2 or not self.replay_is_faithful(lid):
             return 0
         if record:
@@ -4016,6 +5651,8 @@ class Document:
         if not ks:
             return 0
         lids = {k["layer"] for k in ks}
+        for _l in lids:
+            self._locked_guard(_l)
         self._stroke_edit_guard(lids)
         if cx is None or cy is None:
             xs = [p[0] for k in ks for p in k["points"]]
@@ -4715,11 +6352,42 @@ class Document:
             l.pixels[..., 3:4] = 0.0
 
     # --- painting --------------------------------------------------------------------------------
+    def _locked_guard(self, lid):
+        """A LOCKED layer refuses every edit -- pixels, strokes, pose,
+        placement -- not just transparency (that is alpha_lock's job,
+        and conflating the two was exactly the confusion reported:
+        'locking a layer doesn't prevent edits like it should')."""
+        l = self.layer(lid)
+        if getattr(l, "locked", False):
+            raise ValueError("layer %r is locked -- unlock it to edit"
+                             % l.name)
+
     def paint(self, lid, points, color=(0, 0, 0), radius=8.0, opacity=1.0,
               erase=False, hardness=0.7, record=True,
               selection=None, sel_invert=False, brush=None, target_mask=None,
-              stroke_new=None, media=None, load=0.6, alpha_lock=None):
+              stroke_new=None, media=None, load=0.6, alpha_lock=None,
+              taper=0.0):
+        self._locked_guard(lid)
         rev_entry = _MUT_REV[0]      # cache-patch validity: pre-edit revision
+        if taper and len(points) > 2 and not any(
+                len(p) > 2 for p in points):
+            # LIVE TAPER: materialise as per-point pressure at entry --
+            # width ramps 0->1 over the first `taper` fraction of the
+            # stroke's arc length and back down over the last. Because
+            # the pressures are written into the points themselves, the
+            # recorded stroke replays with its taper for free, and the
+            # post-hoc joint tools keep working on top.
+            import numpy as _np
+            arr = _np.asarray([[p[0], p[1]] for p in points], _np.float32)
+            seg = _np.sqrt(((arr[1:] - arr[:-1]) ** 2).sum(1))
+            t = _np.concatenate([[0.0], _np.cumsum(seg)])
+            total = float(t[-1]) or 1.0
+            t = t / total
+            T = float(np.clip(taper, 0.02, 0.5))
+            f = _np.minimum(1.0, _np.minimum(t / T, (1.0 - t) / T))
+            f = _np.clip(f, 0.06, 1.0)      # a hair, never a zero stamp
+            points = [[float(p[0]), float(p[1]), float(f[i])]
+                      for i, p in enumerate(points)]
         faith_entry = bool(record) and self._replay_ok_cached(lid)
         if alpha_lock is None:
             # resolve the layer's lock NOW: the stroke record is written
@@ -4957,10 +6625,25 @@ class Document:
         # realtime feedback: re-light and re-blend ONLY this stroke's window.
         # Validity is judged against the revision captured on entry, so the
         # record/announce bumps inside this very call don't invalidate it.
-        _shade_patch(l, x0b, y0b, x1b, flow_bottom, rev_entry)
-        composite_patch(self, x0b, y0b, x1b, flow_bottom, rev_entry)
-        # the serve layer reads this to hand the CLIENT just the dirty window
-        self._last_paint_rect = (int(x0b), int(y0b), int(x1b), int(flow_bottom))
+        if not getattr(self, "_replaying", False):
+            _shade_patch(l, x0b, y0b, x1b, flow_bottom, rev_entry)
+            # the composite (and the client's dirty window) must cover
+            # the RE-LIT ring around the stroke, not just the pigment
+            # bbox -- relief shading reaches ~6 px past the mask
+            pd = 8
+            composite_patch(self, x0b - pd, y0b - pd, x1b + pd,
+                            flow_bottom + pd, rev_entry)
+            self._last_paint_rect = (max(0, int(x0b) - pd),
+                                     max(0, int(y0b) - pd),
+                                     min(w, int(x1b) + pd),
+                                     min(h, int(flow_bottom) + pd))
+        # REPLAY paints must not touch the caches: replay_layer is used as a
+        # read-only PROBE by the faithfulness guard, which swaps in base
+        # pixels, replays, and restores -- patching mid-replay stamped the
+        # composite cache rev-current with ghost strokes over the real
+        # frame. That was the recurring "images piled on top of each other"
+        # artifact: any guarded stroke edit (eraser on a layer with a fill,
+        # a nudge probe) poisoned the cache without ever failing.
         if getattr(l, "vol_kind", "none") in _MEDIA_KINDS:
             # a DYNAMIC medium: the stroke is an injection of dye, and the
             # slab immediately runs a burst of solve steps scaled by its
@@ -4970,8 +6653,15 @@ class Document:
             # barely tints it.
             _media_inject(self, l, x0b, y0b, x1b, flow_bottom,
                           strength=min(float(load) / 0.6, 2.0))
-            _media_slab_step(self, l,
-                             8 + int(getattr(l, "thickness", 8.0)))
+            # THE DOCUMENT TIMELINE RULES TIME. Painting used to run its
+            # own burst of solver steps (8 + thickness) -- "it just
+            # animates some random increment and I have zero control".
+            # Now a stroke only INJECTS dye and disturbs the velocity
+            # field; the medium advances exclusively when the playhead
+            # moves (set_frame / play, scaled by the layer's keyable
+            # media_rate). No settle either -- even two global solver
+            # steps drifted distant ink 0.45. Fresh dye sits exactly as
+            # painted until the playhead moves; that IS the control.
         _absorb = float(getattr(l, "absorbency", 0.0))
         if _absorb > 0.0:
             # a wet brush soaks deeper than a dry one: load scales the
@@ -5071,6 +6761,7 @@ class Document:
 
     def smudge(self, lid, points, radius=12.0, strength=0.6, brush=None, record=True):
         """Drag colour along the stroke: the tip picks paint up and lays it back down."""
+        self._locked_guard(lid)
         _MUT_REV[0] += 1
         if record:
             self.record("Smudge")
@@ -5271,8 +6962,18 @@ class Document:
                                     dst[..., :3])
             dst[..., 3:4] = new_a
 
+    def canvas_layers(self):
+        """The layers that belong to the PICTURE. A layer standing on a
+        wall is not canvas content -- it is hidden until its side is
+        opened for painting, at which point it lies flat and every
+        ordinary tool works on it unchanged."""
+        we = getattr(self, "wall_edit", None)
+        return [l for l in self.layers
+                if getattr(l, "wall", None) in (None, we)]
+
     def composite(self):
-        return composite(self.layers, self.height, self.width, self.mask_map())
+        return composite(self.canvas_layers(), self.height, self.width,
+                         self.mask_map())
 
 
 # ------------------------------------------------------------------------------------------------
@@ -5313,6 +7014,48 @@ def P(name, kind="float", default=0.5, lo=0.0, hi=1.0, choices=None,
     if when:
         d["when"] = when
     return d
+
+
+@op("time", "Generate", inputs=(),
+    params=(P("mode", "choice", "normalized",
+              choices=["normalized", "frame", "seconds", "pulse"],
+              hint="normalized: playhead position 0..1 across the frame "
+                   "range; frame/seconds: raw clock scaled by speed; "
+                   "pulse: a 0..1..0 triangle each second"),
+            P("speed", "float", 1.0, 0.0, 8.0,
+              hint="multiplies the clock"),
+            P("offset", "float", 0.0, -4.0, 4.0,
+              hint="added after scaling")),
+    doc="The TIMELINE as a node: a uniform image whose value is the "
+        "global playhead, for wiring time into any other node's image "
+        "inputs (mix factors, displacement amounts, masks). Everything "
+        "it drives scrubs and plays with the timeline -- no clock of "
+        "its own.")
+def _op_time(size, ins, params):
+    h, w = size
+    # the evaluator ALWAYS injects _frame (including a real 0.0); a bare
+    # fn call without injection is a test harness, which gets a nonzero
+    # probe frame so mode/speed visibly bite in the dead-param audit
+    f = float(params.get("_frame", 30.0))
+    fps = max(float(params.get("_fps", 24.0)), 1e-3)
+    lo, hi = params.get("_range", [0.0, 96.0])
+    mode = params.get("mode", "normalized")
+    if mode == "frame":
+        v = f
+    elif mode == "seconds":
+        v = f / fps
+    elif mode == "pulse":
+        s = f / fps * max(float(params.get("speed", 1.0)), 1e-6)
+        v = 1.0 - abs((s % 1.0) * 2.0 - 1.0)
+    else:
+        v = (f - lo) / max(hi - lo, 1e-6)
+    if mode != "pulse":
+        v = v * float(params.get("speed", 1.0))
+    v += float(params.get("offset", 0.0))
+    out = np.empty((h, w, 4), np.float32)
+    out[..., :3] = np.clip(v, 0.0, 1.0)
+    out[..., 3] = 1.0
+    return out
 
 
 def _grid_pts(h, w, dims=3):
@@ -7594,7 +9337,13 @@ def _strokefx_field(doc, ref, h, w):
     the field must follow."""
     if not ref:
         return None
-    key = (id(doc), str(ref), _MUT_REV[0])
+    # id(doc) alone is unsafe: after GC a NEW document can reuse the
+    # address while the global revision happens to match, and a stale
+    # grid built for the old document's size comes back -- an
+    # intermittent wrong-size render that reproduced only under a full
+    # chunk's allocation churn. The doc id string + dimensions pin it.
+    key = (id(doc), getattr(doc, "id", ""), doc.width, doc.height,
+           str(ref), _MUT_REV[0])
     if key in _FIELD_MEMO:
         return _FIELD_MEMO[key]
     gw = max(24, min(96, w // 8))
@@ -8993,6 +10742,10 @@ def _node_doc(graph, n):
 class NodeGraph:
     def __init__(self, document: Document):
         self.doc = document
+        try:
+            document.graph_ref = self   # the timeline drives node params
+        except Exception:
+            pass
         self.nodes = {}          # id -> {id, type, params, inputs {socket: "nid[.sock]"}, x, y}
         self._cache = {}         # id -> (signature, {socket: image})
         self._counter = 0
@@ -9191,6 +10944,9 @@ class NodeGraph:
                  "muted" if n.get("mute") else ""]
         if n["type"] in ("Layer", "Layer group", "Mask"):
             parts.append("doc:" + str((n.get("params") or {}).get("doc", "")))
+        if n["type"] == "time":
+            dd = _node_doc(self, n)
+            parts.append("clock:%.4f" % float(getattr(dd, "frame", 0.0)))
         if n["type"] == "Shadertoy":
             parts.append("stgen:%d" % SHADER_GEN[0])   # frames arrive out-of-band
         if n["type"] == "Media in":
@@ -9450,6 +11206,12 @@ class NodeGraph:
                     ins[sock] = v if meta.get("rgba") else v[..., :3]
             params = {p["name"]: p["default"] for p in meta["params"]}
             params.update(n.get("params") or {})
+            if n["type"] == "time":
+                dd = _node_doc(self, n)
+                params["_frame"] = float(getattr(dd, "frame", 0.0))
+                params["_fps"] = float(getattr(dd, "fps", 24.0))
+                params["_range"] = list(getattr(dd, "frame_range",
+                                                [0.0, 96.0]))
             # VALUE WIRES: inputs keyed "param:<name>" drive parameters from the
             # graph -- a Value/Color node's number, or any image's mean luminance
             for key, src in (n.get("inputs") or {}).items():
@@ -9653,11 +11415,46 @@ def _doc_section(d, g):
           "stamps": [],
           "graph": g.to_list() if g is not None else []}
     for l in d.layers:
+        # the FULL physical sheet, not just identity: the loader has read
+        # these keys all along, but the saver never wrote them -- so
+        # thickness, volume kind, pose, optics, and backgrounds silently
+        # reverted to defaults on every reopen until now.
         dm["layers"].append({"id": l.id, "name": l.name, "visible": l.visible,
                              "opacity": l.opacity, "blend": l.blend,
                              "mask": l.mask, "mask_invert": l.mask_invert,
                              "alpha_lock": bool(getattr(l, "alpha_lock", False)),
-                             "clip": bool(getattr(l, "clip", False))})
+                             "clip": bool(getattr(l, "clip", False)),
+                             "thickness": float(getattr(l, "thickness", 1.0)),
+                             "vol_kind": getattr(l, "vol_kind", "none"),
+                             "vol_ior": float(getattr(l, "vol_ior", 1.33)),
+                             "vol_density": float(getattr(l, "vol_density", 0.5)),
+                             "absorbency": float(getattr(l, "absorbency", 0.0)),
+                             "emissive": float(getattr(l, "emissive", 0.0)),
+                             "emissive_color": getattr(l, "emissive_color", None),
+                             "reflect": float(getattr(l, "reflect", 0.0)),
+                             "dispersion": float(getattr(l, "dispersion", 0.0)),
+                             "media_rate": float(getattr(l, "media_rate", 1.0)),
+                             "bg": json.loads(json.dumps(getattr(l, "bg", None))),
+                             "z_off": float(getattr(l, "z_off", 0.0)),
+                             "tilt_x": float(getattr(l, "tilt_x", 0.0)),
+                             "tilt_y": float(getattr(l, "tilt_y", 0.0)),
+                             "curve": float(getattr(l, "curve", 0.0)),
+                             "dome": float(getattr(l, "dome", 0.0)),
+                             "field": getattr(l, "field", ""),
+                             "field_mode": getattr(l, "field_mode", "attract"),
+                             "field_strength": float(getattr(l, "field_strength", 120.0)),
+                             "place": json.loads(json.dumps(
+                                 getattr(l, "place", None))),
+                             "locked": bool(getattr(l, "locked", False)),
+                             "relief": float(getattr(l, "relief", 1.0)),
+                             "optical": bool(getattr(l, "optical", False)),
+                             "media_res": str(getattr(l, "media_res", "normal")),
+                             "media_time": str(getattr(l, "media_time", "timeline")),
+                             "curve_axis": getattr(l, "curve_axis", "x"),
+                             "curve_profile": json.loads(json.dumps(
+                                 getattr(l, "curve_profile", None))),
+                             "dome_profile": json.loads(json.dumps(
+                                 getattr(l, "dome_profile", None)))})
         arrays[f"layer_{l.id}"] = l.pixels
         base = getattr(d, "_replay_base", {}).get(l.id)
         if base is not None:
@@ -9693,7 +11490,14 @@ def _doc_section(d, g):
                                  "shape": getattr(x, "shape", None)})
         arrays[f"sel_{x.id}"] = x.data
     dm["lights"] = [dict(li) for li in getattr(d, "lights", [])]
+    dm["fields"] = [dict(f) for f in getattr(d, "fields", [])]
+    dm["walls"] = dict(getattr(d, "walls", {}))
     dm["persp"] = json.loads(json.dumps(getattr(d, "persp", {})))
+    dm["timeline"] = {"frame": float(getattr(d, "frame", 0.0)),
+                      "fps": float(getattr(d, "fps", 24.0)),
+                      "range": list(getattr(d, "frame_range", [0.0, 96.0])),
+                      "tracks": json.loads(json.dumps(getattr(d, "tracks",
+                                                              {})))}
     for s in getattr(d, "stamps", []):
         dm["stamps"].append({"id": s.id, "name": s.name})
         arrays[f"stamp_{s.id}"] = s.pixels
@@ -9733,8 +11537,22 @@ def _doc_from_section(dm, arrays):
         d.id = dm["id"]; bump(Document, d.id)
         d.layers, d.masks, d.selections, d.brushes = [], [], [], []
         d.lights = [dict(li) for li in dm.get("lights", [])]
+        d.fields = [dict(f) for f in dm.get("fields", [])]
+        d.walls = dict(dm.get("walls", {"front": None, "back": None,
+                                        "left": None, "right": None}))
+        # (the layers do not exist yet -- the slots are linked to their
+        # layers after the layer loop below)
+        d._fnext = 1 + max([0] + [int(f["id"][1:]) for f in d.fields
+                                  if str(f.get("id", "")).startswith("F")
+                                  and str(f["id"])[1:].isdigit()])
         if dm.get("persp"):
             d.persp = json.loads(json.dumps(dm["persp"]))
+        tl = dm.get("timeline")
+        if tl:
+            d.frame = float(tl.get("frame", 0.0))
+            d.fps = float(tl.get("fps", 24.0))
+            d.frame_range = list(tl.get("range", [0.0, 96.0]))
+            d.tracks = json.loads(json.dumps(tl.get("tracks", {})))
         for li in d.lights:
             m2 = _re.search(r"(\d+)$", li["id"])
             if m2:
@@ -9767,6 +11585,22 @@ def _doc_from_section(dm, arrays):
             l.emissive_color = lm.get("emissive_color")
             l.reflect = float(lm.get("reflect", 0.0))
             l.dispersion = float(lm.get("dispersion", 0.0))
+            l.media_rate = float(lm.get("media_rate", 1.0))
+            l.bg = json.loads(json.dumps(lm.get("bg"))) if lm.get("bg") \
+                else None
+            l.place = json.loads(json.dumps(lm.get("place"))) \
+                if lm.get("place") else None
+            l.locked = bool(lm.get("locked", False))
+            l.relief = float(lm.get("relief", 1.0))
+            l.optical = bool(lm.get("optical", False))
+            l.media_res = str(lm.get("media_res", "normal"))
+            l.media_time = str(lm.get("media_time", "timeline"))
+            l.curve_axis = lm.get("curve_axis", "x")
+            l.curve_profile = json.loads(json.dumps(
+                lm.get("curve_profile"))) if lm.get("curve_profile") else None
+            l.dome_profile = json.loads(json.dumps(
+                lm.get("dome_profile"))) if lm.get("dome_profile") else None
+            l.thickness = max(float(lm.get("thickness", 1.0)), 0.1)
             l.z_off = float(lm.get("z_off", 0.0))
             l.tilt_x = float(lm.get("tilt_x", 0.0))
             l.tilt_y = float(lm.get("tilt_y", 0.0))
@@ -9835,6 +11669,19 @@ def _doc_from_section(dm, arrays):
             d.brushes.append(b)
         g = NodeGraph(d)
         g.set_graph(dm.get("graph", []))
+        # link wall slots to their layers. Must run AFTER the layers
+        # exist -- placed earlier (chasing anchors that turned out to
+        # precede the layer loop) every lookup missed and each slot
+        # quietly emptied itself, which read exactly like "walls do not
+        # persist".
+        for _s in list(getattr(d, "walls", {})):
+            _lid = d.walls.get(_s)
+            if not _lid:
+                continue
+            try:
+                d.layer(_lid).wall = _s
+            except KeyError:
+                d.walls[_s] = None           # the layer is gone
         return d, g
 
 

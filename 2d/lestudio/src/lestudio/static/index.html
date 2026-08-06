@@ -15,7 +15,7 @@
 }
 *{box-sizing:border-box;margin:0}
 html,body{height:100%}
-body{background:var(--bg);color:var(--ink);font:13px/1.45 var(--sans);overflow:hidden;display:flex;flex-direction:column}
+body{background:var(--bg);color:var(--ink);font:11px/1.35 var(--sans);overflow:hidden;display:flex;flex-direction:column}
 body>*{flex:none}
 button,select,input{font:inherit;color:var(--ink);background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:4px 9px;transition:border-color .12s,color .12s,background .12s}
 button{cursor:pointer}
@@ -33,21 +33,37 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid 
 #brand b{background:linear-gradient(90deg,var(--wire-a),var(--wire-b));-webkit-background-clip:text;background-clip:text;color:transparent}
 #brand small{color:var(--ink-dim);font-size:10px;margin-left:8px;letter-spacing:.12em;text-transform:uppercase}
 .spacer{flex:1}
+/* GLOBAL DENSITY (manual): Devin: '100% is crowded; 67-75% browser
+   zoom looks better'. CSS zoom broke pointer math (126px paint error),
+   so density comes from the metrics themselves: 12px base type, a
+   slimmer side rail, tighter rows -- the canvas pane gets the estate
+   back with pointer paths untouched. */
 #main{display:flex;flex:1 1 0;min-height:0}
+#timebar{display:flex;align-items:center;gap:6px;height:30px;padding:0 8px;border-top:1px solid var(--line);background:var(--panel)}
+#tlStrip{flex:1;position:relative;height:26px;cursor:ew-resize}
+#tlCanvas{width:100%;height:26px;display:block}
+.keydia{background:none;border:none;cursor:pointer;font-size:12px;padding:0 2px;line-height:1}
+.keydia.filled{color:#e8c26a}
+.keydia.hollow{color:var(--ink-dim)}
+.keydia.dirty{text-shadow:0 0 4px #e07030;color:#e07030}
 .doctab{display:flex;align-items:center;gap:7px;padding:3px 11px;border:1px solid var(--line);border-bottom:none;border-radius:7px 7px 0 0;background:var(--panel2);cursor:pointer;font-size:12px;white-space:nowrap;transition:background .12s}
 .doctab:hover{background:var(--panel)}
 .doctab.on{border-color:var(--wire-a);color:var(--ink-hi);background:linear-gradient(120deg,rgba(85,224,212,.12),rgba(154,123,255,.12))}
 .doctab .x{background:none;border:none;padding:0;color:var(--ink-dim);cursor:pointer}
 .doctab .x:hover{color:var(--ink-hi)}
-#toolbar{width:52px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;align-items:center;padding-top:10px;gap:5px;overflow:visible;flex:none;position:relative;z-index:40}
-#toolbar button{width:38px;height:38px;font-size:16px;padding:0;border-radius:8px}
+#toolbar{width:46px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;align-items:center;padding-top:8px;gap:4px;overflow:visible;flex:none;position:relative;z-index:40}
+/* short windows: the rail SHRINKS instead of scrolling -- overflow-y:auto
+   here computes overflow-x to auto and clips the fly-out submenus (a
+   pinned lesson this line once violated) */
+@media (max-height:720px){ .tgrp{width:28px;height:28px} #toolbar{gap:3px} .tgw>button.cur{font-size:12px} }
+#toolbar button{width:32px;height:32px;font-size:14px;padding:0;border-radius:7px}
 #toolbar button.active{box-shadow:inset 0 0 0 1px var(--wire-a)}
 #toolbar button:disabled{opacity:.32;filter:grayscale(1);cursor:not-allowed}
 /* Tool groups: the rail shows one button per family (the one you used last) and
    the rest fly out sideways, so the rail can never run past the bottom of the
    window the way a flat 16-button column did. */
 .toolsep{width:26px;border-top:1px solid var(--line);margin:4px 0;flex:none}
-.tgrp{position:relative;width:38px;height:38px;flex:none}
+.tgrp{position:relative;width:32px;height:32px;flex:none}
 .tgw{display:flex;gap:3px}
 .tgw>button{flex:none}
 .tgw>button:not(.cur){display:none}
@@ -125,9 +141,10 @@ body.wiring{cursor:crosshair}
 .animBtn:hover{opacity:1}
 .mitem.tpl{color:#c9a6ff}
 .mtplhead{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-dim);padding:6px 10px 2px}
-#firstRun{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:59;
+#firstRun{position:fixed;left:50%;transform:translateX(-50%);bottom:64px;z-index:59;
   background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 13px;
-  display:none;gap:12px;align-items:center;box-shadow:var(--shadow);font-size:12px;max-width:min(92vw,620px)}
+  display:none;gap:12px;align-items:center;box-shadow:var(--shadow);font-size:12px;
+  max-width:min(92vw,620px);flex-wrap:wrap;max-height:calc(100vh - 120px);overflow-y:auto}
 #firstRun b{color:var(--ink-hi)}
 #restoreBanner{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:60;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 12px;display:flex;gap:10px;align-items:center;box-shadow:var(--shadow);font-size:12px}
 .node header .tchip{margin-left:auto;font-size:9px;color:#e8b34c;background:#2a2113;border:1px solid #4a3a1a;border-radius:6px;padding:0 5px;white-space:nowrap}
@@ -150,7 +167,7 @@ body.wiring{cursor:crosshair}
 .mitem:hover{background:var(--panel2);color:var(--ink-hi)}
 #hint{position:absolute;bottom:8px;left:12px;color:var(--ink-dim);font-family:var(--mono);font-size:10.5px;z-index:5}
 
-#side{width:290px;background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}
+#side{width:224px;background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;overflow:hidden}
 .sidegroup{display:flex;flex-direction:column;min-height:0;flex:1 1 0}
 #groupA{flex:0 1 auto;max-height:55%}
 #groupB{flex:1 1 0;border-top:2px solid var(--line)}
@@ -160,10 +177,26 @@ body.wiring{cursor:crosshair}
 .sidetabs button.on{color:var(--ink-hi);border-bottom-color:var(--wire-a);background:linear-gradient(180deg,transparent,rgba(85,224,212,.07))}
 .sidebody{flex:1;overflow-y:auto;min-height:0}
 .sect{display:none}
-.sect.on{display:block}
-.sect{border-bottom:1px solid var(--line);padding:8px 10px}
+/* ONE scroller per half: the sidebody scrolls, sections do not --
+   nested scrollables made "scroll to the bottom" a two-stage puzzle */
+.sect.on{display:block;min-height:0;flex:none}
+.sect input[type=range]{height:12px}
+.sect.on{scrollbar-width:thin;scrollbar-color:var(--ink-dim) transparent}
+.sect.on::-webkit-scrollbar{width:8px}
+.sect.on::-webkit-scrollbar-thumb{background:var(--ink-dim);border-radius:4px}
+[id^=sidebody]{scrollbar-width:thin;scrollbar-color:var(--ink-dim) transparent}
+[id^=sidebody]::-webkit-scrollbar{width:8px}
+[id^=sidebody]::-webkit-scrollbar-thumb{background:var(--ink-dim);border-radius:4px}
+#brushGallery::-webkit-scrollbar{width:8px}
+#brushGallery::-webkit-scrollbar-thumb{background:var(--ink-dim);border-radius:4px}
+/* every floating panel fits the window and scrolls when it cannot:
+   the new-user 'panels off screen' class of report */
+#addMenu,#lightChip,.tbm,#presenceChip,#accelChip{max-height:calc(100vh - 70px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--ink-dim) transparent}
+#addMenu::-webkit-scrollbar,#lightChip::-webkit-scrollbar{width:8px}
+#addMenu::-webkit-scrollbar-thumb,#lightChip::-webkit-scrollbar-thumb{background:var(--ink-dim);border-radius:4px}
+.sect{border-bottom:1px solid var(--line);padding:4px 8px}
 .sect h3.dup{display:none}
-.sect h3{font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-dim);margin-bottom:9px;font-weight:600;display:flex;align-items:center;gap:8px}
+.sect h3{font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-dim);margin-bottom:6px;font-weight:600;display:flex;align-items:center;gap:8px}
 .sect h3::after{content:'';flex:1;height:1px;background:var(--line)}
 .emptynote{color:var(--ink-dim);font-size:11px;font-style:italic;padding:2px 0}
 .dot.need{box-shadow:0 0 0 2px rgba(255,84,112,.55);background:rgba(255,84,112,.25)}
@@ -210,12 +243,12 @@ body.wiring{cursor:crosshair}
 #toast.show{opacity:1;transform:translate(-50%,0)}
 .tbm{position:relative;display:inline-block}
 .tbm .caret{opacity:.6;font-size:9px}
-.tbp{display:none;position:absolute;top:calc(100% + 5px);right:0;min-width:210px;background:var(--panel2);
+.tbp{max-height:calc(100vh - 70px);overflow-y:auto;display:none;position:absolute;top:calc(100% + 5px);right:0;min-width:210px;background:var(--panel2);
      border:1px solid var(--line);border-radius:10px;padding:5px;box-shadow:var(--shadow);z-index:70}
 .tbm.open .tbp{display:block}
 .tbp button,.tbp a{display:flex;width:100%;text-align:left;align-items:center;justify-content:space-between}
 .tbp a{text-decoration:none}
-.tbp button{border:0;background:transparent;padding:7px 10px;border-radius:6px;font-size:12px}
+.tbp button{border:0;background:transparent;padding:5px 8px;border-radius:6px;font-size:11px}
 .tbp button:hover{background:var(--panel)}
 .tbp kbd{font-family:var(--mono);font-size:9px;color:var(--ink-dim);border:1px solid var(--line);border-radius:4px;padding:1px 5px;margin-left:14px}
 .tbsep{height:1px;background:var(--line);margin:4px 6px}
@@ -230,7 +263,7 @@ button.primary{border-color:var(--wire-a);color:var(--ink-hi);background:linear-
 #playBtn.on{border-color:var(--wire-a);color:var(--ink-hi)}
 #liveBtn.on{border-color:#ff5470;color:#ff8298;background:rgba(255,84,112,.12);animation:livepulse 1.6s ease-in-out infinite}
 @keyframes livepulse{0%,100%{box-shadow:0 0 0 0 rgba(255,84,112,.25)}50%{box-shadow:0 0 8px 2px rgba(255,84,112,.22)}}
-.row{display:flex;align-items:center;gap:8px;margin:4px 0}
+.row{display:flex;align-items:center;gap:5px;margin:1px 0;min-height:18px;flex-wrap:wrap}
 .row label{flex:0 0 62px;color:var(--ink-dim);font-size:12px}
 .row input[type=range]{flex:1;accent-color:var(--wire-a);min-width:0}
 #bRail{flex:1 1 40px;min-width:40px;max-width:96px}
@@ -245,9 +278,39 @@ button.primary{border-color:var(--wire-a);color:var(--ink-hi);background:linear-
 input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
 .row .val{font-family:var(--mono);font-size:11px;width:38px;text-align:right;color:var(--ink-hi)}
 #layers{display:flex;flex-direction:column;gap:4px;max-height:34vh;overflow-y:auto;overscroll-behavior:contain}
-.layer{display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--line);border-radius:5px;background:var(--panel2);cursor:pointer}
+.layer{display:flex;align-items:center;gap:6px;padding:5px 7px;border:1px solid var(--line);border-radius:5px;background:var(--panel2);cursor:pointer;flex-wrap:wrap}
+.layer .stat{font-size:10px;opacity:.75;flex:0 0 auto}
+.ltools{flex-basis:100%;display:flex;align-items:center;gap:3px;padding:2px 0 0 24px;border-top:1px dashed var(--line);margin-top:3px;flex-wrap:wrap;height:auto}
+.ltools .rowbtn{opacity:1}
+.ltools .togoff{opacity:.75;color:var(--ink-dim)}
+.ltools .togon{opacity:1;outline:1px solid var(--wire-a);border-radius:4px}
+.ltools .rowbtn{font-size:12px;padding:2px 7px}
+.ltools .lsep{width:1px;align-self:stretch;background:var(--line);margin:0 4px}
+#brushGallery{max-height:66px;overflow-y:auto;scrollbar-width:thin}
+.subh{font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-dim);margin:3px 0 1px}
+.ghead{display:flex;align-items:center;gap:6px;padding:4px 8px;border:1px solid var(--line);border-radius:5px;background:var(--panel);font-size:12px;cursor:pointer}
+.ghead .gtog{background:none;border:none;padding:0 3px;cursor:pointer;color:var(--ink-dim)}
+.ghead .gnm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600}
+.ghead .gcount{font-size:10px;color:var(--ink-dim)}
+.layer.ingroup{margin-left:16px;border-left:3px solid var(--wire-a)}
+.layer.clipbase{border-left:3px solid #e8c26a}
+.layer.clipped{margin-left:16px;border-left:3px solid #e8c26a}
+.layer.ingroup.clipped{margin-left:30px}
+.subh{cursor:pointer;user-select:none;display:flex;align-items:center;gap:5px}
+.subh .caret{display:inline-block;width:9px;color:var(--ink-dim);font-size:9px;transition:transform .12s}
+.subh.closed .caret{transform:rotate(-90deg)}
+.subbody.closed{display:none}
+#curveRamp,#domeRamp{background:var(--panel2);border:1px solid var(--line);border-radius:4px;cursor:crosshair;flex:1 1 auto;max-width:100%}
+.clipcap{flex-basis:100%;font-size:10px;color:var(--ink-dim);padding-left:24px;margin-top:-2px}
+.lkids{flex-basis:100%;margin-top:3px}
+.lkhdr{display:flex;align-items:center;gap:5px;font-size:10px}
+.lkhdr .lktog{background:none;border:none;padding:0 3px;cursor:pointer;color:var(--ink-dim)}
+.lkid{display:flex;align-items:center;gap:6px;font-size:11px;padding:2px 4px 2px 22px;border-radius:4px;cursor:pointer}
+.lkid:hover{background:var(--panel2)}
+.lkid.sel{outline:1px solid #e8c26a}
+.lkid button{background:none;border:none;cursor:pointer;padding:0 3px}
 .layer.sel{border-color:var(--wire-a)}
-.layer img{width:44px;height:30px;object-fit:cover;border-radius:3px;background:#000}
+.layer img{width:36px;height:24px;object-fit:cover;border-radius:3px;background:#000}
 .layer .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .layer .eye{opacity:.85;background:none;border:none;font-size:14px;padding:0}
 .layer .eye.off{opacity:.25}
@@ -264,7 +327,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
 #brushRingCore{position:absolute;pointer-events:none;border-radius:50%;z-index:9;display:none;
   border:1px dashed rgba(255,255,255,.5)}
 .mergechk{width:12px;height:12px;accent-color:var(--wire-b)}
-@media (max-width:900px){#side{width:220px}}
+@media (max-width:900px){#side{width:196px}}
 /* short screens: the measured Brush-tab deficit at 800px tall was 85px --
    captions off (-56) and a tighter rhythm (-26) close it without shrinking
    any slider's hit target */
@@ -281,7 +344,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
 <div id="top">
   <span id="brand"><b>le</b>Studio<small>on the leCore substrate</small></span>
   <button id="tabCanvas" class="active">Canvas</button>
-  <button id="tabNodes">Node graph</button><select id="viewMode" title="The document camera. Flat: the classic realtime canvas. Ortho 3D / Persp 3D: layers become SLABS — thickness, refraction through water and glass, coloured absorption, fog, clouds — composited looking straight down (ortho) or with depth parallax (persp)."><option value="flat">Flat</option><option value="ortho">Ortho 3D</option><option value="persp">Persp 3D</option></select>
+  <button id="tabNodes">Node graph</button><select id="viewMode" title="The document camera. Flat: the classic realtime canvas. Ortho 3D / Persp 3D: layers become SLABS — thickness, refraction through water and glass, coloured absorption, fog, clouds — composited looking straight down (ortho) or with depth parallax (persp)."><option value="flat">Flat</option><option value="ortho">Ortho 3D</option><option value="persp">Persp 3D</option></select><select id="vantage" title="Which SIDE of the refracting sheets you stand on. Above: you see the water's own surface, its reflections and refraction. Below: the surface becomes a rippling ceiling — dispersion splits colour and the caustics swim toward you."><option value="above">↑ Above surface</option><option value="below">↓ Below surface</option></select>
   <button id="presenceChip" style="display:none;font-family:var(--mono);font-size:10px;color:var(--wire-a);border:1px solid var(--line);border-radius:10px;padding:2px 8px;background:none;cursor:pointer" title="Who is editing — click for the list">👥</button>
   <span id="accelChip" style="font-family:var(--mono);font-size:10px;color:var(--ink-dim);border:1px solid var(--line);border-radius:10px;padding:2px 8px"></span>
   <span class="spacer"></span>
@@ -300,6 +363,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
       <div class="tbsep"></div>
       <a id="exportPngLink" href="/api/export.png" download="lestudio.png"><button>Export PNG</button></a>
       <button id="exportSized" title="Export at a size you choose — useful for print or a specific upload size">Export at size…</button>
+      <button id="exportFrames" title="Export the ANIMATION as a zip of numbered PNGs — simulated media are stepped by the same timeline the canvas uses, so the files are exactly what playback showed. Includes an ffmpeg line for assembling a video.">Export frame sequence…</button>
       <button id="svgExportBtn" style="display:none" title="Trace the picture into scalable vector art: a layered SVG poster (posterised bands, each keeping its own colour). Great for logos, prints, and laser cutters.">Export SVG</button>
       <div class="tbsep"></div>
       <div class="tbsep"></div>
@@ -336,7 +400,8 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
         </div>
       </div></div><div class="tbm"><button id="perspBtn" class="tbmb" title="Perspective assistance: estimate vanishing points from a drawing, guide overlays, stroke snapping, ground shadow-catcher">📐 Persp <span class="caret">▾</span></button>
       <div class="tbp" id="perspMenu" style="min-width:240px;padding:8px" onclick="event.stopPropagation()">
-        <button id="ppEstimate" title="Read the vanishing points out of the ACTIVE layer's drawing (line-intersection voting)">◎ Estimate from active layer</button>
+        <div style="display:flex;gap:4px"><button id="pp1pt" title="Set up ONE-POINT perspective: a horizon through the middle and a single vanishing point you can drag on the canvas">＋ 1-point</button><button id="pp2pt" title="Set up TWO-POINT perspective: a horizon and two vanishing points near the canvas edges, both draggable">＋ 2-point</button></div>
+        <button id="ppEstimate" style="margin-top:4px" title="Read the vanishing points out of the ACTIVE layer's drawing (line-intersection voting)">◎ Estimate from active layer</button>
         <label style="display:block;font-size:11px;margin-top:6px" title="Overlay the horizon line, vanishing-point crosshairs, and their ray fans on the canvas"><input type="checkbox" id="ppEnabled"> show guides (horizon, VP rays)</label>
         <label style="display:block;font-size:11px" title="While drawing, the stroke locks onto the ray toward the vanishing point it most agrees with, and straightens"><input type="checkbox" id="ppSnap"> snap strokes toward the nearest VP</label>
         <label style="display:block;font-size:11px" title="A shadow-catcher plane under the scene: directional lights march their shadows onto it, gated to below the horizon when one is set"><input type="checkbox" id="ppGround"> ground plane catches shadows</label>
@@ -348,19 +413,33 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
 <div id="docbar" style="display:flex;gap:4px;align-items:center;padding:4px 12px;background:var(--panel);border-bottom:1px solid var(--line);overflow-x:auto"></div>
 <div id="main">
   <div id="toolbar">
-    <div class="tgrp" data-grp="paint" title="Paint — click to use; click-and-hold or the ▾ corner for the rest">
+    <div class="tgrp" data-grp="paint" title="Paint — brush, eraser, smudge; Alt-click picks colour. Click-and-hold or the ▾ corner for the rest">
       <div class="tgw">
         <button id="tBrush" class="cur active" title="Brush (B)">✏️</button>
         <button id="tErase" title="Eraser (E)">◻️</button>
         <button id="tSmudge" title="Smudge (S)">💧</button>
-        <button id="tClone" title="Clone (C) — Alt-click sets the source">📋</button><button id="tHeal" title="Heal (H) — paint over a blemish and it repairs from the surroundings (content-aware)">🩹</button><button id="tStamp" title="Stamp (U) — click to press the selected sticker onto the layer; drag for a trail">🔖</button>
-        <button id="tPick" title="Eyedropper (I) — click to pick a colour; Alt-click while brushing does the same">💉</button>
-        <button id="tNodePaint" disabled title="Node paint (J) — paint with a Paint out node's image as the pigment. Disabled until the node graph has a Paint out node with an image wired in.">🖼️</button>
       </div><span class="tgc"></span>
     </div>
-    <div class="tgrp" data-grp="fx" title="FX brush — Paint Effects">
+    <div class="tgrp" data-grp="repair" title="Repair — clone and heal">
+      <div class="tgw">
+        <button id="tClone" class="cur" title="Clone (C) — Alt-click sets the source">📋</button>
+        <button id="tHeal" title="Heal (H) — paint over a blemish and it repairs from the surroundings (content-aware)">🩹</button>
+      </div><span class="tgc"></span>
+    </div>
+    <div class="tgrp solo" data-grp="stamp" title="Stamp — press stickers onto the layer">
+      <div class="tgw">
+        <button id="tStamp" class="cur" title="Stamp (U) — click to press the selected sticker onto the layer; drag for a trail">🔖</button>
+      </div><span class="tgc"></span>
+    </div>
+    <div class="tgrp solo" data-grp="pick" title="Eyedropper">
+      <div class="tgw">
+        <button id="tPick" class="cur" title="Eyedropper (I) — click to pick a colour; Alt-click while brushing does the same">💉</button>
+      </div><span class="tgc"></span>
+    </div>
+    <div class="tgrp" data-grp="fx" title="Procedural brushes — Paint Effects and node pigment">
       <div class="tgw">
         <button id="tFxBrush" class="cur" title="FX brush (F) — Paint Effects: your stroke stays invisible and grows an effect instead (grass, vines, drips, embers). The strokes stay procedural — retune them in the node graph any time.">🌿</button>
+        <button id="tNodePaint" disabled title="Node paint (J) — paint with a Paint out node's image as the pigment. Disabled until the node graph has a Paint out node with an image wired in.">🖼️</button>
       </div><span class="tgc"></span>
     </div>
     <div class="tgrp" data-grp="stroke" title="Strokes — click to use; click-and-hold or the ▾ corner for the rest">
@@ -379,18 +458,25 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
         <button id="tObj" title="Select object (leCore segmentation)">🧩</button>
       </div><span class="tgc"></span>
     </div>
-    <div class="toolsep"></div>
     <div class="tgrp solo" data-grp="path" title="Path — click to use">
       <div class="tgw">
         <button class="cur" id="tSpline" title="Spline (P) — click to add points, drag for handles, click the first point to close, Esc to finish">🖊</button>
       </div><span class="tgc"></span>
     </div>
     <div class="toolsep"></div>
-    <div class="tgrp" data-grp="shape" title="Object — click to use; click-and-hold or the ▾ corner for the rest">
+    <div class="tgrp solo" data-grp="move" title="Transform / Move">
       <div class="tgw">
         <button class="cur" id="tTransform" title="Transform / Move (V) — drag to move, handles scale, top handle rotates; Enter applies">⤢</button>
-        <button id="tFill" title="Flood fill (G) — click to fill with the configured source">🪣</button>
-        <button id="tText" title="Text (T) — click the canvas to place; pick a spline in the panel to run text along a path">🅰</button>
+      </div><span class="tgc"></span>
+    </div>
+    <div class="tgrp solo" data-grp="fill" title="Flood fill">
+      <div class="tgw">
+        <button class="cur" id="tFill" title="Flood fill (G) — click to fill with the configured source">🪣</button>
+      </div><span class="tgc"></span>
+    </div>
+    <div class="tgrp solo" data-grp="text" title="Text">
+      <div class="tgw">
+        <button class="cur" id="tText" title="Text (T) — click the canvas to place; pick a spline in the panel to run text along a path">🅰</button>
       </div><span class="tgc"></span>
     </div>
   </div>
@@ -402,6 +488,28 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
     <button id="firstRunGo" style="font-size:11px">Got it</button>
   </div>
   <div class="pane" id="canvasPane">
+    <svg id="lgiz" style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:7"></svg>
+    <div id="fieldChip" style="display:none;position:absolute;left:10px;bottom:10px;z-index:8;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:11px;min-width:190px">
+      <div style="display:flex;justify-content:space-between;align-items:center"><b id="fcTitle">field</b><button id="fcDone" title="Done editing this field">✓</button></div>
+      <div class="row"><label>Kind</label><select id="fcKind" title="point pushes away from (or pulls toward) its centre; direct pushes along the angle; vortex swirls"><option value="point">point</option><option value="direct">direct</option><option value="vortex">vortex</option></select></div>
+      <div class="row"><label title="positive repels / pushes; negative attracts">Strength</label><input type="range" id="fcStr" min="-300" max="300" value="100"><span id="fcStrV">1.0</span></div>
+      <div class="row"><label>Radius</label><input type="range" id="fcRad" min="8" max="600" value="120"><span id="fcRadV">120</span></div>
+      <div class="row" id="fcAngRow"><label>Angle</label><input type="range" id="fcAng" min="0" max="360" value="0"><span id="fcAngV">0°</span></div>
+      <div class="row"><button id="fcDelete" title="Delete this field">🗑 delete</button></div>
+    </div>
+    <div id="lightChip" style="display:none;position:absolute;left:10px;bottom:10px;z-index:8;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:11px;min-width:190px">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><span id="lcTitle" style="flex:1;font-weight:600">light</span>
+        <button id="lcDone" title="Deselect the light (Esc)">✓ done</button></div>
+      <div class="row"><label style="width:52px">Colour</label><input type="color" id="lcColor" title="Light colour"></div>
+      <div class="row"><label style="width:52px" title="Blackbody colour temperature — warm candlelight to cold sky; sets the colour above (which acts as the gel)">Temp</label><input type="range" id="lcTemp" min="20" max="100" value="65" title="Colour temperature, 2000K (candle) to 10000K (sky) — drives the light's colour"><span class="val" id="lcTempV">6500K</span></div>
+      <div class="row"><label style="width:52px">Intensity</label><input type="range" id="lcInt" min="0" max="400" title="Intensity"><span class="val" id="lcIntV"></span></div>
+      <div class="row" id="lcConeRow"><label style="width:52px">Cone</label><input type="range" id="lCone" min="5" max="80" title="Spot cone angle °"><span class="val" id="lcConeV"></span></div>
+      <div class="row"><label style="width:52px">Height</label><input type="range" id="lcZ" min="6" max="400" title="Height above its base (also: Shift-drag the bulb)"><span class="val" id="lcZV"></span></div>
+      <div class="row" id="lcSoftRow"><label style="width:52px" title="Cone edge softness — 0 hard rim, 1 feathered">Soft</label><input type="range" id="lcSoft" min="2" max="100"><span class="val" id="lcSoftV"></span></div>
+      <div class="row" id="lcShadowRow"><label style="width:52px" title="Cast real height-field shadows off thick layers (spot and point lights)">Shadows</label><input type="checkbox" id="lcShadows"></div>
+      <div class="row" id="lcC2Row"><label style="width:52px" title="Ground-bounce colour for the dome environment">Ground</label><input type="color" id="lcColor2"></div>
+      <div class="row"><label style="width:52px">Scale</label><input type="range" id="lcScale" min="10" max="400" title="Physical size — broadens the pool (also: drag the outer ring)"><span class="val" id="lcScaleV"></span></div>
+    </div>
     <div id="brushRing"></div><div id="brushRingCore"></div><span class="cap" id="canvasCap"></span><canvas id="view"></canvas><canvas id="overlay"></canvas>
       <div id="trHud" class="hud" style="display:none">
         <select id="trTarget2"></select>
@@ -422,7 +530,16 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
           <input type="color" id="txShColor" value="#000000" title="shadow colour">
         </span>
       </div>
-      <div id="fillHud" class="hud" style="display:none">
+      <div id="timebar" title="The global timeline: every keyed property follows the playhead; media layers advance by elapsed frames × their keyable rate">
+      <button id="tlPlay" title="Play / stop (Space when the canvas has focus does not conflict — this is click-only)">▶</button>
+      <input type="number" id="tlFrame" value="0" min="0" step="1" title="Current frame — type to jump" style="width:52px"><span id="tlBusy" title="Simulating: the media layers are solving this frame" style="visibility:hidden;font-size:11px;color:var(--ink-hi)">◌ simulating…</span>
+      <div id="tlStrip" title="Scrub: drag the playhead; diamonds are the selected layer's keys — click one to jump there, Alt-click to delete it">
+        <canvas id="tlCanvas" height="26"></canvas>
+      </div>
+      <input type="number" id="tlEnd" value="96" min="8" step="8" title="Timeline length in frames" style="width:52px">
+      <button id="tlKeyHelp" class="mu" title="Keyframe diamonds sit next to animatable properties (Opacity, light intensity): hollow ◇ = animated but no key at this frame, filled ◆ = key at this frame, orange ring = the live value differs from the animation (unkeyed change). Click the diamond to set a key, Alt-click to delete it.">◇?</button>
+    </div>
+    <div id="fillHud" class="hud" style="display:none">
         <select id="fiSrc"><option value="color">Color</option><option value="gradient">Gradient</option>
           <option value="pattern">Pattern</option><option value="node">Node</option></select>
         <span id="fiColorRow"><input type="color" id="fiC1" value="#ff3355"></span>
@@ -433,6 +550,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
         <label class="mu"><input type="checkbox" id="fiCont" checked>contiguous</label>
       </div>
       <span id="statusbar" class="statusline"></span></div>
+    
     <div class="pane" id="outputPane"><span class="cap">Output</span>
       <div id="outProg" style="display:none;position:absolute;top:6px;right:10px;z-index:6;align-items:center;gap:6px">
         <div style="width:120px;height:5px;background:var(--panel2);border:1px solid var(--line);border-radius:3px;overflow:hidden">
@@ -550,26 +668,76 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
     <div class="sect" data-tab="layers">
       <h3 class="dup">Layers</h3>
       <div class="row">
-        <button id="addLayer">Add</button><button id="delLayer">Delete</button>
-        <select id="lBlend"></select>
+        <button id="addLayer" title="Add a new empty layer on top — Shift-click adds it BELOW the selected layer (for shadows and underpainting)">＋ Add layer</button>
+        <button id="delLayer" title="Delete the selected layer">Delete</button>
       </div>
-      <div class="row" style="gap:4px">
-        <button id="lMergeChecked" title="Merge the checked layers">Merge ✓</button>
-        <button id="lMergeVisible" title="Merge every visible layer">Merge visible</button><select id="lStyle" title="One-click layer styles: builds a live graph chain (Layer → Layer style → Layer out) into a new layer just below this one. Repaint the source and the style follows on the next graph push."><option value="">Style…</option><optgroup label="Styles"><option value="shadow">＋ Drop shadow</option><option value="glow">＋ Outer glow</option></optgroup><optgroup label="Physical slab"><option value="vol_water">▦ Water slab</option><option value="vol_glass">▦ Tinted glass</option><option value="vol_fog">▦ Fog / murk</option><option value="vol_puff">▦ Cloud / puff</option><option value="vol_soak">▦ Absorbent paper</option><option value="vol_air">▦ Air gap (spacer)</option><option value="vol_off">▦ Flat again</option></optgroup><optgroup label="Living media"><option value="vol_ink">≈ Ink-in-water dish</option><option value="vol_smoke">≈ Smoke chamber</option><option value="vol_fire">≈ Fire</option><option value="vol_stir">≈ Stir / advance medium</option></optgroup><optgroup label="Pose &amp; print"><option value="vol_tilt">⟂ Tilt slab (+10°)</option><option value="vol_lower">⟂ Lower slab (−4)</option><option value="vol_raise">⟂ Raise slab (+4)</option><option value="vol_domeup">◠ Dome the slab (+8)</option><option value="vol_dish">◡ Dish the slab (−8)</option><option value="vol_print">⎙ Contact-print onto layer below</option><option value="vol_run">⟱ Run wet paint (gravity)</option></optgroup><optgroup label="Optics &amp; glow"><option value="vol_glow">✨ Emit brush colour (+0.6)</option><option value="vol_unglow">✨ Emission off</option><option value="vol_reflect">🪞 Water reflection (+0.4)</option><option value="vol_disp">◈ Dispersion fringes (+0.3)</option><option value="vol_optoff">◌ Optics off</option></optgroup></select>
-      </div>
-      <div class="row"><label>Opacity</label><input type="range" id="lOp" min="0" max="100" value="100"><span class="val" id="lOpV">1.0</span></div>
+      <div id="layers"></div>
+      <div class="subh" title="Four planes perpendicular to the canvas, standing outside it. Empty until you put a layer on one. A wall layer is painted like any other — press Edit and it lies flat on the canvas; press Done and it stands back up on its side, hidden from the picture but still lighting it.">Walls (the room)</div>
+      <div id="wallSlots"></div>
+      <div class="subh">Selected layer</div>
+      <div class="row"><label>Blend</label><select id="lBlend" style="flex:1"></select></div>
+      <div class="row"><label title="One-click layer styles and physical presets — the menu shows the layer's CURRENT persistent choice">Style</label><select id="lStyle" style="flex:1" title="One-click layer styles: builds a live graph chain (Layer → Layer style → Layer out) into a new layer just below this one. Repaint the source and the style follows on the next graph push."><option value="">Style…</option><optgroup label="Styles"><option value="shadow">＋ Drop shadow</option><option value="glow">＋ Outer glow</option></optgroup><optgroup label="Physical slab"><option value="vol_water">▦ Water slab</option><option value="vol_glass">▦ Tinted glass</option><option value="vol_fog">▦ Fog / murk</option><option value="vol_puff">▦ Cloud / puff</option><option value="vol_soak">▦ Absorbent paper</option><option value="vol_air">▦ Air gap (spacer)</option><option value="vol_off">▦ Flat again</option></optgroup><optgroup label="Living media"><option value="vol_ink">≈ Ink-in-water dish</option><option value="vol_smoke">≈ Smoke chamber</option><option value="vol_fire">≈ Fire</option><option value="vol_stir">≈ Stir / advance medium</option></optgroup><optgroup label="Pose &amp; print"><option value="vol_tilt">⟂ Tilt slab (+10°)</option><option value="vol_lower">⟂ Lower slab (−4)</option><option value="vol_raise">⟂ Raise slab (+4)</option><option value="vol_domeup">◠ Dome the slab (+8)</option><option value="vol_dish">◡ Dish the slab (−8)</option><option value="vol_print">⎙ Contact-print onto layer below</option><option value="vol_run">⟱ Run wet paint (gravity)</option></optgroup><optgroup label="Optics &amp; glow"><option value="vol_glow">✨ Emit brush colour (+0.6)</option><option value="vol_unglow">✨ Emission off</option><option value="vol_reflect">🪞 Water reflection (+0.4)</option><option value="vol_disp">◈ Dispersion fringes (+0.3)</option><option value="vol_optoff">◌ Optics off</option></optgroup></select></div>
+      <div class="row"><label>Opacity</label><input type="range" id="lOp" min="0" max="100" value="100" title="Layer opacity"><span class="val" id="lOpV">1.0</span><span id="lOpKeySlot"></span></div>
+      <div class="row"><label title="Every layer is a real sheet — 1 canvas unit = 0.1 mm; paper is the 0.10 mm default and nothing may be thinner than 0.01 mm" title="Physical thickness of this sheet — minimum 0.01 mm, default 0.10 mm; deep slabs disperse media further per frame">Thickness</label><input type="number" id="lThickMM" min="0.01" step="0.05" value="0.10" style="width:62px" title="Sheet thickness in millimetres (min 0.01, paper = 0.10)"><span class="mu" title="millimetres">mm</span><span id="lThickKeySlot"></span>
+        <select id="lBgKind" style="min-width:96px" title="The sheet's backing under your paint: transparent, solid colour, or a texture" style="flex:1;min-width:0">
+          <option value="">transparent</option><option value="color">colour</option><option value="texture">texture</option></select>
+        <input type="color" id="lBgColor" value="#f4efe4" style="display:none" title="Backing colour">
+        <select id="lBgTex" style="display:none" title="Texture weave"><option value="paper">paper</option><option value="canvas">canvas</option><option value="noise">noise</option></select></div>
+      <div class="row"><label title="What fills the sheet's volume: empty/normal space, or a physical medium — water, glass, fog, absorbent paper, or a LIVING medium that runs with the timeline">Volume</label><select id="lVol" title="The sheet's volume: empty space or a medium (living media animate with the timeline)">
+          <option value="">empty / normal space</option>
+          <optgroup label="Still media"><option value="water">water</option><option value="glass">tinted glass</option><option value="fog">fog / murk</option><option value="puff">cloud / puff</option><option value="soak">absorbent paper</option><option value="air">air gap (spacer)</option></optgroup>
+          <optgroup label="Living media"><option value="ink">ink-in-water</option><option value="smoke">smoke</option><option value="fire">fire</option></optgroup></select></div>
+      <div class="row" id="placeRow" style="display:none"><label title="This layer was pasted/imported and keeps its FULL original pixels — content beyond the canvas is never trimmed. Adjust where it sits; move it back and hidden regions return.">Placement</label>
+        <input type="number" id="plX" style="width:52px" title="Centre X (document px — can be outside the canvas)">
+        <input type="number" id="plY" style="width:52px" title="Centre Y">
+        <input type="range" id="plScale" min="5" max="400" title="Scale % (100 = the image's own pixels)"><span class="val" id="plScaleV"></span>
+        <input type="range" id="plRot" min="-180" max="180" title="Rotation °"><span class="val" id="plRotV"></span></div>
+      <div class="subh">Shape &amp; pose</div>
+      <div class="row"><label title="Lift the whole sheet off the floor (canvas units, 1 = 0.1 mm)">Height</label><input type="number" id="lZOff" step="1" style="width:62px" title="Z offset — lifts the sheet; lights and shadows respond">
+        <button id="lFlipX" title="Mirror this layer left↔right (flips pixels, paint body, and a pasted layer's source; undoable)">↔ flip</button>
+        <button id="lFlipY" title="Mirror this layer top↕bottom (independent of ↔ — use both for a 180° spin)">↕ flip</button></div>
+      <div class="row"><label title="Tip the sheet about its centre — a ROTATION out of the canvas plane, capped at ±90° (past that it's just a mirrored image; use the flips instead)">Tilt X</label><input type="range" id="lTiltX" min="-90" max="90" value="0" title="Tilt about the horizontal axis, degrees (±90 max)"><span class="val" id="lTiltXV">0°</span></div>
+      <div class="row"><label title="Tip the sheet left/right — capped at ±90°">Tilt Y</label><input type="range" id="lTiltY" min="-90" max="90" value="0" title="Tilt about the vertical axis, degrees (±90 max)"><span class="val" id="lTiltYV">0°</span></div>
+      <div class="row"><label title="Bend the sheet along ONE axis — the ramp below is the depth along that axis, and it can change direction as many times as you give it stops">Curve</label>
+        <input type="range" id="lCurve" min="-30" max="30" value="0" title="Curve amplitude (canvas depth units; the ramp shapes it)"><span class="val" id="lCurveV">0</span>
+        <button id="lCurveAxis" title="Which axis the bend runs along">X</button></div>
+      <div class="row"><canvas id="curveRamp" width="196" height="44" title="The bend's depth ramp: drag stops (up = toward you, down = away), click to add one, Alt-click removes. Flat line = no bend."></canvas></div>
+      <div class="row"><label title="Bow the sheet radially: the ramp is a RADIUS profile — depth from the centre (left) to the edge (right), swept in a full circle">Dome</label><input type="range" id="lDome" min="-20" max="20" value="0" title="Dome amplitude (canvas units; the radius ramp shapes it)"><span class="val" id="lDomeV">0</span></div>
+      <div class="row"><canvas id="domeRamp" width="196" height="44" title="Radius profile: left = centre, right = edge; drag stops, click adds, Alt-click removes"></canvas></div>
+      <div class="subh" id="matSubh">Material</div>
+      <div class="row" id="matIorRow"><label title="Index of refraction — how strongly the medium bends light (water 1.33, glass 1.5)">IOR</label><input type="range" id="lIor" min="100" max="200" value="133" title="Refraction index ×100"><span class="val" id="lIorV">1.33</span></div>
+      <div class="row" id="matDenRow"><label title="How murky the medium is — how quickly light dims through it">Density</label><input type="range" id="lDen" min="0" max="100" value="50" title="Volume density"><span class="val" id="lDenV">.50</span></div>
+      <div class="row" id="matSoakRow"><label title="How much wet paint soaks and feathers into the sheet">Soak</label><input type="range" id="lSoak" min="0" max="100" value="0" title="Absorbency"><span class="val" id="lSoakV">.00</span></div>
+      <div class="row"><label title="Self-illumination: the layer's pixels emit light onto the scene">Glow</label><input type="range" id="lEmit" min="0" max="200" value="0" title="Emission strength"><span class="val" id="lEmitV">.0</span>
+        <input type="color" id="lEmitC" title="Emission colour (the light it throws)" style="width:26px"></div>
+      <div class="row" id="rowOptical"><label title="Keep this layer in the LIGHT simulation while it is hidden: its surface still refracts, throws caustics, and casts shadows, but its own pigment is not drawn. A sheet of rippled water you do not want to see, that still bends the light.">Optics&nbsp;when&nbsp;hidden</label><input type="checkbox" id="lOptical"></div>
+      <div class="row" id="rowMediaRes"><label title="Simulation detail — a straight trade of fidelity against frame time. Measured at 1000×750: coarse ~11 ms/frame, normal ~18 ms, fine ~45 ms. Changing this keeps the ink you already have; it is resampled, not wiped.">Detail</label><select id="lMediaRes" style="flex:1"><option value="coarse">coarse — fastest</option><option value="normal">normal</option><option value="fine">fine — slowest</option></select></div>
+      <div class="row" id="rowMediaTime"><label title="Timeline: the playhead drives this medium and scrubbing rewinds it. Live: it runs on its own and the timeline never touches it — for sources that genuinely cannot be rewound, like a feed.">Clock</label><select id="lMediaTime" style="flex:1"><option value="timeline">timeline — scrubbable</option><option value="live">live — independent</option></select></div>
+      <div class="row" id="rowCook"><label title="Advance the simulation WITHOUT moving the playhead, and make that the starting state. Lets smoke already be drifting at frame 0 instead of being a hard-edged blob.">Cook</label><button id="lCook24">+24</button><button id="lCook96">+96</button><button id="lCookSettle" title="Cook until the simulation SETTLES — the medium's own change-per-step signal decides when it has stopped moving, instead of you guessing a number.">until settled</button></div>
+      <div class="row" id="rowMediaRate"><label title="How fast this medium lives per timeline frame. 0 FREEZES it in place (a new time segment — scrub-safe); 1 is real time; up to 3× for a boil.">Rate</label><input type="range" id="lMediaRate" min="0" max="300" value="100"><span class="val" id="lMediaRateV">1.0</span></div>
+      <div class="row" id="rowFieldSrc"><label title="Herd this layer's LIVING MEDIA with existing content: the active selection, a mask, or a stroke's path.">Herd by</label><select id="lFieldSrc" style="flex:1"><option value="">none</option><option value="sel">selection</option></select></div>
+      <div class="row" id="rowFieldMode"><label title="attract pulls the medium toward the field, repel pushes away, flow runs it along the contours, contain fences it inside.">Mode</label><select id="lFieldMode" style="flex:1"><option value="attract">attract</option><option value="repel">repel</option><option value="flow">flow</option><option value="contain">contain</option></select></div>
+      <div class="row" id="rowFieldStr"><label title="How hard the herding field pushes this layer's medium. 0 is off.">Herd str</label><input type="range" id="lFieldStr" min="0" max="600" value="0"><span class="val" id="lFieldStrV">0</span></div>
+      <div class="row" id="rowRelief"><label title="How much BODY this layer shows the lights: 1 = full physical thickness (embossed edges, cast shadows), 0 = optically flat — colour only. Turn it down when a soft wash or flat element grows a strange rim.">Relief</label><input type="range" id="lRelief" min="0" max="100" value="100"><span class="val" id="lReliefV">1.0</span></div>
+      <div class="row"><label title="Waterline mirror: reflects what stands above the surface">Reflect</label><input type="range" id="lRefl" min="0" max="100" value="0" title="Reflection strength"><span class="val" id="lReflV">.00</span>
+        <label class="mu" style="flex:0 0 auto" title="Per-channel refraction: rainbow fringes at edges">◈</label><input type="range" id="lDisp" min="0" max="100" value="0" style="width:52px" title="Dispersion fringes"><span class="val" id="lDispV">.00</span></div>
+      <div class="subh">Mask</div>
       <div class="row"><label>Mask</label><select id="lMask"></select>
         <label style="flex:0 0 auto;display:flex;gap:4px;align-items:center;font-size:11px">
-          <input type="checkbox" id="lMaskInv">inv</label></div>
+          <input type="checkbox" id="lMaskInv" title="Invert the mask: painted areas hide instead of reveal">inv</label></div>
       <div class="row"><label>Paint on</label>
         <div id="paintTargetSeg" style="display:flex;gap:0;flex:1">
           <button id="ptLayer" class="segon" title="Brush edits the layer's pixels">Layer</button>
           <button id="ptMask" title="Brush edits the layer's MASK — white reveals, black hides. Nothing is painted into the pixels, so it stays undoable and non-destructive.">Mask</button>
         </div></div>
-      <div id="layers"></div>
+      <div class="subh">Combine</div>
+      <div class="row" style="gap:4px">
+        <button id="lMergeChecked" title="Merge the layers checked in the list">Merge ✓</button>
+        <button id="lMergeVisible" title="Merge every visible layer">Merge visible</button>
+      </div>
       <div class="row" style="margin-top:6px"><label style="flex:1">Histogram</label>
         <label style="flex:0 0 auto;display:flex;gap:4px;align-items:center;font-size:11px">
-          <input type="checkbox" id="histOn">show</label></div>
+          <input type="checkbox" id="histOn" title="Show a live histogram of the composite">show</label></div>
       <canvas id="hist" width="240" height="70"
         title="Tone distribution of what you see. Red bars at the far left or right mean clipped shadows or highlights."
         style="display:none;width:100%;height:70px;background:var(--panel2);border:1px solid var(--line);border-radius:6px"></canvas>
@@ -582,27 +750,31 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
     </div>
 <div class="sect" data-tab="select" id="selSect">
       <h3>Select</h3>
-      <div class="row"><label>Mode</label><select id="selMode">
+      <div class="subh">Capture</div>
+      <div class="row"><label>Mode</label><select id="selMode" title="How the next selection combines with the current one">
         <option value="new">New</option><option value="add">Add</option>
         <option value="subtract">Subtract</option><option value="intersect">Intersect</option></select></div>
-      <div class="row"><label>Tolerance</label><input type="range" id="selTol" min="2" max="60" value="15"><span class="val" id="selTolV">.15</span></div>
-      <div class="row"><label>Feather</label><input type="range" id="selFeather" min="0" max="20" value="0"><span class="val" id="selFeatherV">0</span></div>
+      <div class="row"><label>Tolerance</label><input type="range" id="selTol" min="2" max="60" value="15" title="Magic-wand colour tolerance for the NEXT selection"><span class="val" id="selTolV">.15</span></div>
+      <div class="row"><label title="Edge softness baked into NEW selections as you make them (the Feather button below softens the current one instead)">Feather</label><input type="range" id="selFeather" min="0" max="20" value="0" title="Edge softness baked into NEW selections as you make them"><span class="val" id="selFeatherV">0</span></div>
+      <div class="subh">Active selection</div>
       <div class="row"><span id="activeSelCap" style="flex:1;color:var(--ink-dim);font-size:11px">no active selection</span>
         <button id="selKeep" title="Save this selection so you can come back to it. Selections are temporary unless you keep them.">Keep…</button>
         <button id="selClear" title="Deselect (Ctrl+D or Esc). A plain click with a marquee tool also clears it.">Deselect ⌫</button></div>
-      <div class="row"><label>Amount</label><input type="number" id="selAmt" value="4" min="1" max="64" style="width:52px"></div>
       <div class="row" style="gap:4px">
-        <button id="selExpand" title="Grow the selection outward">Expand</button>
-        <button id="selContract" title="Shrink the selection inward">Contract</button>
-        <button id="selFeatherBtn" title="Soften the selection edge">Feather</button>
+        <button id="selExpand" title="Grow the active selection outward by the px amount">Expand</button>
+        <button id="selContract" title="Shrink the active selection inward by the px amount">Contract</button>
+        <button id="selFeatherBtn" title="Soften the ACTIVE selection's edge by the px amount now (the slider above only affects new selections)">Feather</button>
+        <label style="flex:0 0 auto;display:flex;gap:3px;align-items:center;font-size:11px" title="How many pixels Expand / Contract / Feather move by">by<input type="number" id="selAmt" value="4" min="1" max="64" style="width:44px">px</label>
       </div>
-      <div class="row"><button id="selToMask">Selection → Mask</button>
+      <div class="subh">Use it</div>
+      <div class="row"><button id="selToMask" title="Turn the active selection into a layer mask">Selection → Mask</button>
         <button id="selMergeAll" title="Union every stored selection into one">Merge all</button>
         <button id="selCrop" title="Crop the document to the active selection's bounds">Crop</button></div>
+      <div class="subh">Stored</div>
       <div id="selections" style="display:flex;flex-direction:column;gap:4px"></div>
     </div><div class="sect" data-tab="masks">
       <h3>Masks</h3>
-      <div class="row"><button id="addMask">Add mask</button>
+      <div class="row"><button id="addMask" title="Add a new empty mask (paint into it with the Mask paint-target in Layers)">＋ Add mask</button>
         <button id="mMergeAll" title="Union every mask into one">Merge all</button></div>
       <div id="masks" style="display:flex;flex-direction:column;gap:4px"></div>
     </div><div class="sect" data-tab="splines">
@@ -629,26 +801,26 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
       <div id="swatches" title="Colours you have used or picked — click to reuse, Alt-click to remove"
            style="display:flex;flex-wrap:wrap;gap:3px;margin:2px 0 4px"></div>
       <div id="brushGallery" style="display:flex;flex-wrap:wrap;gap:4px;margin:4px 0"></div>
-      <div class="row"><label>Spacing</label><input type="range" id="bSpace" min="5" max="150" value="25"><span class="val" id="bSpaceV">.25</span></div>
+      <div class="row"><label>Spacing</label><input type="range" id="bSpace" title="Stamp spacing along the stroke — lower is smoother, higher is dabbier" min="5" max="150" value="25"><span class="val" id="bSpaceV">.25</span></div>
       <div id="dynRows">
         <div class="row"><label>Follow</label><input type="checkbox" id="bFollow"></div>
         <div class="row"><label>Jit angle</label><input type="range" id="bJA" min="0" max="180" value="0"><span class="val" id="bJAV">0</span></div>
         <div class="row"><label>Jit size</label><input type="range" id="bJS" min="0" max="80" value="0"><span class="val" id="bJSV">.00</span></div>
         <div class="row"><label>Scatter</label><input type="range" id="bJX" min="0" max="100" value="0"><span class="val" id="bJXV">.00</span></div>
       </div>
-      <div class="row"><label>Size</label><input type="range" id="bSize" min="1" max="400" value="14"><span class="val" id="bSizeV" title="Click to switch between pixels and millimetres" style="cursor:pointer">14</span></div>
-      <div class="row"><label>Opacity</label><input type="range" id="bOp" min="1" max="100" value="100"><span class="val" id="bOpV">1.0</span></div>
-      <div class="row"><label>Hardness</label><input type="range" id="bHard" min="0" max="100" value="70"><span class="val" id="bHardV">.70</span></div>
+      <div class="row"><label>Size</label><input type="range" id="bSize" title="Brush size (px)" min="1" max="400" value="14"><span class="val" id="bSizeV" title="Click to switch between pixels and millimetres" style="cursor:pointer">14</span></div>
+      <div class="row"><label>Opacity</label><input type="range" id="bOp" title="Brush opacity" min="1" max="100" value="100"><span class="val" id="bOpV">1.0</span></div>
+      <div class="row"><label>Hardness</label><input type="range" id="bHard" title="Edge hardness — soft airbrush to crisp marker" min="0" max="100" value="70"><span class="val" id="bHardV">.70</span></div>
       <div class="row"><label>Media</label><select id="bMedia" title="Give the paint a physical body: strokes build up thickness on the canvas, catch the light like real impasto, and gravity makes heavy loads sag. Oil holds tall glossy ridges, acrylic holds its shape matte, watercolor barely holds and runs downward, carrying pigment.">
         <option value="">(none)</option><option value="oil">Oil</option>
         <option value="acrylic">Acrylic</option><option value="water">Watercolor</option>
       </select></div>
       <div class="row" id="bLoadRow" style="display:none"><label>Load</label><input type="range" id="bLoad" min="10" max="150" value="60" title="How much paint is on the brush. Heavier loads build thicker ridges — and past what the medium can hold, gravity takes the excess downhill."><span class="val" id="bLoadV">.60</span></div>
-      <div class="row"><label>Smoothing</label><input type="range" id="bSmooth" min="0" max="95" value="0"><span class="val" id="bSmoothV">.00</span><label style="margin-left:6px;font-size:11px;white-space:nowrap" title="Inference — stroke starts snap to nearby stroke endpoints, and direction locks to VP rays, verticals, or horizontals">◎<input type="checkbox" id="bInfer" style="vertical-align:middle"></label></div><div class="row" id="eModeRow" style="display:none"><label title="What the eraser removes">Eraser</label><select id="eMode" title="Eraser mode — pixels (classic), whole strokes, the topmost stroke only, paint-undo (restore the area to its pre-stroke state), or depth (carve the impasto body first). Shift+E cycles."><option value="pixel">▭ Pixels (classic)</option><option value="erase_strokes">✂ Whole strokes</option><option value="erase_top">≣ Topmost stroke (peel)</option><option value="erase_undo">⤺ Paint undo (history brush)</option><option value="erase_depth">⛏ Depth (carve impasto)</option></select></div>
-      <div class="row"><label>Rail</label><select id="bRail" title="Constrain freehand strokes to slide along this spline"></select><label class="inl" title="Stream strokes to the server while dragging (needs a fast machine). Off: a lightweight preview is drawn and the stroke applies on release.">Live</label><input type="checkbox" id="bLive"><label class="inl" title="Symmetry — every stroke paints twice, mirrored across the canvas centre. Both copies are real strokes: select, nudge, and edit them independently.">⇋</label><select id="bMirror"><option value="">off</option><option value="v">↔</option><option value="h">↕</option><option value="3">3×</option><option value="6">6×</option><option value="8">8×</option></select></div>
+      <div class="row"><label>Smoothing</label><input type="range" id="bSmooth" title="Stroke smoothing: steadies shaky lines as you draw" min="0" max="95" value="0"><span class="val" id="bSmoothV">.00</span><label style="margin-left:6px;font-size:11px;white-space:nowrap" title="Inference — stroke starts snap to nearby stroke endpoints, and direction locks to VP rays, verticals, or horizontals">◎<input type="checkbox" id="bInfer" title="Inference assist: snaps stroke starts to nearby stroke ends and straightens toward vanishing points" style="vertical-align:middle"></label></div><div class="row"><label title="Ramp the stroke's width in at the start and out at the end — brush-pen feel; recorded into the stroke, so it replays and the joint tools still work on top">Taper</label><input type="range" id="bTaper" min="0" max="50" value="0" title="Fraction of the stroke that ramps at each end (0 = uniform width)"><span class="val" id="bTaperV">.00</span></div><div class="row" id="eModeRow" style="display:none"><label title="What the eraser removes">Eraser</label><select id="eMode" title="Eraser mode — pixels (classic), whole strokes, the topmost stroke only, paint-undo (restore the area to its pre-stroke state), or depth (carve the impasto body first). Shift+E cycles."><option value="pixel">▭ Pixels (classic)</option><option value="erase_strokes">✂ Whole strokes</option><option value="erase_top">≣ Topmost stroke (peel)</option><option value="erase_undo">⤺ Paint undo (history brush)</option><option value="erase_depth">⛏ Depth (carve impasto)</option></select></div>
+      <div class="row"><label>Rail</label><select id="bRail" title="Constrain freehand strokes to slide along this spline"></select><label class="inl" title="Stream strokes to the server while dragging (needs a fast machine). Off: a lightweight preview is drawn and the stroke applies on release.">Live</label><input type="checkbox" id="bLive" title="Send the stroke to the engine WHILE dragging (off = only on release)"><label class="inl" title="Symmetry — every stroke paints twice, mirrored across the canvas centre. Both copies are real strokes: select, nudge, and edit them independently.">⇋</label><select id="bMirror"><option value="">off</option><option value="v">↔</option><option value="h">↕</option><option value="3">3×</option><option value="6">6×</option><option value="8">8×</option></select></div>
       <div class="row"><label>Selection</label><select id="bSel"></select>
         <label style="flex:0 0 auto;display:flex;gap:4px;align-items:center;font-size:11px">
-          <input type="checkbox" id="bSelInv">inv</label></div>
+          <input type="checkbox" id="bSelInv" title="Paint OUTSIDE the active selection instead of inside">inv</label></div>
     </div>
     <div class="sect" data-tab="tool" id="toolSect">
       <h3 id="toolSectTitle">Tool</h3>
@@ -1008,10 +1180,320 @@ $('findDups').onclick=async()=>{
   close.onclick=()=>pop.remove();
   pop.appendChild(close);
 };
-$('lStyle').onchange=e=>{ const k=e.target.value; e.target.value='';
+// PASTE from outside: clipboard image data becomes a placed layer that
+// keeps its full pixels -- oversize content hangs off the canvas, and
+// the Placement row (or zooming out) brings it back into reach
+document.addEventListener('paste', async e=>{
+  // typing surfaces keep their native paste (rename boxes, prompts)
+  const t=e.target;
+  if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable))return;
+  const items=(e.clipboardData&&e.clipboardData.items)||[];
+  for(const it of items){
+    if(it.type&&it.type.startsWith('image/')){
+      e.preventDefault();
+      const blob=it.getAsFile(); if(!blob)continue;
+      const b64=await new Promise(res=>{const fr=new FileReader();
+        fr.onload=()=>res(fr.result); fr.readAsDataURL(blob);});
+      const r=await api('/api/paste',{...J,body:JSON.stringify({png:b64})});
+      if(r&&r.ok){
+        sel=r.id; await refresh(); drawComposite();
+        toast(r.oversize
+          ? 'pasted at full size ('+r.w+'×'+r.h+') — larger than the canvas, nothing trimmed: use the Placement row to move/scale it, or zoom out to see it all'
+          : 'pasted ('+r.w+'×'+r.h+')','info');
+      }
+      return;
+    }
+  }
+  // no OS image on the clipboard: fall through to the app's own
+  // clipboards -- strokes first when a stroke selection owns the
+  // moment, else the layer/selection clipboard
+  e.preventDefault();
+  // (strokesOwn is keydown-local; recompute the same predicate here)
+  if(tool==='strokesel'&&mode!=='nodes'&&strokeClip){
+    const r=await api('/api/strokes/clipboard',{...J,body:JSON.stringify(
+      {action:'paste',layer:sel||undefined,dx:14,dy:14})});
+    if(r&&r.error){toast('paste: '+r.error);return;}
+    ssAnchors=r.ids; ptSel=[]; strokeOpRefresh('pasted — the copies are selected');
+    return;
+  }
+  clipboardOp('paste');
+});
+async function pushPlace(patch){
+  const r=await api('/api/place',{...J,body:JSON.stringify({id:sel,...patch})});
+  if(r&&r.ok){ drawComposite(); }
+}
+$('plX').onchange=e=>pushPlace({x:+e.target.value});
+$('plY').onchange=e=>pushPlace({y:+e.target.value});
+$('plScale').oninput=e=>{$('plScaleV').textContent=e.target.value+'%'; pushPlace({scale:e.target.value/100});};
+$('plRot').oninput=e=>{$('plRotV').textContent=e.target.value+'°'; pushPlace({rot:+e.target.value});};
+// --- RAMP EDITOR: one factory, two instances (curve + dome) ---------
+// A strip of draggable [t, v] stops -- the same editing language as the
+// timeline: drag moves (x = position, y = signed depth), click on empty
+// strip adds a stop, Alt-click removes one. Values are -1..1 (up =
+// toward the viewer). Commits on release so a drag is ONE undo step.
+function rampEditor(cid, getStops, commit){
+  const cv=$(cid), ctx=cv.getContext('2d');
+  let stops=null, drag=-1;
+  const T=t=>6+t*(cv.width-12), V=v=>cv.height/2-v*(cv.height/2-6);
+  const iT=x=>Math.min(1,Math.max(0,(x-6)/(cv.width-12)));
+  const iV=y=>Math.min(1,Math.max(-1,(cv.height/2-y)/(cv.height/2-6)));
+  function draw(){
+    ctx.clearRect(0,0,cv.width,cv.height);
+    ctx.strokeStyle='rgba(128,128,140,.35)'; ctx.beginPath();
+    ctx.moveTo(0,cv.height/2); ctx.lineTo(cv.width,cv.height/2); ctx.stroke();
+    const s=stops&&stops.length?stops:[[0,0],[1,0]];
+    ctx.strokeStyle='var(--wire-a)'; ctx.lineWidth=1.5; ctx.beginPath();
+    const ss=[...s].sort((a,b)=>a[0]-b[0]);
+    ss.forEach((p,i)=>{ const x=T(p[0]), y=V(p[1]); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+    ctx.stroke();
+    ss.forEach(p=>{ const x=T(p[0]), y=V(p[1]);
+      ctx.fillStyle='#e8c26a'; ctx.beginPath();
+      ctx.moveTo(x,y-4); ctx.lineTo(x+4,y); ctx.lineTo(x,y+4); ctx.lineTo(x-4,y);
+      ctx.closePath(); ctx.fill(); });
+  }
+  function near(x,y){
+    const s=stops||[];
+    for(let i=0;i<s.length;i++)
+      if(Math.abs(T(s[i][0])-x)<7&&Math.abs(V(s[i][1])-y)<9)return i;
+    return -1;
+  }
+  cv.onpointerdown=e=>{
+    const r=cv.getBoundingClientRect();
+    const x=(e.clientX-r.x)*(cv.width/r.width), y=(e.clientY-r.y)*(cv.height/r.height);
+    stops=getStops()||[];
+    const i=near(x,y);
+    if(e.altKey){ if(i>=0){ stops.splice(i,1); commit(stops); stops=null; draw0(); } return; }
+    if(i>=0){ drag=i; cv.setPointerCapture(e.pointerId); }
+    else { stops.push([iT(x),iV(y)]); drag=stops.length-1; cv.setPointerCapture(e.pointerId); }
+    draw();
+  };
+  cv.onpointermove=e=>{
+    if(drag<0)return;
+    const r=cv.getBoundingClientRect();
+    stops[drag]=[iT((e.clientX-r.x)*(cv.width/r.width)),
+                 iV((e.clientY-r.y)*(cv.height/r.height))];
+    draw();
+  };
+  cv.onpointerup=e=>{ if(drag>=0){ commit(stops); drag=-1; stops=null; } };
+  function draw0(){ stops=null; const g=getStops(); stops=g?[...g.map(p=>[...p])]:null; draw(); stops=g?stops:null; }
+  return {sync(){ if(drag<0){ stops=null; const g=getStops(); stops=g?g.map(p=>[...p]):null; draw(); } }};
+}
+// --- COLLAPSIBLE SUBGROUPS: fewer rows, not smaller ones -----------
+// Every .subh in the side panel becomes a click-to-collapse header for
+// the rows that follow it (up to the next .subh or section end). State
+// persists per group in localStorage; the advanced groups start
+// closed so the panel's resting height stays short.
+const GROUPS_DEFAULT_CLOSED=new Set(['Shape & pose','Material','Histogram']);
+function makeSubgroupsCollapsible(){
+  document.querySelectorAll('#side .subh').forEach(h=>{
+    if(h.dataset.grp)return;                       // already wired
+    const name=h.textContent.trim();
+    h.dataset.grp=name;
+    const body=document.createElement('div');
+    body.className='subbody';
+    let n=h.nextSibling;
+    while(n && !(n.nodeType===1 && n.classList && n.classList.contains('subh'))){
+      const nx=n.nextSibling; body.appendChild(n); n=nx;
+    }
+    h.parentNode.insertBefore(body, h.nextSibling);
+    const caret=document.createElement('span');
+    caret.className='caret'; caret.textContent='▾';
+    h.insertBefore(caret, h.firstChild);
+    h.title=(h.title?h.title+' — ':'')+'click to collapse / expand';
+    let closed;
+    try{ const s=localStorage.getItem('le_grp_'+name);
+      closed = s===null ? GROUPS_DEFAULT_CLOSED.has(name) : s==='1';
+    }catch(e){ closed=GROUPS_DEFAULT_CLOSED.has(name); }
+    const apply=()=>{ h.classList.toggle('closed',closed);
+      body.classList.toggle('closed',closed); };
+    apply();
+    h.onclick=()=>{ closed=!closed;
+      try{ localStorage.setItem('le_grp_'+name, closed?'1':'0'); }catch(e){}
+      apply(); };
+  });
+}
+window.expandLayerGroups=()=>{ document.querySelectorAll('#side .subh.closed').forEach(h=>h.click()); };
+makeSubgroupsCollapsible();
+function lProp(patch){
+  return api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:sel,...patch})})
+    .then(()=>{drawComposite();});
+}
+$('lZOff').onchange=e=>lProp({z_off:+e.target.value});
+$('lFlipX').onclick=()=>api('/api/layer',{...J,body:JSON.stringify({action:'flip',id:sel,axis:'x'})}).then(()=>{drawComposite(); refresh();});
+$('lFlipY').onclick=()=>api('/api/layer',{...J,body:JSON.stringify({action:'flip',id:sel,axis:'y'})}).then(()=>{drawComposite(); refresh();});
+$('lTiltX').oninput=e=>{$('lTiltXV').textContent=e.target.value+'°'; lProp({tilt_x:+e.target.value});};
+$('lTiltY').oninput=e=>{$('lTiltYV').textContent=e.target.value+'°'; lProp({tilt_y:+e.target.value});};
+$('lDome').oninput=e=>{$('lDomeV').textContent=e.target.value; lProp({dome:+e.target.value});};
+$('lCurve').oninput=e=>{$('lCurveV').textContent=e.target.value; lProp({curve:+e.target.value});};
+$('lCurveAxis').onclick=e=>{const nxt=e.target.textContent==='X'?'y':'x';
+  e.target.textContent=nxt.toUpperCase(); lProp({curve_axis:nxt});};
+const curLayer=()=>((state&&state.layers)||[]).find(x=>x.id===sel)||{};
+const curveRE=rampEditor('curveRamp', ()=>curLayer().curve_profile,
+  st=>lProp({curve_profile:st}).then(refresh));
+const domeRE=rampEditor('domeRamp', ()=>curLayer().dome_profile,
+  st=>lProp({dome_profile:st}).then(refresh));
+$('lOptical').onchange=e=>{ lProp({optical:e.target.checked});
+  if(e.target.checked)toast('this layer keeps shaping the light while hidden — refraction, caustics, shadows','info'); };
+$('vantage').onchange=async e=>{
+  const r=await api('/api/view3d',{...J,body:JSON.stringify({vantage:e.target.value})});
+  if(r&&r.error){toast(r.error);return;}
+  drawComposite();
+  if(e.target.value==='below')toast('looking UP from under the surface — dispersion and caustics come at the eye','info');
+};
+$('lMediaTime').onchange=e=>{ lProp({media_time:e.target.value});
+  toast(e.target.value==='live'
+    ? 'live clock — this layer simulates on its own; the timeline will not rewind it'
+    : 'timeline clock — the playhead drives and rewinds this layer','info'); };
+async function cookMedia(steps){
+  const r=await api('/api/media/cook',{...J,body:JSON.stringify({steps:steps,layer:sel})});
+  if(r&&r.warning){toast(r.warning);return;}
+  toast('cooked '+steps+' steps — that is now the starting state at this frame','info');
+  drawComposite(); refresh();
+}
+$('lCookSettle').onclick=async()=>{
+  toast('cooking until the simulation settles…','info');
+  const r=await api('/api/media/cook',{...J,body:JSON.stringify({until:'settled',layer:sel})});
+  if(r&&r.warning){toast(r.warning);return;}
+  const info=(r&&r.layers&&r.layers[0])||{};
+  toast(info.settled ? ('settled after '+info.steps+' steps — '+info.why)
+                     : ('stopped at the '+info.steps+'-step cap — '+info.why), info.settled?'info':'warn');
+  drawComposite(); refresh();
+};
+$('lCook24').onclick=()=>cookMedia(24);
+$('lCook96').onclick=()=>cookMedia(96);
+let _warnedWrap=false;
+function warnIfWrapping(){
+  // an engine older than leCore 0.2.9 has no wall boundary: the ink will
+  // leave one edge and return on the other. Say so once, when it starts
+  // to matter, rather than letting someone discover it mid-painting.
+  if(_warnedWrap)return;
+  if(state.capabilities && state.capabilities.media_walls===false){
+    _warnedWrap=true;
+    toast('this engine build simulates on a torus — media will wrap around the canvas edges. Update leos-core to 0.2.9+ for contained simulations','warn');
+  }
+}
+$('lMediaRes').onchange=e=>{ lProp({media_res:e.target.value});
+  toast(e.target.value==='fine'?'fine detail — finer filaments, slower frames; your ink is resampled, not lost'
+        :'simulation detail: '+e.target.value,'info'); };
+$('lMediaRate').oninput=e=>{ $('lMediaRateV').textContent=(e.target.value/100).toFixed(1)+(e.target.value==0?' ❄':''); lProp({media_rate:e.target.value/100}); };
+$('lFieldSrc').onchange=e=>{ lProp({field:e.target.value, field_mode:$('lFieldMode').value, field_strength:+$('lFieldStr').value}); };
+$('lFieldMode').onchange=e=>{ lProp({field_mode:e.target.value}); };
+$('lFieldStr').oninput=e=>{ $('lFieldStrV').textContent=e.target.value; lProp({field_strength:+e.target.value}); };
+let WALLS={front:null,back:null,left:null,right:null}, WALL_EDIT=null;
+async function loadWalls(){
+  const r=await api('/api/walls');
+  if(r&&r.walls){ WALLS=r.walls; WALL_EDIT=r.editing||null; }
+  drawWallSlots();
+}
+function drawWallSlots(){
+  const host=$('wallSlots'); if(!host)return;
+  const sides=['back','left','right','front'];
+  const glyph={back:'▲ back',left:'◀ left',right:'▶ right',front:'▼ front'};
+  host.innerHTML=sides.map(s=>{
+    const lid=WALLS[s];
+    // init order: the walls load before the first /api/state lands,
+    // so state may not exist yet -- an unguarded read threw and left
+    // the whole section blank
+    const l=((state&&state.layers)||[]).find(x=>x.id===lid);
+    const open=WALL_EDIT===s;
+    return '<div class="row" data-wall="'+s+'" style="gap:4px">'
+      +'<label style="width:60px" title="The '+s+' plane">'+glyph[s]+'</label>'
+      +(lid
+        ? '<span class="mu" style="flex:1;overflow:hidden;text-overflow:ellipsis">'+((l&&l.name)||lid)+'</span>'
+          +'<button class="wedit" title="'+(open?'Stand it back up on its plane':'Lay it flat on the canvas and paint it with every ordinary tool')+'">'+(open?'✓ Done':'✎ Edit')+'</button>'
+          +'<button class="wclear" title="Take it off the wall and give it back to the canvas">✕</button>'
+        : '<button class="wassign" style="flex:1" title="Put the SELECTED layer on this plane">assign selected</button>')
+      +'</div>';
+  }).join('');
+  host.querySelectorAll('[data-wall]').forEach(row=>{
+    const s=row.dataset.wall;
+    const a=row.querySelector('.wassign'), e=row.querySelector('.wedit'), c=row.querySelector('.wclear');
+    if(a)a.onclick=async()=>{
+      if(!sel){toast('select a layer first, then assign it to a wall');return;}
+      const r=await api('/api/wall',{...J,body:JSON.stringify({action:'assign',side:s,layer:sel})});
+      if(r&&r.error){toast(r.error);return;}
+      await loadWalls(); refresh(); drawComposite();
+      toast('that layer now stands on the '+s+' plane — hidden from the canvas, still lighting it','info');
+    };
+    if(e)e.onclick=async()=>{
+      const open=WALL_EDIT===s;
+      const r=await api('/api/wall',{...J,body:JSON.stringify({action:'edit',side:open?null:s})});
+      if(r&&r.error){toast(r.error);return;}
+      await loadWalls(); refresh(); drawComposite();
+      toast(open?'the '+s+' wall is standing again':'the '+s+' wall is flat on the canvas — paint it with any tool','info');
+    };
+    if(c)c.onclick=async()=>{
+      await api('/api/wall',{...J,body:JSON.stringify({action:'clear',side:s})});
+      await loadWalls(); refresh(); drawComposite();
+    };
+  });
+}
+function refreshFieldSrcOptions(){
+  // masks come and go: keep the herd-source menu honest
+  const sel_=$('lFieldSrc'); const cur=sel_.value;
+  const opts=['<option value="">none</option>','<option value="sel">selection</option>'];
+  (state.masks||[]).forEach(mk=>opts.push('<option value="mask:'+mk.id+'">mask '+(mk.name||mk.id)+'</option>'));
+  sel_.innerHTML=opts.join(''); sel_.value=cur;
+}
+$('lRelief').oninput=e=>{ $('lReliefV').textContent=(e.target.value/100).toFixed(1); lProp({relief:e.target.value/100}); };
+$('lIor').oninput=e=>{$('lIorV').textContent=(e.target.value/100).toFixed(2); lProp({vol_ior:e.target.value/100});};
+$('lDen').oninput=e=>{$('lDenV').textContent=(e.target.value/100).toFixed(2).slice(1); lProp({vol_density:e.target.value/100});};
+$('lSoak').oninput=e=>{$('lSoakV').textContent=(e.target.value/100).toFixed(2).slice(1); lProp({absorbency:e.target.value/100});};
+$('lEmit').oninput=e=>{$('lEmitV').textContent=(e.target.value/100).toFixed(1); lProp({emissive:e.target.value/100});};
+$('lEmitC').onchange=e=>{const v=e.target.value;
+  lProp({emissive_color:[parseInt(v.slice(1,3),16)/255,parseInt(v.slice(3,5),16)/255,parseInt(v.slice(5,7),16)/255]});};
+$('lRefl').oninput=e=>{$('lReflV').textContent=(e.target.value/100).toFixed(2).slice(1); lProp({reflect:e.target.value/100});};
+$('lDisp').oninput=e=>{$('lDispV').textContent=(e.target.value/100).toFixed(2).slice(1); lProp({dispersion:e.target.value/100});};
+function kelvin2rgb(k){
+  // compact blackbody fit (2000-10000K): good enough for stage light
+  const t=k/100; let r,g,b;
+  r = t<=66 ? 255 : Math.min(255,Math.max(0,329.7*Math.pow(t-60,-0.1332)));
+  g = t<=66 ? Math.min(255,Math.max(0,99.47*Math.log(t)-161.12))
+            : Math.min(255,Math.max(0,288.12*Math.pow(t-60,-0.0755)));
+  b = t>=66 ? 255 : (t<=19 ? 0 : Math.min(255,Math.max(0,138.52*Math.log(t-10)-305.04)));
+  return [r/255,g/255,b/255];
+}
+$('lcTemp').oninput=e=>{
+  const K=e.target.value*100;
+  $('lcTempV').textContent=K+'K';
+  const c=kelvin2rgb(K);
+  pushLight({color:c});
+  $('lcColor').value='#'+c.map(v=>Math.round(v*255).toString(16).padStart(2,'0')).join('');
+};
+$('bTaper').oninput=e=>{$('bTaperV').textContent=(e.target.value/100).toFixed(2).slice(1);};
+$('lThickMM').onchange=async e=>{
+  const mm=Math.max(0.01, +e.target.value||0.1);
+  e.target.value=mm.toFixed(2);
+  await api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:sel,thickness:mm*10})});
+  drawComposite(); refresh();};
+function lBgPush(){
+  const kind=$('lBgKind').value;
+  $('lBgColor').style.display=kind?'':'none';
+  $('lBgTex').style.display=kind==='texture'?'':'none';
+  const v=$('lBgColor').value;
+  const bg=!kind?null:{kind:kind,color:[parseInt(v.slice(1,3),16)/255,parseInt(v.slice(3,5),16)/255,parseInt(v.slice(5,7),16)/255,1],
+                       tex:$('lBgTex').value, scale:3};
+  api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:sel,bg:bg})}).then(()=>{drawComposite(); refresh();});
+}
+$('lBgKind').onchange=lBgPush; $('lBgColor').onchange=lBgPush; $('lBgTex').onchange=lBgPush;
+$('lVol').onchange=e=>{ const k=e.target.value;
+  if(!k){ api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:sel,vol_kind:'none'})}).then(()=>{drawComposite(); refresh();}); return; }
+  setLayerVolume(k); };
+$('lStyle').onchange=e=>{ const k=e.target.value;
   if(!k)return;
+  // apply, then let refresh snap the menu to the layer's actual
+  // persistent state: one-shot actions (print, run, raise) revert to
+  // the current choice; volume presets stay selected because they ARE
+  // the layer's state now
   if(k.startsWith('vol_')){ setLayerVolume(k.slice(4)); return; }
   addLayerStyle(k); };
+const STYLE_OF={water:'vol_water',glass:'vol_glass',fog:'vol_fog',
+  puff:'vol_puff',soak:'vol_soak',air:'vol_air',
+  inkwater:'vol_ink',smoke:'vol_smoke',fire:'vol_fire'};
+function syncStyleSelect(l){
+  if(document.activeElement===$('lStyle'))return;
+  $('lStyle').value=STYLE_OF[l.vol_kind]||'';
+}
 async function setLayerVolume(kind){
   if(kind==='run'){
     const r=await api('/api/paint_run',{...J,body:JSON.stringify({layer:sel,steps:16})});
@@ -1235,6 +1717,18 @@ $('histOn').onchange=e=>{
   $('histInfo').style.display=on?'block':'none';
   if(on)drawHistogram();
 };
+$('exportFrames').onclick=()=>{
+  const lo=+prompt('First frame', Math.round(TL.range[0]));
+  if(isNaN(lo))return;
+  const hi=+prompt('Last frame', Math.round(TL.range[1]));
+  if(isNaN(hi))return;
+  const st=+prompt('Every Nth frame (1 = all)', 1)||1;
+  const n=Math.floor((hi-lo)/st)+1;
+  if(n<1){toast('that range contains no frames');return;}
+  if(n>600){toast('that is '+n+' frames; the limit is 600 — raise the step or narrow the range');return;}
+  toast('rendering '+n+' frames — simulated layers are stepped exactly as playback does','info');
+  window.location='/api/export/frames.zip?from='+lo+'&to='+hi+'&step='+st+'&fps='+(TL.fps||24);
+};
 $('exportSized').onclick=()=>{
   // /api/graph/render.png renders the graph at an arbitrary size. It existed
   // but had no way in, so exporting was locked to the canvas resolution.
@@ -1332,7 +1826,9 @@ async function openGlPreview(dsl){
     if(!glState)return;
     gl.viewport(0,0,cv.width,cv.height);
     gl.uniform3f(glState.uRes,cv.width,cv.height,1);
-    gl.uniform1f(glState.uTime,(performance.now()-t0)/1000);
+    // the shader clock IS the timeline: scrubbing scrubs the preview,
+    // stopping the playhead freezes it -- no rogue wall-clock animation
+    gl.uniform1f(glState.uTime,(typeof TL!=='undefined'?TL.frame/Math.max(TL.fps,1):0));
     gl.uniform1f(glState.uA,glState.angle);
     gl.uniform1f(glState.uH,glState.height);
     gl.uniform1f(glState.uD,glState.dist);
@@ -1709,7 +2205,9 @@ function repaintCanvas(){
   syncSelBadge();              // make an active selection impossible to miss
   drawPointHandles();          // joints, when point-edit is on
   drawHistogram();             // always matches the pixels just drawn
+  if(typeof refreshKeyDiamonds==='function')refreshKeyDiamonds();
   drawPerspGuides();           // horizon, VP rays, live align hint
+  if(typeof drawLightGizmo==='function')drawLightGizmo();
   repaintOverlay();
 }
 async function loadAnts(){                     // boundary pixels of the active selection
@@ -1920,19 +2418,53 @@ function dropLayerOn(srcId,dstId){
 function drawLayers(){
   const box=$('layers');
   const want=[...state.layers].reverse();
-  // rebuild only if the layer list itself changed; otherwise swap thumb srcs in place
-  const have=[...box.children].map(d=>d.dataset.id);
-  if(have.join()!==want.map(l=>l.id).join()){
+  // rebuild when layers OR the tree structure (groups, clip runs) change;
+  // otherwise swap thumb srcs in place
+  const groupSig=(state.groups||[]).map(g=>g.id+':'+g.layers.join('.')).join('|');
+  const clipSig=want.map(l=>l.clip?1:0).join('');
+  const wantKey=want.map(l=>l.id).join()+'#'+groupSig+'#'+clipSig;
+  if(box.dataset.treekey!==wantKey){
+    box.dataset.treekey=wantKey;
     box.innerHTML='';
+    // the list is a TREE: a layer's first group renders as a collapsible
+    // header above its topmost member (the same visual language as a
+    // layer's light children), and clip runs wear a shared amber stripe
+    const groupOf=id=>(state.groups||[]).find(g=>g.layers.includes(id));
+    const headered=new Set();
     want.forEach(l=>{
+      const g=groupOf(l.id);
+      if(g&&!headered.has(g.id)){
+        headered.add(g.id);
+        const gh=document.createElement('div');
+        gh.className='ghead'; gh.dataset.gid=g.id;
+        const closed=groupCollapsed.has(g.id);
+        gh.innerHTML=`<button class="gtog" title="Collapse / expand this group">${closed?'▸':'▾'}</button>`+
+          `<span>📁</span><span class="gnm" title="Group '+'"></span>`+
+          `<span class="gcount"></span>`+
+          `<button class="eye" title="Show / hide every layer in this group">👁</button>`;
+        gh.querySelector('.gnm').textContent=g.name;
+        gh.querySelector('.gnm').title='Group “'+g.name+'” — members are indented below; manage membership in the Groups section underneath';
+        gh.querySelector('.gcount').textContent=g.layers.length+' layer'+(g.layers.length>1?'s':'');
+        gh.querySelector('.gtog').onclick=e=>{e.stopPropagation();
+          closed?groupCollapsed.delete(g.id):groupCollapsed.add(g.id); box.dataset.treekey=''; refresh();};
+        gh.onclick=e=>{ if(e.target.tagName!=='BUTTON'){
+          closed?groupCollapsed.delete(g.id):groupCollapsed.add(g.id); box.dataset.treekey=''; refresh();} };
+        gh.querySelector('.eye').onclick=async e=>{e.stopPropagation();
+          const members=state.layers.filter(x=>g.layers.includes(x.id));
+          const anyVis=members.some(m=>m.visible);
+          for(const m of members)
+            await api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:m.id,visible:!anyVis})});
+          refresh();};
+        box.appendChild(gh);
+      }
+      if(g&&groupCollapsed.has(g.id))return;   // collapsed: skip member rows
       const d=document.createElement('div'); d.dataset.id=l.id;
-      d.innerHTML=`<input type="checkbox" class="mergechk" title="check for merge">`+
-        `<button class="eye">👁</button><img><span class="nm"></span><span class="volbadge" title=""></span>`+
-        `<span style="display:flex;flex-direction:column"><button class="rowbtn up" title="Move layer up">▲</button><button class="rowbtn dn" title="Move layer down">▼</button></span>`+
-        `<button class="rowbtn md" title="Merge down">⤵</button>`+
-        `<button class="rowbtn dup" title="Duplicate layer (Ctrl+J)">⧉</button>`+
-        `<button class="rowbtn alock" title="Alpha lock — the brush recolors existing pixels only; transparency is frozen and the eraser can't cut">🔒</button>`+
-        `<button class="rowbtn clipb" title="Clipping mask — this layer shows only where the layer below has pixels (a run of clipped layers shares one base)">◒</button>`;
+      // the row is IDENTITY only -- eye, thumb, and a name with room to
+      // breathe; every action lives in the tools bar that docks under the
+      // selected row (the old row buried the name under seven buttons)
+      d.innerHTML=`<input type="checkbox" class="mergechk" title="check this layer for Merge ✓">`+
+        `<button class="eye">👁</button><img><span class="nm"></span>`+
+        `<span class="volbadge" title=""></span><span class="stat statlock" title="alpha-locked">🔒</span><span class="stat statclip" title="clipped to the layer below">◒</span>`;
       d.draggable=true;                     // drag to reorder, like every editor
       d.ondragstart=e=>{ dragLayerId=l.id; e.dataTransfer.effectAllowed='move'; };
       d.ondragover=e=>{ if(dragLayerId&&dragLayerId!==l.id){e.preventDefault();
@@ -1947,18 +2479,6 @@ function drawLayers(){
           e.preventDefault(); selectLayerAlpha(l.id); return; }
         sel=l.id;refresh();};
       d.querySelector('.mergechk').onchange=e=>{e.target.checked?mergeChecks.add(l.id):mergeChecks.delete(l.id);};
-      d.querySelector('.up').onclick=e=>{e.stopPropagation();moveLayerBy(l.id,+1);};
-      d.querySelector('.dn').onclick=e=>{e.stopPropagation();moveLayerBy(l.id,-1);};
-      d.querySelector('.md').onclick=e=>{e.stopPropagation();
-        api('/api/layer',{...J,body:JSON.stringify({action:'merge_down',id:l.id})}).then(refresh);};
-      d.querySelector('.dup').onclick=e=>{e.stopPropagation();
-        api('/api/layer',{...J,body:JSON.stringify({action:'duplicate',id:l.id})}).then(refresh);};
-      d.querySelector('.alock').onclick=e=>{e.stopPropagation();
-        const cur=state.layers.find(x=>x.id===l.id);
-        api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:l.id,alpha_lock:!cur.alpha_lock})}).then(refresh);};
-      d.querySelector('.clipb').onclick=e=>{e.stopPropagation();
-        const cur=state.layers.find(x=>x.id===l.id);
-        api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:l.id,clip:!cur.clip})}).then(refresh);};
       d.querySelector('.eye').title='Show / hide — Alt-click to solo this layer';
       d.querySelector('.eye').onclick=async e=>{e.stopPropagation();
         if(e.altKey){ await soloLayer(l.id); return; }        // Alt-click = solo
@@ -1966,15 +2486,158 @@ function drawLayers(){
       box.appendChild(d);
     });
   }
+  const byId={}; [...box.children].forEach(c=>{ if(c.dataset.id)byId[c.dataset.id]=c; });
   want.forEach((l,i)=>{
-    const d=box.children[i];
-    d.className='layer'+(l.id===sel?' sel':'');
+    const d=byId[l.id];
+    if(!d)return;              // collapsed group member: no row to update
+    // tree classes: group membership stripe + clip-run amber link.
+    // clip attaches to the nearest non-clipped layer BELOW in stack
+    // order; in this top-first display that base sits under the run.
+    const inG=(state.groups||[]).some(g=>g.layers.includes(l.id));
+    const di=state.layers.findIndex(x=>x.id===l.id);
+    let baseName=null;
+    if(l.clip){
+      for(let j=di-1;j>=0;j--)
+        if(!state.layers[j].clip){ baseName=state.layers[j].name; break; }
+    }
+    const isBase=!l.clip&&state.layers[di+1]&&state.layers[di+1].clip;
+    d.className='layer'+(l.id===sel?' sel':'')
+      +(inG?' ingroup':'')
+      +(l.clip?' clipped':'')
+      +(isBase?' clipbase':'');
+    if(isBase){
+      const nAbove=(()=>{let n=0;for(let j=di+1;j<state.layers.length&&state.layers[j].clip;j++)n++;return n;})();
+      d.title=nAbove+' layer'+(nAbove>1?'s':'')+' clip onto this one — they paint only where this layer has pixels (the amber stripe links the run)';
+    }else if(!l.clip){ d.title=''; }
+    let cap=d.querySelector('.clipcap');
+    if(l.clip){
+      if(!cap){ cap=document.createElement('span'); cap.className='clipcap'; d.appendChild(cap); }
+      cap.textContent='↳ clips onto “'+(baseName||'?')+'” — shows only where it has pixels';
+    }else if(cap){ cap.remove(); }
     d.querySelector('.mergechk').checked=mergeChecks.has(l.id);
     d.querySelector('.eye').className='eye'+(l.visible?'':' off');
-    d.querySelector('.alock').style.opacity=l.alpha_lock?'1':'.32';
-    d.querySelector('.clipb').style.opacity=l.clip?'1':'.32';
+    d.querySelector('.statlock').style.display=l.alpha_lock?'':'none';
+    d.querySelector('.statclip').style.display=l.clip?'':'none';
+    let lk=d.querySelector('.statlockfull');
+    if(l.locked&&!lk){ lk=document.createElement('span'); lk.className='statlockfull';
+      lk.title='Locked — no edits'; lk.textContent='🔒';
+      d.querySelector('.nm').appendChild(lk); }
+    else if(!l.locked&&lk){ lk.remove(); }
+    if(l.id===sel){
+      const t=layerTools(); d.appendChild(t);   // appendChild MOVES it
+      t.querySelector('.lockb').className='rowbtn lockb '+(l.locked?'togon':'togoff');
+      t.querySelector('.alock').className='rowbtn alock '+(l.alpha_lock?'togon':'togoff');
+      t.querySelector('.clipb').className='rowbtn clipb '+(l.clip?'togon':'togoff');
+      t.querySelector('.clipb').title=l.clip
+        ? 'Clipped — this layer paints ONLY onto the pixels of the layer below (click to release)'
+        : 'Clip to the layer below — apply this layer onto it like a texture: it will show only where that layer has pixels';
+    }
+    // this layer's LIGHT OBJECTS: children of the layer, collapsible
+    let kidbox=d.querySelector('.lkids');
+    const kids=LIGHTS.filter(li=>li.layer===l.id);
+    if(kids.length&&!kidbox){ kidbox=document.createElement('div'); kidbox.className='lkids'; d.appendChild(kidbox); }
+    if(kidbox){
+      kidbox.innerHTML='';
+      if(!kids.length){ kidbox.remove(); }
+      else{
+        const collapsed=layerKidsCollapsed.has(l.id);
+        const hdr=document.createElement('div');
+        hdr.className='lkhdr';
+        hdr.innerHTML=`<button class="lktog" title="Collapse / expand this layer's light objects">${collapsed?'▸':'▾'}</button><span class="mu">${kids.length} light${kids.length>1?'s':''}</span>`;
+        hdr.querySelector('.lktog').onclick=e=>{e.stopPropagation();
+          collapsed?layerKidsCollapsed.delete(l.id):layerKidsCollapsed.add(l.id); refresh();};
+        kidbox.appendChild(hdr);
+        if(!collapsed)kids.forEach(li=>{
+          const kr=document.createElement('div');
+          kr.className='lkid'+(selLight===li.id?' sel':'');
+          kr.innerHTML=`<span>💡</span><span style="flex:1">${li.kind}</span>`+
+            `<button class="lksel" title="Select this light — shows its gizmo on the canvas">✎</button>`+
+            `<button class="lkdel" title="Remove this light">✕</button>`;
+          kr.onclick=e=>{ if(e.target.tagName!=='BUTTON'){selectLight(li.id);} };
+          kr.querySelector('.lksel').onclick=e=>{e.stopPropagation(); selectLight(li.id);};
+          kr.querySelector('.lkdel').onclick=async e=>{e.stopPropagation();
+            if(selLight===li.id)deselectLight();
+            await api('/api/light',{...J,body:JSON.stringify({action:'remove',id:li.id})});
+            await loadLights(); refresh(); drawComposite();};
+          kidbox.appendChild(kr);
+        });
+      }
+    }
     d.style.marginLeft=l.clip?'14px':'0';       // Photoshop's clipped indent
-    d.querySelector('.nm').textContent=l.name;
+    // write the name into a TEXT NODE, not textContent -- textContent
+    // wipes the lock badge span every pass (that bug shipped: the badge
+    // appended, then vanished one line later)
+    const nmEl=d.querySelector('.nm');
+    if(nmEl.firstChild&&nmEl.firstChild.nodeType===3){ nmEl.firstChild.nodeValue=l.name; }
+    else { nmEl.insertBefore(document.createTextNode(l.name), nmEl.firstChild); }
+    nmEl.title=l.name;                        // full name on hover, always
+    if(l.id===sel){
+      const th=$('lThickMM'); if(th&&document.activeElement!==th)th.value=((l.thickness||1)*0.1).toFixed(2);
+      const bk=$('lBgKind');
+      if(bk&&document.activeElement!==bk){
+        bk.value=l.bg?(l.bg.kind||'color'):'';
+        $('lBgColor').style.display=l.bg?'':'none';
+        $('lBgTex').style.display=(l.bg&&l.bg.kind==='texture')?'':'none';
+        if(l.bg&&l.bg.tex)$('lBgTex').value=l.bg.tex;
+      }
+      const pr=$('placeRow');
+      if(pr){
+        pr.style.display=l.placed?'':'none';
+        if(l.placed&&l.place&&document.activeElement.id!=='plX'&&document.activeElement.id!=='plY'){
+          $('plX').value=Math.round(l.place.x); $('plY').value=Math.round(l.place.y);
+          $('plScale').value=Math.round((l.place.scale||1)*100);
+          $('plScaleV').textContent=Math.round((l.place.scale||1)*100)+'%';
+          $('plRot').value=Math.round(l.place.rot||0);
+          $('plRotV').textContent=Math.round(l.place.rot||0)+'°';
+        }
+      }
+      const F=document.activeElement&&document.activeElement.id;
+      const setv=(id,v,txt)=>{ if(F!==id){$(id).value=v; if(txt!==undefined)$(id+'V').textContent=txt;} };
+      setv('lZOff', Math.round(l.z_off||0));
+      setv('lTiltX', Math.round(l.tilt_x||0), Math.round(l.tilt_x||0)+'°');
+      setv('lTiltY', Math.round(l.tilt_y||0), Math.round(l.tilt_y||0)+'°');
+      setv('lDome', Math.round(l.dome||0), String(Math.round(l.dome||0)));
+      setv('lCurve', Math.round(l.curve||0), String(Math.round(l.curve||0)));
+      syncStyleSelect(l);
+      if(F!=='lCurveAxis')$('lCurveAxis').textContent=(l.curve_axis||'x').toUpperCase();
+      curveRE.sync(); domeRE.sync();
+      setv('lIor', Math.round((l.vol_ior||1.33)*100), (l.vol_ior||1.33).toFixed(2));
+      setv('lDen', Math.round((l.vol_density||0.5)*100), (l.vol_density||0.5).toFixed(2).slice(1));
+      setv('lSoak', Math.round((l.absorbency||0)*100), (l.absorbency||0).toFixed(2).slice(1));
+      setv('lEmit', Math.round((l.emissive||0)*100), (l.emissive||0).toFixed(1));
+      setv('lRefl', Math.round((l.reflect||0)*100), (l.reflect||0).toFixed(2).slice(1));
+      setv('lRelief', Math.round((l.relief!==undefined?l.relief:1)*100), (l.relief!==undefined?l.relief:1).toFixed(1));
+      $('lOptical').checked=!!l.optical;
+      const isMedia=['inkwater','smoke','fire'].includes(l.vol_kind);
+      $('rowMediaRate').style.display=isMedia?'':'none';
+      $('rowMediaRes').style.display=isMedia?'':'none';
+      if(isMedia)warnIfWrapping();
+      $('rowMediaTime').style.display=isMedia?'':'none';
+      $('rowCook').style.display=isMedia?'':'none';
+      if(isMedia&&document.activeElement!==$('lMediaTime'))$('lMediaTime').value=l.media_time||'timeline';
+      if(isMedia&&document.activeElement!==$('lMediaRes'))$('lMediaRes').value=l.media_res||'normal';
+      $('rowFieldSrc').style.display=isMedia?'':'none';
+      $('rowFieldMode').style.display=isMedia?'':'none';
+      $('rowFieldStr').style.display=isMedia?'':'none';
+      if(isMedia){
+        refreshFieldSrcOptions();
+        const mr=l.media_rate!==undefined?l.media_rate:1;
+        setv('lMediaRate', Math.round(mr*100), mr.toFixed(1)+(mr==0?' ❄':''));
+        if(document.activeElement!==$('lFieldSrc'))$('lFieldSrc').value=l.field||'';
+        if(document.activeElement!==$('lFieldMode'))$('lFieldMode').value=l.field_mode||'attract';
+        setv('lFieldStr', Math.round(l.field_strength||0), String(Math.round(l.field_strength||0)));
+      }
+      setv('lDisp', Math.round((l.dispersion||0)*100), (l.dispersion||0).toFixed(2).slice(1));
+      // the MATERIAL rows only bite for the volume they belong to
+      const vk=l.vol_kind||'none';
+      $('matIorRow').style.display=(vk==='water'||vk==='glass')?'':'none';
+      $('matDenRow').style.display=(vk!=='none'&&vk!=='soak')?'':'none';
+      $('matSoakRow').style.display=(vk==='soak'||(l.absorbency||0)>0)?'':'none';
+      const vv=$('lVol'); if(vv&&document.activeElement!==vv){
+        const map={none:'',inkwater:'ink'};
+        vv.value=map[l.vol_kind]!==undefined?map[l.vol_kind]:(l.vol_kind||'');
+      }
+    }
     // a tiny badge says what KIND of physical layer this is at a glance:
     // finding out previously meant opening the Style menu and guessing
     const vb=d.querySelector('.volbadge');
@@ -1991,6 +2654,515 @@ function drawLayers(){
     const im=d.querySelector('img'), src='/api/layer/'+l.id+'.png?'+thumbTok;
     const pre=new Image(); pre.onload=()=>{im.src=pre.src;}; pre.src=src;   // swap on load only
   });
+}
+// --- the global timeline ---------------------------------------------
+let TL={frame:0,fps:24,range:[0,96],tracks:{}}, tlPlaying=null;
+async function loadTimeline(){
+  const r=await api('/api/timeline'); if(!r)return;
+  TL=r; $('tlFrame').value=Math.round(TL.frame); $('tlEnd').value=TL.range[1];
+  drawTimeline(); refreshKeyDiamonds();
+}
+function tlKeysFor(kind,id,prop){ return (TL.tracks[kind+':'+id+':'+prop]||[]); }
+function drawTimeline(){
+  const cv=$('tlCanvas'); if(!cv)return;
+  const w=cv.clientWidth||300; cv.width=w;
+  const g=cv.getContext('2d'); g.clearRect(0,0,w,26);
+  const [lo,hi]=TL.range, span=Math.max(hi-lo,1);
+  g.strokeStyle='rgba(128,140,160,.35)'; g.fillStyle='rgba(128,140,160,.7)';
+  g.font='9px sans-serif';
+  const step=span>200?48:span>100?24:span>40?8:4;
+  for(let f=Math.ceil(lo/step)*step; f<=hi; f+=step){
+    const x=(f-lo)/span*w;
+    g.beginPath(); g.moveTo(x,16); g.lineTo(x,26); g.stroke();
+    g.fillText(f, x+2, 12);
+  }
+  // the selected layer's keys, every animated prop overlaid as diamonds
+  Object.keys(TL.tracks).forEach(k=>{
+    const [kind,id]=k.split(':');
+    if(kind==='layer'&&id!==sel)return;
+    g.fillStyle=kind==='layer'?'#e8c26a':'#7ec2ff';
+    (TL.tracks[k]||[]).forEach(([t,_v])=>{
+      const x=(t-lo)/span*w;
+      g.beginPath(); g.moveTo(x,17); g.lineTo(x+4,21); g.lineTo(x,25); g.lineTo(x-4,21); g.closePath(); g.fill();
+    });
+  });
+  const px=(TL.frame-lo)/span*w;                       // the playhead
+  g.strokeStyle='#e07030'; g.lineWidth=2;
+  g.beginPath(); g.moveTo(px,0); g.lineTo(px,26); g.stroke();
+}
+// ---- FRAME TRANSPORT ------------------------------------------------
+// Scrubbing used to fire one /api/timeline request per pointermove and
+// playback one per interval tick, with every response assigning
+// TL.frame. Responses arrive OUT OF ORDER, so a late reply from an
+// earlier frame dragged the playhead BACKWARD and the next reply jumped
+// it forward -- Devin's 'it glitches and the time moves back, then jumps
+// forward'. Now: one request in flight, one pending target (always the
+// LATEST frame asked for, never a queue of stale ones), and a monotonic
+// id so an out-of-order reply is dropped instead of applied.
+let _tlSeq=0, _tlApplied=-1, _tlInFlight=false, _tlPending=null, _tlBusyT=null;
+function tlBusy(on){
+  const b=$('tlBusy'); if(!b)return;
+  if(on){ clearTimeout(_tlBusyT);
+    // only announce work that is slow enough to notice, so a smooth
+    // scrub doesn't strobe the indicator
+    _tlBusyT=setTimeout(()=>{ b.style.visibility='visible'; }, 180);
+  }else{ clearTimeout(_tlBusyT); b.style.visibility='hidden'; }
+}
+function tlSetFrame(t, opts){
+  _tlPending={t:t, opts:opts||{}};
+  if(_tlInFlight)return;              // coalesce: the pending target wins
+  _tlPump();
+}
+async function _tlPump(){
+  if(_tlInFlight||!_tlPending)return;
+  const job=_tlPending; _tlPending=null;
+  _tlInFlight=true; const seq=++_tlSeq;
+  tlBusy(true);
+  try{
+    const r=await api('/api/timeline',{...J,body:JSON.stringify({action:'frame',t:job.t})});
+    if(r&&r.ok&&seq>_tlApplied){     // drop anything older than what we drew
+      _tlApplied=seq;
+      TL.frame=r.frame;
+      if(document.activeElement!==$('tlFrame'))$('tlFrame').value=Math.round(r.frame);
+      drawTimeline(); drawComposite();
+      // a full refresh() re-fetches /api/state plus every layer thumbnail
+      // and brush preview: far too heavy per frame. Only when motion stops.
+      if(job.opts.settle)refresh();
+    }
+  }finally{
+    _tlInFlight=false; tlBusy(false);
+    if(_tlPending)_tlPump();
+  }
+}
+let _tlSettleT=null;
+// TRANSPORT KEYS. Playback was click-only: an animator judging timing
+// had to keep returning to a button. Space is already held for panning,
+// so play/pause takes Shift+Space; Home/End jump to the range ends and
+// , / . step one frame, which is what every animation tool does.
+function tlStep(delta){
+  const [lo,hi]=TL.range;
+  let t=Math.round(TL.frame)+delta;
+  if(t<lo)t=hi; if(t>hi)t=lo;
+  tlSetFrame(t); tlSettle();
+}
+document.addEventListener('keydown',e=>{
+  const t=e.target;
+  if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable))return;
+  if(e.ctrlKey||e.metaKey||e.altKey)return;
+  if(e.code==='Space'&&e.shiftKey){ e.preventDefault(); $('tlPlay').click(); return; }
+  if(e.key==='Home'){ e.preventDefault(); tlSetFrame(TL.range[0]); tlSettle(); return; }
+  if(e.key==='End'){ e.preventDefault(); tlSetFrame(TL.range[1]); tlSettle(); return; }
+  if(e.key===','){ e.preventDefault(); tlStep(-1); return; }
+  if(e.key==='.'){ e.preventDefault(); tlStep(1); return; }
+});
+function tlSettle(){                 // one full sync after motion stops
+  clearTimeout(_tlSettleT);
+  _tlSettleT=setTimeout(()=>{ refresh(); drawTimeline(); }, 220);
+}
+(function(){
+  const strip=$('tlStrip'); if(!strip)return;
+  let scrubbing=false, scrubT=null;
+  function stripFrame(e){
+    const r=strip.getBoundingClientRect();
+    const [lo,hi]=TL.range;
+    return lo+Math.min(Math.max((e.clientX-r.left)/r.width,0),1)*(hi-lo);
+  }
+  strip.addEventListener('pointerdown',e=>{
+    const f=stripFrame(e);
+    // clicking ON a diamond of the selected layer jumps to it; Alt deletes
+    let hitKey=null;
+    Object.keys(TL.tracks).forEach(k=>{
+      const [kind,id,prop]=k.split(':');
+      if(kind==='layer'&&id!==sel)return;
+      (TL.tracks[k]||[]).forEach(([t,_v])=>{
+        if(Math.abs(t-f)<(TL.range[1]-TL.range[0])/60)hitKey={k,kind,id,prop,t};
+      });
+    });
+    if(hitKey&&e.altKey){
+      api('/api/timeline',{...J,body:JSON.stringify({action:'delkey',kind:hitKey.kind,id:hitKey.id,prop:hitKey.prop,t:hitKey.t})})
+        .then(loadTimeline).then(()=>{drawComposite();});
+      return;
+    }
+    if(hitKey){ tlSetFrame(hitKey.t); return; }   // land EXACTLY on the key
+    scrubbing=true; strip.setPointerCapture(e.pointerId);
+    tlScrub(f);
+  });
+  function tlScrub(f){
+    // throttle server round-trips while dragging
+    if(scrubT)return; scrubT=setTimeout(()=>{scrubT=null;},60);
+    tlSetFrame(f);
+  }
+  strip.addEventListener('pointermove',e=>{ if(scrubbing)tlScrub(stripFrame(e)); });
+  strip.addEventListener('pointerup',e=>{ scrubbing=false; tlSetFrame(stripFrame(e)); tlSettle(); });
+  $('tlFrame').onchange=e=>{ tlSetFrame(+e.target.value); tlSettle(); };
+  $('tlEnd').onchange=async e=>{
+    await api('/api/timeline',{...J,body:JSON.stringify({action:'range',lo:0,hi:+e.target.value})});
+    loadTimeline();
+  };
+  $('tlPlay').onclick=()=>{
+    if(tlPlaying){ clearTimeout(tlPlaying); tlPlaying=null; $('tlPlay').textContent='▶';
+      tlBusy(false); tlSettle(); return; }
+    $('tlPlay').textContent='⏸';
+    // CHAINED playback: schedule the next frame only after the last one
+    // landed. setInterval fired regardless, so a frame that took longer
+    // than the tick queued another behind it and the backlog grew until
+    // the playhead lurched.
+    let _pf=TL.frame;
+    const step=async()=>{
+      if(!tlPlaying)return;
+      _pf=_pf+1; if(_pf>TL.range[1])_pf=TL.range[0];
+      const t0=performance.now();
+      await new Promise(res=>{ tlSetFrame(_pf); const w=setInterval(()=>{
+        if(!_tlInFlight&&!_tlPending){ clearInterval(w); res(); } }, 12); });
+      if(!tlPlaying)return;
+      const spent=performance.now()-t0;
+      // play at the DOCUMENT's frame rate now that a media frame costs
+      // ~18 ms instead of ~76 (windowed render); still chained, so a
+      // slow frame just lowers the rate instead of queueing a backlog
+      const budget=1000/Math.max(1,(TL.fps||12));
+      tlPlaying=setTimeout(step, Math.max(0, budget-spent));
+    };
+    tlPlaying=setTimeout(step, 0);
+  };
+  window.addEventListener('load',loadTimeline);
+  window.addEventListener('resize',drawTimeline);
+})();
+// --- Cinema4D-style keyframe diamonds next to animatable properties ---
+// hollow = animated, no key at this frame; filled = key here;
+// orange ring = live value differs from the animation (unkeyed change)
+function keyDiamond(kind, idFn, prop, liveFn){
+  const b=document.createElement('button');
+  b.className='keydia'; b.dataset.prop=prop;
+  b.title='Keyframe '+prop+' — click: set a key at the current frame (or move the existing one to the live value); Alt-click: delete the key at this frame. Hollow = animated elsewhere, filled = keyed here, orange = changed but not keyed.';
+  b.onclick=async e=>{
+    const id=idFn(); if(!id)return;
+    if(e.altKey){
+      await api('/api/timeline',{...J,body:JSON.stringify({action:'delkey',kind:kind,id:id,prop:prop})});
+    }else{
+      await api('/api/timeline',{...J,body:JSON.stringify({action:'key',kind:kind,id:id,prop:prop,v:liveFn()})});
+    }
+    await loadTimeline(); drawComposite();
+  };
+  b._sync=()=>{
+    const id=idFn(); if(!id){b.textContent='◇'; b.className='keydia hollow'; return;}
+    const ks=tlKeysFor(kind,id,prop);
+    const at=ks.find(k=>Math.abs(k[0]-TL.frame)<1e-6);
+    let cls, glyph;
+    if(at){ cls='filled'; glyph='◆'; }
+    else if(ks.length){ cls='hollow'; glyph='◇'; }
+    else { cls='hollow'; glyph='◇'; }
+    // dirty: the live value disagrees with the track's value here
+    if(ks.length){
+      const v=trackEvalClient(ks, TL.frame);
+      if(Math.abs(v-liveFn())>1e-3)cls+=' dirty';
+    }
+    b.className='keydia '+cls; b.textContent=glyph;
+  };
+  return b;
+}
+function trackEvalClient(ks,t){
+  if(t<=ks[0][0])return ks[0][1];
+  if(t>=ks[ks.length-1][0])return ks[ks.length-1][1];
+  for(let i=1;i<ks.length;i++)if(t<=ks[i][0]){
+    const a=ks[i-1],b_=ks[i],f=(t-a[0])/Math.max(b_[0]-a[0],1e-6);
+    return a[1]*(1-f)+b_[1]*f;
+  }
+  return ks[ks.length-1][1];
+}
+let KEY_DIAMONDS=[];
+function refreshKeyDiamonds(){ KEY_DIAMONDS.forEach(b=>b._sync()); drawTimeline(); }
+// --- light objects: selection, gizmo, world view ----------------------
+let LIGHTS=[], selLight=null, worldSaved=null, lgizDrag=null;
+const layerKidsCollapsed=new Set();
+const groupCollapsed=new Set();
+function lightById(id){ return LIGHTS.find(l=>l.id===id); }
+function docToPane(x,y){
+  const pr=$('canvasPane').getBoundingClientRect(), vr=vc.getBoundingClientRect();
+  return [vr.left-pr.left+x*zoom, vr.top-pr.top+y*zoom];
+}
+function paneToDoc(px,py){
+  const pr=$('canvasPane').getBoundingClientRect(), vr=vc.getBoundingClientRect();
+  return [(px-(vr.left-pr.left))/zoom, (py-(vr.top-pr.top))/zoom];
+}
+function selectLight(id){
+  const li=lightById(id); if(!li)return;
+  if(selField)deselectField();          // one gizmo, one chip at a time
+  selLight=id;
+  if(!li.layer&&worldSaved===null){
+    // a GLOBAL light lives in orbit outside the layer stack: pull the
+    // view back so its position out there is on screen and editable
+    worldSaved={zoom:userZoom,panX:panX,panY:panY};
+    userZoom=Math.max(0.15,userZoom*0.5); panX=0; panY=0;
+    fitCanvas(); repaintCanvas();
+  }
+  showLightChip(); drawLightGizmo();
+}
+function deselectLight(){
+  selLight=null;
+  if(worldSaved){ userZoom=worldSaved.zoom; panX=worldSaved.panX; panY=worldSaved.panY;
+    worldSaved=null; fitCanvas(); repaintCanvas(); }
+  $('lightChip').style.display='none'; drawLightGizmo();
+}
+async function pushLight(patch){
+  if(!selLight)return;
+  const r=await api('/api/light',{...J,body:JSON.stringify({action:'edit',id:selLight,...patch})});
+  if(r&&r.light){ const i=LIGHTS.findIndex(l=>l.id===selLight); if(i>=0)LIGHTS[i]=r.light; }
+  drawComposite(); drawLightGizmo();
+}
+function showLightChip(){
+  const li=lightById(selLight); if(!li)return;
+  const hex=c=>{const h=v=>('0'+Math.round(Math.min(1,v)*255).toString(16)).slice(-2);return '#'+h(c[0])+h(c[1])+h(c[2]);};
+  $('lightChip').style.display='';
+  $('lcTitle').textContent=li.kind+(li.layer?' · in layer':' · global');
+  $('lcColor').value=hex(li.color);
+  $('lcInt').value=li.intensity*100; $('lcIntV').textContent=(+li.intensity).toFixed(1);
+  $('lcConeRow').style.display=li.kind==='spot'?'':'none';
+  $('lCone').value=li.cone; $('lcConeV').textContent=Math.round(li.cone)+'°';
+  $('lcZ').value=li.z; $('lcZV').textContent=Math.round(li.z);
+  $('lcScale').value=(li.scale||1)*100; $('lcScaleV').textContent=(li.scale||1).toFixed(1)+'×';
+  $('lcSoftRow').style.display=li.kind==='spot'?'':'none';
+  $('lcSoft').value=Math.round((li.soft!==undefined?li.soft:0.5)*100);
+  $('lcSoftV').textContent=(li.soft!==undefined?li.soft:0.5).toFixed(2);
+  $('lcShadowRow').style.display=(li.kind==='spot'||li.kind==='point'||li.kind==='directional')?'':'none';
+  $('lcShadows').checked=li.shadows!==false;
+  $('lcC2Row').style.display=li.kind==='dome'?'':'none';
+  if(li.color2){const h=c=>('0'+Math.round(Math.min(1,c)*255).toString(16)).slice(-2);
+    $('lcColor2').value='#'+h(li.color2[0])+h(li.color2[1])+h(li.color2[2]);}
+}
+$('lcSoft').oninput=e=>{ $('lcSoftV').textContent=(e.target.value/100).toFixed(2); pushLight({soft:e.target.value/100}); };
+$('lcShadows').onchange=e=>{ pushLight({shadows:e.target.checked}); };
+$('lcColor2').onchange=e=>{ const v=e.target.value;
+  pushLight({color2:[parseInt(v.slice(1,3),16)/255,parseInt(v.slice(3,5),16)/255,parseInt(v.slice(5,7),16)/255]}); };
+$('lcDone').onclick=deselectLight;
+$('lcColor').onchange=e=>{const v=e.target.value;
+  pushLight({color:[parseInt(v.slice(1,3),16)/255,parseInt(v.slice(3,5),16)/255,parseInt(v.slice(5,7),16)/255]});};
+$('lcInt').oninput=e=>{$('lcIntV').textContent=(e.target.value/100).toFixed(1); pushLight({intensity:e.target.value/100});};
+$('lCone').oninput=e=>{$('lcConeV').textContent=e.target.value+'°'; pushLight({cone:+e.target.value});};
+$('lcZ').oninput=e=>{$('lcZV').textContent=e.target.value; pushLight({z:+e.target.value});};
+$('lcScale').oninput=e=>{$('lcScaleV').textContent=(e.target.value/100).toFixed(1)+'×'; pushLight({scale:e.target.value/100});};
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&selLight)deselectLight(); });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&typeof selField!=='undefined'&&selField)deselectField(); });
+const SVGNS='http://www.w3.org/2000/svg';
+function svgEl(tag,attrs){ const el=document.createElementNS(SVGNS,tag);
+  for(const k in attrs)el.setAttribute(k,attrs[k]); return el; }
+function drawLightGizmo(){
+  const svg=$('lgiz'); if(!svg)return;
+  svg.innerHTML='';
+  const li=lightById(selLight);
+  if(!li){ if(typeof appendFieldGizmo==='function')appendFieldGizmo(svg);
+  if(typeof appendPerspGizmo==='function')appendPerspGizmo(svg); return; }
+  const W=(state.doc&&state.doc.width)||state.width||800;
+  const H=(state.doc&&state.doc.height)||state.height||600;
+  let lx=li.x, ly=li.y;
+  if(li.kind==='directional'){
+    // the sun sits in ORBIT: outside the stack, at its azimuth, always
+    // pointed at the document -- drag around the ring to change azimuth,
+    // in/out to change elevation
+    const cx=W/2, cy=H/2, R=Math.hypot(W,H)*0.62*(1.6-li.elevation/90);
+    lx=cx+Math.cos(li.azimuth*Math.PI/180)*R;
+    ly=cy-Math.sin(li.azimuth*Math.PI/180)*R;
+  }
+  const [px,py]=docToPane(lx,ly);
+  const col='#e8c26a';
+  // aim / direction line toward the target (always inside the doc)
+  let ax=li.aim_x!==undefined?li.aim_x:W/2, ay=li.aim_y!==undefined?li.aim_y:H/2;
+  if(li.kind==='directional'){ ax=W/2; ay=H/2; }
+  const [pax,pay]=docToPane(ax,ay);
+  if(li.kind!=='dome'&&li.kind!=='view'){
+    svg.appendChild(svgEl('line',{x1:px,y1:py,x2:pax,y2:pay,stroke:col,'stroke-width':1,'stroke-dasharray':'4 4',opacity:.7}));
+  }
+  if(li.kind==='spot'){
+    // the CONE: two edge rays + the footprint circle at the aim
+    const ang=Math.atan2(pay-py,pax-px), len=Math.hypot(pax-px,pay-py);
+    const half=li.cone*Math.PI/180/2;
+    [[ang-half],[ang+half]].forEach(([a])=>{
+      svg.appendChild(svgEl('line',{x1:px,y1:py,
+        x2:px+Math.cos(a)*len,y2:py+Math.sin(a)*len,stroke:col,'stroke-width':1,opacity:.5}));
+    });
+    const fr=Math.tan(half)*len;
+    svg.appendChild(svgEl('circle',{cx:pax,cy:pay,r:Math.max(fr,6),fill:'none',stroke:col,'stroke-width':1,opacity:.5}));
+    const aimH=svgEl('circle',{cx:pax,cy:pay,r:6,fill:col,opacity:.9,style:'pointer-events:auto;cursor:move'});
+    aimH.dataset.handle='aim'; svg.appendChild(aimH);
+  }
+  if(li.kind==='point'){
+    const reach=Math.max(li.z,4)*1.2*Math.max(li.scale||1,.05)*zoom;
+    svg.appendChild(svgEl('circle',{cx:px,cy:py,r:reach,fill:'none',stroke:col,'stroke-width':1,'stroke-dasharray':'3 5',opacity:.45}));
+  }
+  // SCALE ring (drag to resize the light physically)
+  const ring=svgEl('circle',{cx:px,cy:py,r:22*Math.max(li.scale||1,.2),fill:'none',stroke:col,'stroke-width':6,opacity:.7,style:'pointer-events:visibleStroke;cursor:nesw-resize'});
+  ring.dataset.handle='scale'; svg.appendChild(ring);
+  // the BULB (drag = move; Shift-drag = height; for the sun: azimuth/elevation)
+  const bulb=svgEl('circle',{cx:px,cy:py,r:9,fill:col,stroke:'#111','stroke-width':1.5,style:'pointer-events:auto;cursor:move'});
+  bulb.dataset.handle='move'; svg.appendChild(bulb);
+  const label=svgEl('text',{x:px+13,y:py-11,fill:col,'font-size':'11'});
+  label.textContent=li.kind+(li.layer?' (layer)':' (global)')+'  z'+Math.round(li.z)+(li.kind==='directional'?(' az'+Math.round(li.azimuth)+' el'+Math.round(li.elevation)):'');
+  svg.appendChild(label);
+  if(typeof appendFieldGizmo==='function')appendFieldGizmo(svg);
+  if(typeof appendPerspGizmo==='function')appendPerspGizmo(svg);
+}
+$('lgiz').addEventListener('pointerdown',e=>{
+  const h=e.target.dataset&&e.target.dataset.handle; if(!h||!selLight)return;
+  e.preventDefault(); e.stopPropagation();
+  const li=lightById(selLight);
+  lgizDrag={h, id:selLight, shift:e.shiftKey, startY:e.clientY, startZ:li.z, startScale:li.scale||1};
+  $('lgiz').setPointerCapture(e.pointerId);
+});
+$('lgiz').addEventListener('pointermove',e=>{
+  if(!lgizDrag)return;
+  const li=lightById(lgizDrag.id); if(!li)return;
+  const pr=$('canvasPane').getBoundingClientRect();
+  const [dx,dy]=paneToDoc(e.clientX-pr.left, e.clientY-pr.top);
+  const W=(state.doc&&state.doc.width)||state.width||800;
+  const H=(state.doc&&state.doc.height)||state.height||600;
+  if(lgizDrag.h==='aim'){ pushLight({aim_x:dx, aim_y:dy}); return; }   // server clamps into bounds
+  if(lgizDrag.h==='scale'){
+    const s=Math.max(0.1,(lgizDrag.startScale+(lgizDrag.startY-e.clientY)/60));
+    pushLight({scale:s}); showLightChip(); return;
+  }
+  if(lgizDrag.h==='move'){
+    if(li.kind==='directional'){
+      const az=Math.atan2(H/2-dy, dx-W/2)*180/Math.PI;
+      const R=Math.hypot(dx-W/2, dy-H/2)/(Math.hypot(W,H)*0.62);
+      const el=Math.max(8,Math.min(85,(1.6-R)*90));
+      pushLight({azimuth:(az+360)%360, elevation:el}); showLightChip(); return;
+    }
+    if(lgizDrag.shift){
+      const z=Math.max(6, lgizDrag.startZ+(lgizDrag.startY-e.clientY)/1.5);
+      pushLight({z:z}); showLightChip(); return;
+    }
+    pushLight({x:dx, y:dy});
+  }
+});
+$('lgiz').addEventListener('pointerup',()=>{ lgizDrag=null; fgizDrag=null; });
+// ---- FORCE FIELDS as layer children, with gizmos (mirrors lights) ----
+let FIELDS=[], selField=null, fgizDrag=null;
+async function loadFields(){ const r=await api('/api/fields'); FIELDS=(r&&r.fields)||[];
+  if(selField&&!fieldById(selField))deselectField();   // undone / cascaded away
+  else if(selField){ showFieldChip(); drawFieldGizmo(); } }
+function fieldById(id){ return FIELDS.find(f=>f.id===id); }
+function selectField(id){ if(!fieldById(id))return;
+  if(selLight)deselectLight();          // one gizmo, one chip at a time
+  selField=id;
+  showFieldChip(); drawFieldGizmo(); }
+function deselectField(){ selField=null; $('fieldChip').style.display='none'; drawFieldGizmo(); }
+async function pushField(patch){
+  if(!selField)return;
+  const r=await api('/api/field',{...J,body:JSON.stringify({action:'edit',id:selField,...patch})});
+  if(r&&r.field){ const i=FIELDS.findIndex(f=>f.id===selField); if(i>=0)FIELDS[i]=r.field; }
+  drawFieldGizmo();
+}
+function showFieldChip(){
+  const f=fieldById(selField); if(!f)return;
+  $('fieldChip').style.display='';
+  $('fcTitle').textContent='field · '+f.kind+(f.layer?' · in layer':'');
+  $('fcKind').value=f.kind;
+  $('fcStr').value=Math.round(f.strength*100); $('fcStrV').textContent=(+f.strength).toFixed(1);
+  $('fcRad').value=f.radius; $('fcRadV').textContent=Math.round(f.radius);
+  $('fcAng').value=f.angle||0; $('fcAngV').textContent=Math.round(f.angle||0)+'°';
+  $('fcAngRow').style.display=f.kind==='direct'?'':'none';
+}
+$('fcDone').onclick=deselectField;
+$('fcKind').onchange=e=>{ pushField({kind:e.target.value}); setTimeout(showFieldChip,150); };
+$('fcStr').oninput=e=>{ const v=e.target.value/100; $('fcStrV').textContent=(+v).toFixed(1); pushField({strength:v}); };
+$('fcRad').oninput=e=>{ $('fcRadV').textContent=e.target.value; pushField({radius:+e.target.value}); };
+$('fcAng').oninput=e=>{ $('fcAngV').textContent=e.target.value+'°'; pushField({angle:+e.target.value}); };
+$('fcDelete').onclick=async()=>{ await api('/api/field',{...J,body:JSON.stringify({action:'delete',id:selField})});
+  await loadFields(); deselectField(); refresh(); };
+function drawFieldGizmo(){ drawLightGizmo(); }   // one clear, both draw
+function appendFieldGizmo(svg){
+  // append-only: drawLightGizmo owns the single clear of the shared
+  // svg -- earlier the light redraw (fired by every composite paint)
+  // silently WIPED the field gizmo mid-session
+  const f=fieldById(selField); if(!f)return;
+  const [px,py]=docToPane(f.x,f.y);
+  const zoomR=Math.abs(f.radius*(docToPane(f.x+1,f.y)[0]-px));
+  const col=f.kind==='vortex'?'#9a7bff':(f.strength<0?'#5ad0c8':'#ff8a5a');
+  const ring=svgEl('circle',{cx:px,cy:py,r:Math.max(zoomR,10),fill:'none',stroke:col,'stroke-width':5,opacity:.55,style:'pointer-events:visibleStroke;cursor:nesw-resize'});
+  ring.dataset.fhandle='radius'; svg.appendChild(ring);
+  if(f.kind==='direct'){
+    const a=(f.angle||0)*Math.PI/180, L=Math.max(zoomR*0.8,30);
+    const hx=px+Math.cos(a)*L, hy=py+Math.sin(a)*L;
+    svg.appendChild(svgEl('line',{x1:px,y1:py,x2:hx,y2:hy,stroke:col,'stroke-width':2,opacity:.8}));
+    const ah=svgEl('circle',{cx:hx,cy:hy,r:6,fill:col,opacity:.95,style:'pointer-events:auto;cursor:crosshair'});
+    ah.dataset.fhandle='angle'; svg.appendChild(ah);
+  }
+  if(f.kind==='vortex'){
+    svg.appendChild(svgEl('path',{d:'M '+(px-12)+' '+py+' a 12 12 0 1 1 6 10',fill:'none',stroke:col,'stroke-width':2,opacity:.9}));
+  }
+  const core=svgEl('circle',{cx:px,cy:py,r:8,fill:col,stroke:'#111','stroke-width':1.5,style:'pointer-events:auto;cursor:move'});
+  core.dataset.fhandle='move'; svg.appendChild(core);
+  const label=svgEl('text',{x:px+12,y:py-10,fill:col,'font-size':'11'});
+  label.textContent='✥ '+f.kind+' s'+(+f.strength).toFixed(1)+' r'+Math.round(f.radius);
+  svg.appendChild(label);
+}
+$('lgiz').addEventListener('pointerdown',e=>{
+  const h=e.target.dataset&&e.target.dataset.fhandle; if(!h||!selField)return;
+  e.preventDefault(); e.stopPropagation();
+  fgizDrag={h,id:selField};
+  $('lgiz').setPointerCapture(e.pointerId);
+});
+$('lgiz').addEventListener('pointermove',e=>{
+  if(!fgizDrag)return;
+  const f=fieldById(fgizDrag.id); if(!f)return;
+  const pr=$('canvasPane').getBoundingClientRect();
+  const [dx,dy]=paneToDoc(e.clientX-pr.left, e.clientY-pr.top);
+  if(fgizDrag.h==='move'){ pushField({x:dx,y:dy}); return; }
+  if(fgizDrag.h==='radius'){ pushField({radius:Math.hypot(dx-f.x,dy-f.y)}); showFieldChip(); return; }
+  if(fgizDrag.h==='angle'){ pushField({angle:(Math.atan2(dy-f.y,dx-f.x)*180/Math.PI+360)%360}); showFieldChip(); }
+});
+let layerToolsEl=null;
+function layerTools(){
+  if(layerToolsEl)return layerToolsEl;
+  const t=document.createElement('div');
+  t.className='ltools'; t.id='layerTools';
+  t.innerHTML=`<button class="rowbtn up" title="Move layer up">▲</button>`+
+    `<button class="rowbtn dn" title="Move layer down">▼</button>`+
+    `<span class="lsep"></span>`+
+    `<button class="rowbtn dup" title="Duplicate layer (Ctrl+J)">⧉</button>`+
+    `<button class="rowbtn md" title="Merge down into the layer below">⤵</button>`+
+    `<span class="lsep"></span>`+
+    `<button class="rowbtn lockb" title="Lock layer — refuses EVERY edit (paint, erase, fill, flip, move, placement) until unlocked">🔒</button>`+
+    `<button class="rowbtn alock" title="Alpha lock — the brush recolors existing pixels only; transparency is frozen and the eraser can't cut">▧</button>`+
+    `<button class="rowbtn clipb" title="Clipping mask — this layer shows only where the layer below has pixels (a run of clipped layers shares one base)">◒</button>`+
+    `<span class="lsep"></span>`+
+    `<button class="rowbtn addlamp" title="Add a POINT light inside this layer — a light object that lives in the layer, rides its pose, and hides with it">💡+</button>`+
+    `<button class="rowbtn addspot" title="Add a SPOT light inside this layer — position, aim, cone; edit with the on-canvas gizmo">🔦+</button>`+
+    `<button class="rowbtn addfield" title="Add a FORCE FIELD inside this layer — point / direct / vortex; it shapes the layer's living media each timeline step. Drag the gizmo to place, ring to resize">✥+</button>`;
+  t.querySelector('.up').onclick=e=>{e.stopPropagation();moveLayerBy(sel,+1);};
+  t.querySelector('.dn').onclick=e=>{e.stopPropagation();moveLayerBy(sel,-1);};
+  t.querySelector('.dup').onclick=e=>{e.stopPropagation();
+    api('/api/layer',{...J,body:JSON.stringify({action:'duplicate',id:sel})}).then(refresh);};
+  t.querySelector('.md').onclick=e=>{e.stopPropagation();
+    api('/api/layer',{...J,body:JSON.stringify({action:'merge_down',id:sel})}).then(refresh);};
+  t.querySelector('.lockb').onclick=e=>{e.stopPropagation();
+    const cur=state.layers.find(x=>x.id===sel);
+    api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:sel,locked:!cur.locked})}).then(()=>{
+      toast(cur.locked?'layer unlocked':'layer locked — every edit is refused until you unlock it','info'); refresh();});};
+  t.querySelector('.alock').onclick=e=>{e.stopPropagation();
+    const cur=state.layers.find(x=>x.id===sel);
+    api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:sel,alpha_lock:!cur.alpha_lock})}).then(refresh);};
+  t.querySelector('.clipb').onclick=e=>{e.stopPropagation();
+    const cur=state.layers.find(x=>x.id===sel);
+    api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:sel,clip:!cur.clip})}).then(refresh);};
+  t.querySelector('.addlamp').onclick=async e=>{e.stopPropagation();
+    const W=(state.doc&&state.doc.width)||800, H=(state.doc&&state.doc.height)||600;
+    const r=await api('/api/light',{...J,body:JSON.stringify({action:'add',kind:'point',layer:sel,x:W/2,y:H/2,z:50,intensity:1.2})});
+    await loadLights(); refresh(); drawComposite();
+    if(r&&r.light)selectLight(r.light.id);
+    toast('point light added INSIDE the layer — it rides the layer\'s pose and visibility','info');};
+  t.querySelector('.addfield').onclick=async e=>{e.stopPropagation();
+    const W=(state.doc&&state.doc.width)||800, H=(state.doc&&state.doc.height)||600;
+    const r=await api('/api/field',{...J,body:JSON.stringify({action:'add',kind:'point',layer:sel,x:W/2,y:H/2,radius:Math.min(W,H)*0.3,strength:1.0})});
+    await loadFields(); refresh();
+    if(r&&r.field)selectField(r.field.id);
+    toast('force field added INSIDE the layer — it shapes this layer\'s living media as the timeline advances; drag the gizmo, ring resizes','info');};
+  t.querySelector('.addspot').onclick=async e=>{e.stopPropagation();
+    const W=(state.doc&&state.doc.width)||800, H=(state.doc&&state.doc.height)||600;
+    const r=await api('/api/light',{...J,body:JSON.stringify({action:'add',kind:'spot',layer:sel,x:W*0.35,y:H*0.3,z:80,aim_x:W/2,aim_y:H/2,cone:30,intensity:1.5})});
+    await loadLights(); refresh(); drawComposite();
+    if(r&&r.light)selectLight(r.light.id);
+    toast('spot light added INSIDE the layer — drag its aim handle to point it','info');};
+  layerToolsEl=t; return t;
 }
 let curBrush=null;      // null = parametric round
 let activeSpline=null, dragSp=null;   // {kind:'point'|'handle', idx}
@@ -2058,8 +3230,8 @@ function drawSplinesPanel(){
   const box=$('splines'); box.innerHTML='';
   for(const p of (state.splines||[])){
     const d=document.createElement('div'); d.className='layer'+(p.id===activeSpline?' sel':'');
-    d.innerHTML=`<span style="font-family:var(--mono);font-size:11px">${p.closed?'◉':'◠'}</span>`+
-      `<input class="nm" style="background:none;border:none;padding:0;flex:1;min-width:0"><button class="eye">✕</button>`;
+    d.innerHTML=`<span style="font-family:var(--mono);font-size:11px" title="${p.closed?'closed loop':'open path'}">${p.closed?'◉':'◠'}</span>`+
+      `<input class="nm" title="click to rename this spline" style="background:none;border:none;padding:0;flex:1;min-width:0"><button class="eye" title="Delete this spline">✕</button>`;
     const nm=d.querySelector('.nm'); nm.value=p.name;
     nm.onchange=()=>api('/api/spline',{...J,body:JSON.stringify({action:'edit',id:p.id,name:nm.value})}).then(refresh);
     d.onclick=e=>{ if(e.target===nm||e.target.className==='eye')return;
@@ -2080,9 +3252,9 @@ function drawSelections(){
   const box=$('selections'); box.innerHTML='';
   for(const x of (state.selections||[])){
     const d=document.createElement('div'); d.className='layer'+(x.id===activeSel?' sel':'');
-    d.innerHTML=`<img><input class="nm" style="background:none;border:none;padding:0;flex:1;min-width:0">`+
-      `<span style="display:flex;flex-direction:column"><button class="rowbtn up">▲</button><button class="rowbtn dn">▼</button></span>`+
-      `<button class="eye">✕</button>`;
+    d.innerHTML=`<img><input class="nm" title="click to rename this selection" style="background:none;border:none;padding:0;flex:1;min-width:0">`+
+      `<span style="display:flex;flex-direction:column"><button class="rowbtn up" title="Move up in the list">▲</button><button class="rowbtn dn" title="Move down in the list">▼</button></span>`+
+      `<button class="eye" title="Delete this stored selection">✕</button>`;
     const si=(state.selections||[]).indexOf(x);
     d.querySelector('.up').onclick=e=>{e.stopPropagation();api('/api/selection',{...J,body:JSON.stringify({action:'move',id:x.id,index:Math.max(0,si-1)})}).then(refresh);};
     d.querySelector('.dn').onclick=e=>{e.stopPropagation();api('/api/selection',{...J,body:JSON.stringify({action:'move',id:x.id,index:si+1})}).then(refresh);};
@@ -2138,9 +3310,9 @@ function drawMasks(){
   const box=$('masks'); box.innerHTML='';
   for(const m of (state.masks||[])){
     const d=document.createElement('div'); d.className='layer';
-    d.innerHTML=`<img><input class="nm" style="background:none;border:none;padding:0;flex:1;min-width:0">`+
-      `<span style="display:flex;flex-direction:column"><button class="rowbtn up">▲</button><button class="rowbtn dn">▼</button></span>`+
-      `<button class="rowbtn dupm" title="Duplicate mask">⧉</button><button class="eye">✕</button>`;
+    d.innerHTML=`<img><input class="nm" title="click to rename this mask" style="background:none;border:none;padding:0;flex:1;min-width:0">`+
+      `<span style="display:flex;flex-direction:column"><button class="rowbtn up" title="Move up in the list">▲</button><button class="rowbtn dn" title="Move down in the list">▼</button></span>`+
+      `<button class="rowbtn dupm" title="Duplicate mask">⧉</button><button class="eye" title="Delete this mask">✕</button>`;
     const mi=(state.masks||[]).indexOf(m);
     d.querySelector('.dupm').onclick=()=>api('/api/mask',{...J,body:JSON.stringify({action:'duplicate',id:m.id})}).then(refresh);
     d.querySelector('.up').onclick=()=>api('/api/mask',{...J,body:JSON.stringify({action:'move',id:m.id,index:Math.max(0,mi-1)})}).then(refresh);
@@ -2239,6 +3411,7 @@ function strokeBody(points,record){
     erase:tool==='erase',
     target_mask:(paintTarget==='mask'
       ? ((state.layers||[]).find(x=>x.id===sel)||{}).mask : undefined),
+    stroke_taper:(tool==='brush'?+$('bTaper').value/100:0)||undefined,
     selection:$('bSel').value||undefined,sel_invert:$('bSelInv').checked,
     brush:curBrush||undefined,
     mode:(tool==='erase'&&$('eMode').value!=='pixel'?$('eMode').value:tool==='smudge'?'smudge':tool==='clone'?'clone':tool==='heal'?'heal':tool==='nodepaint'?'node':'brush'),
@@ -2269,7 +3442,7 @@ async function flushStroke(final){
   const rec=strokeFirst; strokeFirst=false; sent=stroke.length;
   try{
     const body=strokeBody(seg,rec); if(liveWhole)body.live=true;
-    const r=await api('/api/paint',{...J,body:JSON.stringify(body)});
+    const r=await api('/api/paint',{...J,body:JSON.stringify(body)}); paintWarn(r);
     if(r&&r.removed!==undefined){
       // the stroke eraser reports its take -- silence after a miss reads
       // as breakage, so say what happened either way
@@ -2656,7 +3829,7 @@ vc.addEventListener('pointerup',async ()=>{
   if(seg.length>=1&&!strokeError){
     try{
       const body=strokeBody(seg,rec); if(live)body.live=true;
-      const r=await api('/api/paint',{...J,body:JSON.stringify(body)});
+      const r=await api('/api/paint',{...J,body:JSON.stringify(body)}); paintWarn(r);
     if(r&&r.removed!==undefined){
       toast(r.removed===0?'no strokes under the eraser there'
         :('removed '+r.removed+' stroke'+(r.removed>1?'s':'')),
@@ -3145,8 +4318,11 @@ function drawPointHandles(){
 }
 async function maybeFirstRun(){
   // A new user meets 16 tools and a node graph with no orientation. One line
-  // naming the three keys that matter, dismissible for good -- shown only
-  // until they say otherwise, never nagging.
+  // naming the three keys that matter, dismissible FOR GOOD. Server prefs
+  // are in-memory and die with every restart -- which is why the hint
+  // reappeared on every app launch -- so dismissal lives in localStorage
+  // (per browser, survives restarts), with server prefs as a secondary.
+  try{ if(localStorage.getItem('le_seen_intro'))return; }catch(e){}
   try{
     const p=await api('/api/prefs',{method:'GET'});
     if(p&&p.prefs&&p.prefs.seen_intro)return;
@@ -3155,6 +4331,7 @@ async function maybeFirstRun(){
 }
 function dismissFirstRun(){
   $('firstRun').style.display='none';
+  try{ localStorage.setItem('le_seen_intro','1'); }catch(e){}
   api('/api/prefs',{...J,body:JSON.stringify({seen_intro:true})});
 }
 function syncSelBadge(){
@@ -3580,6 +4757,7 @@ async function loadPersp(){
   const r=await api('/api/perspective'); if(!r)return;
   PERSP=r.persp||PERSP;
   $('ppEnabled').checked=!!PERSP.enabled;
+  syncPerspBtn(); if(typeof drawLightGizmo==='function')drawLightGizmo();
   $('ppSnap').checked=!!PERSP.snap;
   $('ppGround').checked=!!(PERSP.ground&&PERSP.ground.enabled);
   $('ppInfo').textContent=PERSP.vps&&PERSP.vps.length
@@ -3590,6 +4768,8 @@ async function loadPersp(){
 async function pushPersp(patch){
   const r=await api('/api/perspective',{...J,body:JSON.stringify({action:'set',...patch})});
   if(r&&r.persp){PERSP=r.persp;} repaintCanvas(); drawComposite();
+  if(typeof syncPerspBtn==='function')syncPerspBtn();
+  if(typeof drawLightGizmo==='function')drawLightGizmo();   // VP gizmos ride the shared svg
 }
 $('ppEstimate').onclick=async()=>{
   const r=await api('/api/perspective',{...J,body:JSON.stringify({action:'estimate',layer:sel})});
@@ -3606,6 +4786,56 @@ $('ppClear').onclick=async()=>{
   const r=await api('/api/perspective',{...J,body:JSON.stringify({action:'clear'})});
   if(r&&r.persp)PERSP=r.persp; loadPersp(); drawComposite();
 };
+function perspPreset(n){
+  const W=(state.doc&&state.doc.width)||800, H=(state.doc&&state.doc.height)||600;
+  const hy=H*0.42;
+  const vps=n===1?[[W*0.5,hy]]:[[W*0.08,hy],[W*0.92,hy]];
+  pushPersp({enabled:true,vps:vps,horizon:[hy,hy]});
+  toast(n+'-point perspective set — the ✛ crosshairs on the canvas are DRAGGABLE; strokes can snap toward them (menu)','info');
+}
+$('pp1pt').onclick=()=>perspPreset(1);
+$('pp2pt').onclick=()=>perspPreset(2);
+function syncPerspBtn(){
+  $('perspBtn').classList.toggle('togon', !!PERSP.enabled);
+}
+// draggable VP gizmos ride the shared overlay svg (append-only: the
+// light redraw owns the single clear -- same lesson as the fields)
+function appendPerspGizmo(svg){
+  if(!PERSP.enabled||!(PERSP.vps||[]).length)return;
+  PERSP.vps.forEach((vp,i)=>{
+    const [px,py]=docToPane(vp[0],vp[1]);
+    const h=svgEl('circle',{cx:px,cy:py,r:9,fill:'rgba(255,220,90,0.25)',stroke:'#ffd75a','stroke-width':2,style:'pointer-events:auto;cursor:move'});
+    h.dataset.vphandle=String(i); svg.appendChild(h);
+    svg.appendChild(svgEl('line',{x1:px-13,y1:py,x2:px+13,y2:py,stroke:'#ffd75a','stroke-width':1.5,style:'pointer-events:none'}));
+    svg.appendChild(svgEl('line',{x1:px,y1:py-13,x2:px,y2:py+13,stroke:'#ffd75a','stroke-width':1.5,style:'pointer-events:none'}));
+  });
+}
+let vpDrag=null;
+$('lgiz').addEventListener('pointerdown',e=>{
+  const i=e.target.dataset&&e.target.dataset.vphandle;
+  if(i===undefined||i===null||i==='')return;
+  e.preventDefault(); e.stopPropagation();
+  vpDrag=+i; $('lgiz').setPointerCapture(e.pointerId);
+});
+$('lgiz').addEventListener('pointermove',e=>{
+  if(vpDrag===null||vpDrag===undefined)return;
+  const pr=$('canvasPane').getBoundingClientRect();
+  const [dx,dy]=paneToDoc(e.clientX-pr.left,e.clientY-pr.top);
+  const vps=PERSP.vps.map((v,j)=>j===vpDrag?[dx,dy]:v);
+  // the horizon follows the vanishing points (mean height)
+  const hy=vps.reduce((a,v)=>a+v[1],0)/vps.length;
+  pushPersp({vps:vps,horizon:[hy,hy]});
+});
+$('lgiz').addEventListener('pointerup',()=>{ vpDrag=null; });
+document.addEventListener('keydown',e=>{
+  if(e.key==='P'&&e.shiftKey&&!e.ctrlKey&&!e.metaKey){
+    const t=e.target;
+    if(t&&(t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable))return;
+    e.preventDefault();
+    pushPersp({enabled:!PERSP.enabled});
+    toast(PERSP.enabled?'perspective guides OFF':'perspective guides ON','info');
+  }
+});
 $('perspBtn').addEventListener('click',loadPersp);
 function canvasToScreen(x,y){ return [x*vc.width/((state.doc&&state.doc.width)||state.width),
                                       y*vc.height/((state.doc&&state.doc.height)||state.height)]; }
@@ -3667,49 +4897,30 @@ function drawPerspGuides(){
 }
 async function loadLights(){
   const r=await api('/api/lights'); if(!r)return;
+  LIGHTS=r.lights||[];
   const box=$('lightRows'); box.innerHTML='';
-  (r.lights||[]).forEach(li=>{
+  LIGHTS.forEach(li=>{
     const row=document.createElement('div');
-    row.style.cssText='display:flex;gap:4px;align-items:center;font-size:11px';
-    const hex=c=>{const h=v=>('0'+Math.round(Math.min(1,v)*255).toString(16)).slice(-2);return '#'+h(c[0])+h(c[1])+h(c[2]);};
-    row.innerHTML=`<button class="lEn" title="toggle">${li.enabled?'💡':'▫'}</button>
-      <span style="width:64px">${li.kind}</span>
-      <input type="color" class="lCol" value="${hex(li.color)}" title="colour" style="width:26px">
-      <input type="number" class="lInt" value="${li.intensity}" step="0.1" min="0" max="4" title="intensity" style="width:44px">`+
-      (li.kind==='directional'
-        ?`<input type="number" class="lAz" value="${li.azimuth}" step="15" title="azimuth ° (0 = from the east)" style="width:50px">
-          <input type="number" class="lEl" value="${li.elevation}" step="5" min="5" max="85" title="elevation °" style="width:44px">`
-        :li.kind==='spot'
-        ?`<input type="number" class="lAimX" value="${li.aim_x}" step="20" title="aim x" style="width:48px">
-          <input type="number" class="lAimY" value="${li.aim_y}" step="20" title="aim y" style="width:48px">
-          <input type="number" class="lCone" value="${li.cone}" step="5" min="5" max="80" title="cone °" style="width:44px">`
-        :li.kind==='point'
-        ?`<input type="number" class="lX" value="${li.x}" step="10" title="x" style="width:48px">
-          <input type="number" class="lY" value="${li.y}" step="10" title="y" style="width:48px">
-          <input type="number" class="lZ" value="${li.z}" step="10" title="height above canvas" style="width:44px">`
-        :'')+
-      `<button class="lDel" title="remove">✕</button>`;
-    const push=async patch=>{ await api('/api/light',{...J,body:JSON.stringify({action:'edit',id:li.id,...patch})});
-      drawComposite(); };
-    row.querySelector('.lEn').onclick=async()=>{await push({enabled:!li.enabled});loadLights();};
-    row.querySelector('.lCol').onchange=e=>{const v=e.target.value;
-      push({color:[parseInt(v.slice(1,3),16)/255,parseInt(v.slice(3,5),16)/255,parseInt(v.slice(5,7),16)/255]});};
-    row.querySelector('.lInt').onchange=e=>push({intensity:+e.target.value});
-    const az=row.querySelector('.lAz'); if(az)az.onchange=e=>push({azimuth:+e.target.value});
-    const el=row.querySelector('.lEl'); if(el)el.onchange=e=>push({elevation:+e.target.value});
-    ['lX','lY','lZ'].forEach(k=>{const n=row.querySelector('.'+k);
-      if(n)n.onchange=e=>push({[k.slice(1).toLowerCase()]:+e.target.value});});
-    const ax_=row.querySelector('.lAimX'); if(ax_)ax_.onchange=e=>push({aim_x:+e.target.value});
-    const ay_=row.querySelector('.lAimY'); if(ay_)ay_.onchange=e=>push({aim_y:+e.target.value});
-    const cn_=row.querySelector('.lCone'); if(cn_)cn_.onchange=e=>push({cone:+e.target.value});
+    row.style.cssText='display:flex;gap:6px;align-items:center;font-size:11px';
+    row.innerHTML=`<button class="lEn" title="Toggle this light on/off">${li.enabled?'💡':'▫'}</button>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${li.kind}${li.layer?' — lives inside a layer':' — global (in orbit around the document)'}">${li.kind}${li.layer?' · layer':' · global'}</span>
+      <button class="lSel" title="Select: shows the light in the scene with its gizmo (global lights zoom the view out to their orbit)">✎ Select</button>
+      <button class="lDel" title="Remove this light">✕</button>`;
+    row.querySelector('.lEn').onclick=async()=>{
+      await api('/api/light',{...J,body:JSON.stringify({action:'edit',id:li.id,enabled:!li.enabled})});
+      drawComposite(); loadLights(); drawLightGizmo();};
+    row.querySelector('.lSel').onclick=()=>{ selectLight(li.id); };
     row.querySelector('.lDel').onclick=async()=>{
+      if(selLight===li.id)deselectLight();
       await api('/api/light',{...J,body:JSON.stringify({action:'remove',id:li.id})});
-      drawComposite(); loadLights();};
+      drawComposite(); loadLights(); refresh();};
     box.appendChild(row);
   });
-  if(!(r.lights||[]).length)
-    box.innerHTML='<span class="mu" style="font-size:11px">no lights — the canvas is unlit (flat). Add one below; paint with emissive layers to glow.</span>';
+  if(!LIGHTS.length)
+    box.innerHTML='<span class="mu" style="font-size:11px">no lights — add one below, or use the 💡 button in a layer\'s tool bar to put a lamp INSIDE that layer</span>';
   applyAria(box);
+  drawLightGizmo();
+  return;
 }
 [['lightAddDir','directional'],['lightAddView','view'],['lightAddPoint','point'],['lightAddSpot','spot']].forEach(([bid,kind])=>{
   $(bid).onclick=async()=>{
@@ -3783,7 +4994,14 @@ function applyAria(root){
   (root||document).querySelectorAll('button[title]:not([aria-label]),input[title]:not([aria-label]),select[title]:not([aria-label])')
     .forEach(el=>el.setAttribute('aria-label', el.title.split('·')[0].split('—')[0].trim()));
 }
-window.addEventListener('load',()=>applyAria());
+window.addEventListener('load',()=>{
+  loadLights();               // children rows in the layer list need LIGHTS
+  loadFields();               // and the field chip needs FIELDS
+  loadWalls();                // the four planes start empty
+  const dia=keyDiamond('layer',()=>sel,'opacity',()=>+$('lOp').value/100);
+  $('lOpKeySlot').appendChild(dia); KEY_DIAMONDS.push(dia);
+  applyAria();
+});
 function setTool(t){
   const _em=$('eModeRow'); if(_em)_em.style.display=(t==='erase')?'':'none';
   if(t==='nodepaint'&&!paintOutNodes().length){
@@ -4087,13 +5305,13 @@ async function doText(x,y){
   setStatus('✓ '+r.glyphs+' glyphs'+(body.spline?' along the path':''));
   refresh(); refreshNodePreviews();
 }
-const SHORTCUTS=[["B / E", "Brush / Eraser"], ["S / C", "Smudge / Clone"], ["M / W", "Marquee / Magic wand"], ["N", "Nudge — move strokes, not pixels"], ["K", "Select strokes (Shift-click adds)"], ["I", "Eyedropper (Alt-click while brushing)"], ["Swatch strip", "Click a recent colour to reuse · Alt-click to remove"], ["Del / Backspace", "Clear the selection (whole layer if none)"], ["Ctrl+click thumb", "Load layer alpha as selection"], ["Alt+click eye", "Solo a layer (again restores)"], ["Drag a layer row", "Reorder layers"], ["M (nodes)", "Bypass / re-enable a node"], ["Shift-drag (nodes)", "Box-select nodes"], ["Ctrl+C / V (nodes)", "Copy / paste nodes with their links"], ["Drop a wire on empty space", "Search for a node and auto-connect it"], ["Drop a node on a wire", "Insert it into that link"], ["Ctrl-drag (nodes)", "Slice through wires to cut them"], ["Ctrl+drag (nodes)", "Slash across wires to cut them"], ["Ctrl+Shift+N", "New layer"], ["Ctrl+1", "Zoom 100%"], ["V", "Transform tool"], ["G", "Fill (bucket)"], ["T", "Text tool"], ["P", "Spline pen"], ["Ctrl+C / X / V", "Copy / Cut / Paste selection"], ["Ctrl+J", "Duplicate layer"], ["Ctrl+D", "Deselect · duplicate node (in Nodes)"], ["Ctrl+Z / Shift+Z / Y", "Undo / Redo"], ["Ctrl+S", "Save workspace"], ["Ctrl+O", "Open image"], ["Ctrl+Shift+E", "Merge visible"], ["Esc", "Reset transform → finish spline → deselect"], ["Enter", "Apply transform"], ["[ / ]", "Brush smaller / larger"], ["+ / − / 0", "Zoom in / out / fit"], ["Ctrl+0", "Fit on screen"], ["Stroke panel", "width slider: swells selected joints, or tapers the whole stroke"], ["Strokes selected", "V transform · Ctrl+C/X/V copy/cut/paste · Del delete · panel: duplicate, to layer, smooth"], ["File ▸ Export at size…", "Render at any resolution, not just canvas size"], ["F", "Frame nodes (in Nodes)"], ["Del", "Delete node (in Nodes)"], ["?", "This overlay"], ["Drag & drop", "Images → layers · .lews → workspace · .obj/.glb → 3D models"], ["F", "FX brush — strokes grow effects (grass, drips, embers)"], ["Brush ▸ Media", "Impasto — oil/acrylic/watercolor build real thickness; gravity makes heavy loads run"], ["Brush ▸ ⇋", "Symmetry — strokes paint a mirrored twin (its own editable stroke)"], ["Layer row 🔒 / ◒", "Alpha lock · clipping mask (clips to the layer below)"], ["Editors chip", "Who's here — tabs count as one person; the host can kick"]];
+const SHORTCUTS=[['Shift+P','perspective guides on/off'],['Shift+Space','Play / pause the timeline'],[', / .','Step one frame back / forward'],['Home / End','Jump to the first / last frame'],["B / E", "Brush / Eraser"], ["S / C", "Smudge / Clone"], ["M / W", "Marquee / Magic wand"], ["N", "Nudge — move strokes, not pixels"], ["K", "Select strokes (Shift-click adds)"], ["I", "Eyedropper (Alt-click while brushing)"], ["Swatch strip", "Click a recent colour to reuse · Alt-click to remove"], ["Del / Backspace", "Clear the selection (whole layer if none)"], ["Ctrl+click thumb", "Load layer alpha as selection"], ["Alt+click eye", "Solo a layer (again restores)"], ["Drag a layer row", "Reorder layers"], ["M (nodes)", "Bypass / re-enable a node"], ["Shift-drag (nodes)", "Box-select nodes"], ["Ctrl+C / V (nodes)", "Copy / paste nodes with their links"], ["Drop a wire on empty space", "Search for a node and auto-connect it"], ["Drop a node on a wire", "Insert it into that link"], ["Ctrl-drag (nodes)", "Slice through wires to cut them"], ["Ctrl+drag (nodes)", "Slash across wires to cut them"], ["Ctrl+Shift+N", "New layer"], ["Ctrl+1", "Zoom 100%"], ["V", "Transform tool"], ["G", "Fill (bucket)"], ["T", "Text tool"], ["P", "Spline pen"], ["Ctrl+C / X / V", "Copy / Cut / Paste selection"], ["Ctrl+J", "Duplicate layer"], ["Ctrl+D", "Deselect · duplicate node (in Nodes)"], ["Ctrl+Z / Shift+Z / Y", "Undo / Redo"], ["Ctrl+S", "Save workspace"], ["Ctrl+O", "Open image"], ["Ctrl+Shift+E", "Merge visible"], ["Esc", "Reset transform → finish spline → deselect"], ["Enter", "Apply transform"], ["[ / ]", "Brush smaller / larger"], ["+ / − / 0", "Zoom in / out / fit"], ["Ctrl+0", "Fit on screen"], ["Stroke panel", "width slider: swells selected joints, or tapers the whole stroke"], ["Strokes selected", "V transform · Ctrl+C/X/V copy/cut/paste · Del delete · panel: duplicate, to layer, smooth"], ["File ▸ Export at size…", "Render at any resolution, not just canvas size"], ["File ▸ Export frame sequence…", "The animation as numbered PNGs — media simulated on the same timeline playback uses, plus an ffmpeg line"], ["F", "Frame nodes (in Nodes)"], ["Del", "Delete node (in Nodes)"], ["?", "This overlay"], ["Drag & drop", "Images → layers · .lews → workspace · .obj/.glb → 3D models"], ["F", "FX brush — strokes grow effects (grass, drips, embers)"], ["Brush ▸ Media", "Impasto — oil/acrylic/watercolor build real thickness; gravity makes heavy loads run"], ["Brush ▸ ⇋", "Symmetry — strokes paint a mirrored twin (its own editable stroke)"], ["Layer row 🔒 / ◒", "Alpha lock · clipping mask (clips to the layer below)"], ["Editors chip", "Who's here — tabs count as one person; the host can kick"]];
 function toggleShortcuts(){
   const b=$('shortcutsBack');
   if(b.style.display==='none'){
     // Shortcuts alone leave every menu-only feature undiscoverable. List the
     // things you can DO beside the keys that do them.
-    const FEATURES=[
+    const FEATURES=[['📐 Perspective (top bar)','1/2-point presets with DRAGGABLE vanishing points, estimate-from-drawing, stroke snap toward VPs, ground shadow-catcher'],
       ["File ▸ Crop to selection","Trim the canvas to what you selected"],
       ["File ▸ Rotate / Flip","Turn or mirror the whole document (lossless)"],
       ["File ▸ Re-render strokes","Redraw brush layers at the current size — sharper than resizing pixels"],
@@ -4235,6 +5453,7 @@ window.addEventListener('drop',async e=>{
   e.preventDefault();
   const files=[...(e.dataTransfer?.files||[])];
   if(!files.length)return;
+  let dropN=0;
   for(const f of files){
     const ext=(f.name.split('.').pop()||'').toLowerCase();
     const fd=new FormData();
@@ -4247,14 +5466,40 @@ window.addEventListener('drop',async e=>{
       const r=await fetch('/api/assets/upload',{method:'POST',headers:{'X-Client':CLIENT_ID,'X-User':USER_ID},body:fd}).then(x=>x.json());
       r.error?toast(r.error):toast('3-D model "'+f.name+'" loaded — use it in a 3D model node','info');
     }else if(['png','jpg','jpeg','webp','gif','bmp'].includes(ext)){
-      fd.append('file',f);
-      const r=await fetch('/api/open',{method:'POST',headers:{'X-Client':CLIENT_ID,'X-User':USER_ID},body:fd}).then(x=>x.json());
-      r.error?toast(r.error):toast('"'+f.name+'" added as a layer','info');
+      // dropped images join the CURRENT document as placed layers --
+      // the same battle-tested path as clipboard paste. (This used to
+      // call /api/open, which OPENS A NEW DOCUMENT: the painting
+      // vanished from view while the toast claimed a layer was added.)
+      const b64=await new Promise(res=>{const fr=new FileReader();
+        fr.onload=()=>res(fr.result); fr.readAsDataURL(f);});
+      const r=await api('/api/paste',{...J,body:JSON.stringify({png:b64})});
+      if(r&&r.ok){
+        sel=r.id;
+        // land it where it was dropped (when the drop was over the
+        // canvas); successive files fan out so they don't stack
+        const pr=$('canvasPane').getBoundingClientRect();
+        if(e.clientX>=pr.left&&e.clientX<=pr.right&&e.clientY>=pr.top&&e.clientY<=pr.bottom){
+          const [dx2,dy2]=paneToDoc(e.clientX-pr.left,e.clientY-pr.top);
+          await api('/api/place',{...J,body:JSON.stringify({id:r.id,x:dx2+dropN*24,y:dy2+dropN*24})});
+        }
+        dropN++;
+        toast(r.oversize
+          ? '"'+f.name+'" placed at full size ('+r.w+'×'+r.h+') — larger than the canvas, nothing trimmed: the Placement row moves/scales it'
+          : '"'+f.name+'" placed ('+r.w+'×'+r.h+')','info');
+      }else if(r&&r.error)toast('drop: '+r.error);
     }else toast('unsupported file: '+f.name);
   }
   refresh(); refreshNodePreviews();
 });
 let TOASTT=null;
+let _lastPaintWarn=0;
+function paintWarn(r){
+  // a stroke that cannot show gets a DIAGNOSIS, throttled so a long
+  // stroke doesn't spam — professional trust: no silent no-ops
+  if(r&&r.warning&&Date.now()-_lastPaintWarn>2500){
+    _lastPaintWarn=Date.now(); toast(r.warning,'warn');
+  }
+}
 function toast(msg,kind){
   let t=document.getElementById('toast');
   if(!t){t=document.createElement('div');t.id='toast';document.body.appendChild(t);}
@@ -4301,7 +5546,12 @@ $('ptLayer').onclick=()=>setPaintTarget('layer');
 $('ptMask').onclick=()=>setPaintTarget('mask');
 $('lMaskInv').onchange=e=>api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:sel,mask_invert:e.target.checked})}).then(()=>{refresh();refreshNodePreviews();});
 $('addGroup').onclick=async()=>{await api('/api/group',{...J,body:JSON.stringify({action:'add'})});refresh();};
-$('addLayer').onclick=async()=>{await api('/api/layer',{...J,body:JSON.stringify({action:'add'})});refresh();};
+$('addLayer').onclick=async e=>{const body={action:'add'};
+  if(e.shiftKey&&sel){ body.below=sel; }
+  const r=await api('/api/layer',{...J,body:JSON.stringify(body)});
+  if(r&&r.id)sel=r.id;
+  if(body.below)toast('layer added BELOW the selected one','info');
+  refresh();};
 $('delLayer').onclick=async()=>{await api('/api/layer',{...J,body:JSON.stringify({action:'remove',id:sel})});sel=null;refresh();};
 $('lBlend').onchange=e=>api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:sel,blend:e.target.value})}).then(refresh);
 $('lOp').oninput=e=>{$('lOpV').textContent=(e.target.value/100).toFixed(1);};
@@ -4380,15 +5630,15 @@ document.addEventListener('keydown',e=>{
           strokeClip=r.count; ssAnchors=[]; ptSel=[];
           strokeOpRefresh('cut '+r.count+' — Ctrl+V pastes'); });
       return;}
-    if(k==='v'&&strokesOwn&&strokeClip){e.preventDefault();
-      api('/api/strokes/clipboard',{...J,body:JSON.stringify(
-        {action:'paste',layer:sel||undefined,dx:14,dy:14})})
-        .then(r=>{ if(r&&r.error){toast('paste: '+r.error);return;}
-          ssAnchors=r.ids; ptSel=[]; strokeOpRefresh('pasted — the copies are selected'); });
-      return;}
+    // stroke paste also defers to the paste listener (see the global
+    // Ctrl+V note): killing keydown here starved snipping-tool images
     if(k==='c'){e.preventDefault();clipboardOp('copy');return;}
     if(k==='x'){e.preventDefault();clipboardOp('cut');return;}
-    if(k==='v'){e.preventDefault();clipboardOp('paste');return;}
+    // Ctrl+V deliberately NOT handled here: preventDefault on keydown
+    // cancels the browser's native 'paste' event, which is the ONLY
+    // path OS-clipboard images (snipping tool, screenshots) can
+    // arrive by. The paste listener owns the whole decision: image
+    // -> place it; otherwise -> internal clipboard.
     if(k==='d'){e.preventDefault();
       if(mode==='nodes'&&selNode){duplicateNode(selNode);}
       else deselect();

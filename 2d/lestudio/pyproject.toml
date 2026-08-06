@@ -24,7 +24,16 @@ dependencies = [
     # number cannot answer "is THIS faculty present on the build in front of
     # me?" -- a renamed or absent faculty is invisible to a pin, which is how
     # a missing wrap_webgl2 once reached a user as a 500.
-    "leos-core>=0.2.7",
+    #
+    # FLOOR RAISED to 0.2.9: that release added boundary="wall" (the fluid
+    # solve is CONTAINED by the canvas edges instead of wrapping around a
+    # torus), dtype-preserving advection, multi-channel advect, and roi=.
+    # The media path degrades in steps rather than breaking on an older
+    # core -- _fluid_step_walled falls back to the periodic solve and
+    # _advect_walled to the facade -- so 0.2.7 still RUNS. It runs with
+    # ink that wraps off one edge and reappears on the other, which is a
+    # picture nobody wants; hence a floor rather than a soft check.
+    "leos-core>=0.2.9",
     "flask>=2.0",         # the browser UI
     "pillow>=9.0",        # image import/export
     "numpy",

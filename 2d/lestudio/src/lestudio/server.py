@@ -361,6 +361,51 @@ def paint_run():
     return jsonify(ok=True)
 
 
+@app.get("/api/timeline")
+def timeline_get():
+    """The global timeline: {frame, fps, range, tracks} where tracks maps
+    "kind:id:prop" -> [[t, v], ...]. Every keyframed property is
+    evaluated at the playhead; media layers advance by elapsed frames
+    times their keyable media_rate."""
+    return jsonify(frame=float(getattr(DOC, "frame", 0.0)),
+                   fps=float(getattr(DOC, "fps", 24.0)),
+                   range=list(getattr(DOC, "frame_range", [0.0, 96.0])),
+                   tracks=getattr(DOC, "tracks", {}))
+
+
+@app.post("/api/timeline")
+def timeline_post():
+    """Drive the timeline: {"action": "frame"|"key"|"delkey"|"range"}.
+    frame takes t (scrubbing; not undoable). key/delkey take kind
+    ("layer"|"light"), id, prop, and optional t/v -- both default to the
+    playhead and the live value; both are undoable. range takes lo, hi.
+    Animatable props: layer opacity/z_off/tilt_x/tilt_y/thickness/
+    emissive/reflect/dispersion/media_rate; light intensity/azimuth/
+    elevation/x/y/z/cone."""
+    d = request.json or {}
+    act = d.get("action")
+    try:
+        if act == "frame":
+            t = DOC.set_frame(float(d.get("t", 0.0)))
+            return jsonify(ok=True, frame=t)
+        if act == "key":
+            ks = DOC.set_key(d["kind"], d["id"], d["prop"],
+                             t=d.get("t"), v=d.get("v"))
+            return jsonify(ok=True, keys=ks)
+        if act == "delkey":
+            DOC.del_key(d["kind"], d["id"], d["prop"], t=d.get("t"))
+            return jsonify(ok=True)
+        if act == "range":
+            DOC.frame_range = [float(d.get("lo", 0.0)),
+                               float(d.get("hi", 96.0))]
+            from . import _MUT_REV
+            _MUT_REV[0] += 1
+            return jsonify(ok=True)
+    except KeyError as ex:
+        return jsonify(error="no such target/prop: %s" % ex), 404
+    return jsonify(error="unknown action"), 400
+
+
 @app.get("/api/perspective")
 def perspective_get():
     """The document's perspective state: {enabled, vps, horizon, snap,
@@ -420,6 +465,39 @@ def lights_list():
     return jsonify(lights=[dict(li) for li in getattr(DOC, "lights", [])])
 
 
+@app.get("/api/fields")
+def get_fields():
+    """List force-field objects: [{id, kind: point|direct|vortex, layer, x, y, radius, strength, angle}]. Fields parented to a layer shape that layer's living media every timeline step."""
+    return jsonify(fields=[dict(f) for f in getattr(DOC, "fields", [])])
+
+
+@app.post("/api/field")
+def field_route():
+    """Field CRUD: {"action": "add"|"edit"|"delete", "id"?, "kind"?, "layer"?, "x"?, "y"?, "radius"?, "strength"?, "angle"?}. add returns {ok, field}; point strength>0 repels, <0 attracts; direct pushes along angle degrees; vortex swirls. Fields die with their layer."""
+    d = request.json or {}
+    act = d.get("action")
+    if act == "add":
+        f = DOC.add_field(kind=d.get("kind", "point"),
+                          layer=d.get("layer"),
+                          x=d.get("x"), y=d.get("y"),
+                          radius=float(d.get("radius", 120.0)),
+                          strength=float(d.get("strength", 1.0)),
+                          angle=float(d.get("angle", 0.0)))
+        return jsonify(ok=True, field=f)
+    if act == "edit":
+        try:
+            f = DOC.edit_field(d["id"],
+                               **{k: d.get(k) for k in
+                                  ("kind", "layer", "x", "y", "radius",
+                                   "strength", "angle")})
+        except KeyError:
+            return jsonify(error="no such field"), 404
+        return jsonify(ok=True, field=f)
+    if act == "delete":
+        return jsonify(ok=DOC.delete_field(d.get("id", "")))
+    return jsonify(error="unknown action"), 400
+
+
 @app.post("/api/light")
 def light_edit():
     """Manage lights: {"action": "add"|"edit"|"remove"|"preset", ...}.
@@ -444,7 +522,9 @@ def light_edit():
                                aim_x=d.get("aim_x"), aim_y=d.get("aim_y"),
                                cone=float(d.get("cone", 30.0)),
                                soft=float(d.get("soft", 0.5)),
-                               color2=d.get("color2", [0.25, 0.22, 0.18]))
+                               color2=d.get("color2", [0.25, 0.22, 0.18]),
+                               layer=d.get("layer"),
+                               scale=float(d.get("scale", 1.0)))
             return jsonify(ok=True, light=dict(li))
         if act == "preset":
             try:
@@ -571,18 +651,28 @@ def media_step():
 
 @app.post("/api/view3d")
 def view3d():
-    """The document camera: {"mode": "flat"|"ortho"|"persp"}. flat is the
-    classic pipeline (cached, patched); ortho/persp switch the composite to
-    the volumetric slab stack -- explicit opt-in, so the realtime caches
-    stay honest for the flat path everyone paints in."""
+    """The document camera: {"mode": "flat"|"ortho"|"persp", "vantage":
+    "above"|"below"}. flat is the classic pipeline (cached, patched);
+    ortho/persp switch the composite to the volumetric slab stack --
+    explicit opt-in, so the realtime caches stay honest for the flat path
+    everyone paints in. vantage picks which SIDE of the refracting sheets
+    you are standing on: above sees the surface and what it reflects and
+    refracts; below sees the ceiling ripple, dispersion, and caustics
+    swimming toward the eye."""
     d = request.json or {}
-    mode = d.get("mode", "flat")
+    mode = d.get("mode", DOC.view3d if hasattr(DOC, "view3d") else "flat")
     if mode not in ("flat", "ortho", "persp"):
         return jsonify(error="mode must be flat|ortho|persp"), 400
     from . import _MUT_REV
     DOC.view3d = mode
+    if "vantage" in d:
+        van = d.get("vantage") or "above"
+        if van not in ("above", "below"):
+            return jsonify(error="vantage must be above|below"), 400
+        DOC.vantage = van
     _MUT_REV[0] += 1
-    return jsonify(ok=True, mode=mode)
+    return jsonify(ok=True, mode=mode,
+                   vantage=getattr(DOC, "vantage", "above"))
 
 
 @app.get("/api/layers/duplicates")
@@ -1704,6 +1794,23 @@ def transform_content():
 _CAPS_CACHE = []
 
 
+def _engine_has_walls():
+    """Can the installed engine CONTAIN a simulation at the canvas edge?
+
+    have() answers "does fluid_step exist", which was true long before
+    it could do anything but wrap. The question an artist cares about is
+    whether ink pushed off one edge comes back on the other, and that is
+    a leCore 0.2.9 argument, not a faculty name -- so inspect the
+    signature. Reported in /api/state so the UI can say so plainly
+    rather than letting someone discover it by painting."""
+    try:
+        import inspect
+        from . import mind
+        return "boundary" in inspect.signature(mind().fluid_step).parameters
+    except Exception:
+        return False
+
+
 def _capabilities():
     """What the installed leCore can do -- the UI hides features accordingly.
 
@@ -1719,7 +1826,8 @@ def _capabilities():
     if _CAPS_CACHE:
         return _CAPS_CACHE[0]
     from . import have, engine_version
-    caps = {"invite": have("create_invite_link", "join_from_link"),
+    caps = {"media_walls": _engine_has_walls(),
+            "invite": have("create_invite_link", "join_from_link"),
             "obs": have("obs_capture_profile"),
             "tighten_selection": have("tighten_selection"),
             # nodes that need faculties only newer leCore ships
@@ -2502,6 +2610,51 @@ def autosave_restore():
     return jsonify(ok=True)
 
 
+@app.post("/api/paste")
+def paste_image():
+    """Paste external image data as a new PLACED layer: {"png": base64}
+    (any format PIL reads). The full source is kept at native scale --
+    content larger than the document hangs off the canvas untrimmed;
+    /api/place adjusts its centre, scale, and rotation and re-rasterises
+    from the source, so nothing is ever lost to the edges."""
+    import base64 as _b64
+    import io as _io
+    from PIL import Image as _PImage
+    d = request.json or {}
+    try:
+        raw = _b64.b64decode(d["png"].split(",")[-1])
+        im = _PImage.open(_io.BytesIO(raw)).convert("RGBA")
+    except Exception as ex:
+        return jsonify(error="could not read image data: %s" % ex), 400
+    arr = np.asarray(im, np.float32) / 255.0
+    l = DOC.add_layer(d.get("name") or "Pasted", pixels=arr, placed=True)
+    if getattr(l, "source", None) is None:
+        l.source = arr                      # same-size pastes place too
+    DOC.place_source(l.id, record=False)
+    GRAPH.commit_layer_outputs()
+    return jsonify(ok=True, id=l.id, w=int(arr.shape[1]),
+                   h=int(arr.shape[0]),
+                   oversize=bool(arr.shape[0] > DOC.height
+                                 or arr.shape[1] > DOC.width))
+
+
+@app.post("/api/place")
+def place_layer():
+    """Adjust a placed layer's transform: {"id", "x"?, "y"?, "scale"?,
+    "rot"?}. Re-rasterises from the retained source (undoable); 404 if
+    the layer has no source."""
+    d = request.json or {}
+    try:
+        ok = DOC.place_source(d["id"], x=d.get("x"), y=d.get("y"),
+                              scale=d.get("scale"), rot=d.get("rot"))
+    except KeyError:
+        return jsonify(error="no such layer"), 404
+    if not ok:
+        return jsonify(error="layer has no retained source"), 404
+    GRAPH.commit_layer_outputs()
+    return jsonify(ok=True, place=DOC.layer(d["id"]).place)
+
+
 @app.post("/api/open")
 def open_image():
     """Open an image file (multipart) as a new document; adopts its resolution and DPI."""
@@ -2563,15 +2716,17 @@ def comp_png():
     vmode = getattr(DOC, "view3d", "flat")
     from . import composite_lit, _doc_emission
     lit = (any(li.get("enabled") for li in getattr(DOC, "lights", []))
-           or _doc_emission(DOC) is not None)
+           or _doc_emission(DOC) is not None
+           or getattr(DOC, "vantage", "above") == "below")
+    van = getattr(DOC, "vantage", "above")
     if vmode in ("ortho", "persp"):
-        c = composite_lit(DOC, vmode)
+        c = composite_lit(DOC, vmode, vantage=van)
         if maxw and maxw < DOC.width:
             from . import _resize as _rz
             c = _rz(c, max(1, int(round(DOC.height * maxw / DOC.width))),
                     maxw)
         return _png(c)
-    key = (_MUT_REV[0], maxw, request.args.get("fmt", ""), DOC.id)
+    key = (_MUT_REV[0], maxw, request.args.get("fmt", ""), DOC.id, van)
     hit = getattr(DOC, "_png_memo", None)
     if hit and hit[0] == key:
         # same frame, same request: rebuild a FRESH response from the cached
@@ -2584,7 +2739,7 @@ def comp_png():
         # lights or emission are live: the lit composite (falls through to
         # the cached one byte-exactly when both are absent, so this branch
         # only runs when it changes the pixels)
-        c = composite_lit(DOC, "flat")
+        c = composite_lit(DOC, "flat", vantage=van)
         if maxw and maxw < DOC.width:
             from . import _resize as _rz
             c = _rz(c, max(1, int(round(DOC.height * maxw / DOC.width))),
@@ -2595,6 +2750,18 @@ def comp_png():
         # path skips the 325 ms full composite the old route paid per stroke.
         c = composite_cached(DOC)
     else:
+        # DOWNSCALED serve (pane narrower than the document -- the normal
+        # case). composite_display re-composites at DISPLAY resolution and
+        # deliberately does NOT use the full-res composite cache.
+        #
+        # MEASURED, and recorded because it looks like an obvious win and
+        # is not: routing this through the cache so the media window-patch
+        # path could help made playback WORSE -- 379 ms/frame against 210.
+        # By mid-simulation the ink's dirty window covers a large fraction
+        # of the canvas, so the "patch" is nearly a full composite, and it
+        # runs at full resolution (1.5x the pixels of the display buffer)
+        # and then still needs a downscale. Compositing straight at display
+        # size wins. Left alone on purpose.
         c = composite_display(DOC.layers, DOC.height, DOC.width,
                               {m.id: m for m in DOC.masks}, maxw)
     # checker-through-alpha handled client-side; export straight RGBA
@@ -2619,7 +2786,9 @@ def layer_edit():
     d = request.json or {}
     act = d.get("action")
     if act == "add":
-        DOC.add_layer(d.get("name"))
+        _nl = DOC.add_layer(d.get("name"), below=d.get("below"))
+        GRAPH.commit_layer_outputs()
+        return jsonify(ok=True, id=_nl.id)
     elif act == "duplicate":
         DOC.duplicate_layer(d["id"])
         GRAPH.commit_layer_outputs()
@@ -2640,6 +2809,17 @@ def layer_edit():
         # only matched "remove", and an unknown action fell through to
         # ok:True -- a SILENT no-op that a dup-cleanup click hit in E2E
         DOC.remove_layer(d["id"])
+    elif act == "fill":
+        try:
+            DOC.fill_layer(d["id"], d.get("content") or
+                           {"kind": "solid", "color": [1, 1, 1, 1]},
+                           respect_alpha=bool(d.get("respect_alpha")))
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        GRAPH.commit_layer_outputs()
+    elif act == "flip":
+        DOC.flip_layer(d["id"], axis=d.get("axis", "x"))
+        GRAPH.commit_layer_outputs()
     elif act == "move":
         DOC.move_layer(d["id"], d["index"])
     elif act == "edit":
@@ -2648,12 +2828,17 @@ def layer_edit():
                                        "thickness", "vol_kind", "vol_ior",
                                        "vol_density", "absorbency", "emissive",
                                        "emissive_color", "reflect",
-                                       "dispersion", "z_off",
+                                       "dispersion", "media_rate",
+                                       "thickness",
+                                       "z_off",
                                        "tilt_x", "tilt_y", "curve", "dome",
                                        "field",
-                                       "field_mode", "field_strength")}
+                                       "field_mode", "field_strength", "curve_axis", "curve_profile", "dome_profile", "locked", "relief", "optical", "media_res",
+                                  "media_time")}
         if "mask" in d:
             props["mask"] = d.get("mask")
+        if "bg" in d:                    # None -> transparent sheet
+            props["bg"] = d.get("bg")
         DOC.edit_layer(d["id"], **props)
         GRAPH.commit_layer_outputs()
     elif act:
@@ -2804,6 +2989,63 @@ def paint():
     """Paint a stroke: {"layer", "points": [[x,y,widthFactor?]...], "color", "radius", "opacity", "hardness", "erase"?, "media"?: "oil"|"acrylic"|"water" (impasto body + gravity), "load"?, "mode"?: "brush"|"smudge"|"clone"|"heal"|"erase_strokes" (whole strokes under the path)|"erase_top" (only the topmost stroke)|"erase_undo" (restore the area to its pre-stroke base)|"erase_depth" (carve the impasto body first)|"node", "selection"?, "brush"?, "live"?, "record"}. Returns {ok, sid}. Layer alpha_lock is honoured and recorded."""
     d = request.json or {}
     mode = d.get("mode", "brush")
+    # WHY DIDN'T THAT PAINT? Professional trust: a stroke that can have
+    # no visible effect gets a diagnosis, never a silent no-op. These
+    # states all bit during dogfooding or will bite an artist mid-flow.
+    warn = None
+    try:
+        _l = DOC.layer(d.get("layer", ""))
+    except Exception:
+        _l = None
+    if _l is not None and mode in ("brush", "smudge", "clone", "heal",
+                                   "node"):
+        import numpy as _np
+        pts = d.get("points") or []
+        if pts:
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            r = float(d.get("radius", 8)) + 2
+            x0 = max(0, int(min(xs) - r))
+            x1 = min(DOC.width, int(max(xs) + r) + 1)
+            y0 = max(0, int(min(ys) - r))
+            y1 = min(DOC.height, int(max(ys) + r) + 1)
+        else:
+            x0 = y0 = 0
+            x1, y1 = DOC.width, DOC.height
+        if not _l.visible:
+            warn = "that landed on a HIDDEN layer — toggle its eye to see it"
+        elif float(getattr(_l, "opacity", 1.0)) <= 0.02:
+            warn = "this layer's opacity is ~0 — the stroke is there but invisible"
+        elif getattr(_l, "alpha_lock", False)                 and float(_l.pixels[y0:y1, x0:x1, 3].max(initial=0.0)) < 0.01:
+            warn = ("alpha lock recolours EXISTING pixels only, and this "
+                    "area of the layer is empty — nothing to recolour")
+        elif getattr(_l, "clip", False):
+            idx = next((i for i, x in enumerate(DOC.layers)
+                        if x.id == _l.id), 0)
+            base = DOC.layers[idx - 1] if idx > 0 else None
+            j = idx - 1
+            while base is not None and getattr(base, "clip", False):
+                j -= 1
+                base = DOC.layers[j] if j >= 0 else None
+            if base is not None                     and float(base.pixels[y0:y1, x0:x1, 3]
+                              .max(initial=0.0)) < 0.01:
+                warn = ("this layer clips onto %r, which is empty here — "
+                        "the paint shows only where the base has pixels"
+                        % base.name)
+    try:
+        resp = _paint_dispatch(d, mode)
+        if warn is not None:
+            body = resp.get_json(silent=True) or {}
+            body["warning"] = warn
+            return jsonify(**body)
+        return resp
+    except ValueError as e:
+        # a guard refusal (locked layer, stroke-content guard): the
+        # client shows this as a toast instead of a silent no-op
+        return jsonify(error=str(e)), 400
+
+
+def _paint_dispatch(d, mode):
     if mode == "smudge":
         DOC.smudge(d["layer"], d["points"], radius=float(d.get("radius", 12)),
                    strength=float(d.get("opacity", 0.6)), brush=d.get("brush"),
@@ -2866,7 +3108,8 @@ def paint():
                        sel_invert=bool(d.get("sel_invert")),
                        brush=d.get("brush"),
                        media=(d.get("media") or None),
-                       load=float(d.get("load", 0.6)))
+                       load=float(d.get("load", 0.6)),
+                       taper=float(d.get("stroke_taper", 0.0)))
     else:
         DOC.paint(d["layer"], d["points"], color=d.get("color", [0, 0, 0]),
                   radius=float(d.get("radius", 8)), opacity=float(d.get("opacity", 1)),
@@ -2876,7 +3119,8 @@ def paint():
                   selection=d.get("selection"), sel_invert=bool(d.get("sel_invert")),
                   brush=d.get("brush"),
                   media=(d.get("media") or None),
-                  load=float(d.get("load", 0.6)))
+                  load=float(d.get("load", 0.6)),
+                  taper=float(d.get("stroke_taper", 0.0)))
     GRAPH.commit_layer_outputs()
     # the FX brush needs the id of the stroke it just painted, so it can hand
     # the path to its Stroke FX node without a second round trip
@@ -3283,6 +3527,156 @@ def mind_invoke():
         return jsonify(ok=True, result=safe(r))
     except Exception as e:
         return jsonify(error=str(e)), 400
+
+
+@app.get("/api/walls")
+def walls_get():
+    """The four perpendicular planes: {walls: {front, back, left, right},
+    editing: side|None}. Empty by default -- a document is a flat canvas
+    until an artist puts a layer on a wall."""
+    return jsonify(walls=dict(getattr(DOC, "walls", {})),
+                   editing=getattr(DOC, "wall_edit", None))
+
+
+@app.post("/api/wall")
+def wall_post():
+    """Manage the planes: {"action": "assign"|"clear"|"edit", "side":
+    front|back|left|right, "layer"?}. assign puts an ordinary layer on
+    that side (it keeps its strokes, thickness, volume, fields and
+    lights, and stands on exactly one wall); clear gives it back to the
+    canvas; edit opens a side for painting, where it lies flat and every
+    ordinary tool works on it unchanged -- pass side null to close."""
+    d = request.json or {}
+    act = d.get("action")
+    try:
+        if act == "assign":
+            w = DOC.assign_wall(d.get("side"), d.get("layer"))
+            return jsonify(ok=True, walls=w)
+        if act == "clear":
+            return jsonify(ok=True, walls=DOC.clear_wall(d.get("side")))
+        if act == "edit":
+            s = DOC.edit_wall(d.get("side"))
+            return jsonify(ok=True, editing=s,
+                           walls=dict(getattr(DOC, "walls", {})))
+    except KeyError:
+        return jsonify(error="no such layer"), 404
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(error="unknown action"), 400
+
+
+@app.post("/api/media/cook")
+def media_cook():
+    """Let simulations COOK without moving the playhead: {"steps": N,
+    "layer": id?, "until": "settled"?}. With until="settled" the step
+    count is decided by the SIMULATION rather than guessed: leCore's
+    HRNN regime detection watches the medium's own change-per-step
+    signal and stops when it enters a final quiet regime, reporting
+    {steps, settled, why} per layer so a cap-stop is distinguishable
+    from a real settle. The cooked state becomes the layer's starting state at
+    the current frame, so a puff of smoke can already be drifting when
+    the timeline starts instead of being a hard-edged blob at frame 0.
+    Returns {ok, cooked} -- the number of layers advanced."""
+    from . import cook_media
+    d = request.json or {}
+    try:
+        steps = int(d.get("steps", 24))
+    except (TypeError, ValueError):
+        return jsonify(error="steps must be an integer"), 400
+    if steps < 1:
+        return jsonify(error="steps must be at least 1"), 400
+    if str(d.get("until", "")) == "settled":
+        from . import cook_until_settled
+        r = cook_until_settled(DOC, layer=d.get("layer") or None)
+        if r["cooked"] == 0:
+            return jsonify(ok=True, cooked=0,
+                           warning="nothing to cook -- paint into a "
+                                   "media layer (ink, smoke, fire) "
+                                   "first"), 200
+        return jsonify(ok=True, **r)
+    n = cook_media(DOC, steps=steps, layer=d.get("layer") or None)
+    if n == 0:
+        return jsonify(ok=True, cooked=0,
+                       warning="nothing to cook -- paint into a media "
+                               "layer (ink, smoke, fire) first"), 200
+    return jsonify(ok=True, cooked=n)
+
+
+@app.get("/api/export/frames.zip")
+def export_frames():
+    """Export an ANIMATION as a zip of numbered PNGs: ?from=&to=&step=
+    (frames, defaults to the document's play range), ?w=&h= to render at
+    another size, ?fps= recorded in a small README for whoever assembles
+    the sequence. Simulated media are stepped by the same timeline the
+    canvas uses, so the exported frames are exactly what playback showed.
+    The artist's playhead is restored afterwards."""
+    import io as _io
+    import zipfile as _zip
+    from . import composite_lit, _doc_emission, _resize as _rz
+    try:
+        lo = float(request.args.get("from", DOC.frame_range[0]))
+        hi = float(request.args.get("to", DOC.frame_range[1]))
+        step = float(request.args.get("step", 1.0))
+    except ValueError:
+        return jsonify(error="from, to and step must be numbers"), 400
+    if step <= 0:
+        return jsonify(error="step must be positive"), 400
+    n = int(np.floor((hi - lo) / step)) + 1
+    if n < 1:
+        return jsonify(error="that range contains no frames"), 400
+    if n > 600:
+        return jsonify(error="that is %d frames; the limit is 600 -- "
+                             "raise the step or narrow the range" % n), 400
+    try:
+        w = int(request.args.get("w", DOC.width))
+        h = int(request.args.get("h", DOC.height))
+    except ValueError:
+        return jsonify(error="w and h must be integers"), 400
+    fps = request.args.get("fps") or getattr(DOC, "fps", 24)
+    keep = float(DOC.frame)
+    van = getattr(DOC, "vantage", "above")
+    vmode = getattr(DOC, "view3d", "flat")
+    buf = _io.BytesIO()
+    try:
+        with _zip.ZipFile(buf, "w", _zip.ZIP_DEFLATED) as z:
+            for i in range(n):
+                t = lo + i * step
+                DOC.set_frame(t)
+                lit = (any(li.get("enabled")
+                           for li in getattr(DOC, "lights", []))
+                       or _doc_emission(DOC) is not None
+                       or van == "below")
+                if vmode in ("ortho", "persp") or lit:
+                    c = composite_lit(DOC, vmode if vmode in
+                                      ("ortho", "persp") else "flat",
+                                      vantage=van)
+                else:
+                    c = DOC.composite()
+                if (h, w) != (DOC.height, DOC.width):
+                    c = _rz(c, h, w)
+                flat = c[..., :3] * c[..., 3:4] + 1.0 * (1 - c[..., 3:4])
+                # encode straight to bytes: _png returns a streaming
+                # send_file response and reading it back raises
+                # "direct passthrough mode"
+                from PIL import Image as _PI
+                arr = (np.clip(flat, 0, 1) * 255).astype(np.uint8)
+                fb = _io.BytesIO()
+                _PI.fromarray(arr).save(fb, "PNG")
+                z.writestr("frame_%04d.png" % i, fb.getvalue())
+            z.writestr("README.txt",
+                       "leStudio frame sequence\n"
+                       "frames %g..%g step %g (%d files)\n"
+                       "fps %s\n"
+                       "assemble e.g.: ffmpeg -framerate %s "
+                       "-i frame_%%04d.png out.mp4\n"
+                       % (lo, hi, step, n, fps, fps))
+    finally:
+        DOC.set_frame(keep)          # never move the artist's playhead
+    buf.seek(0)
+    return app.response_class(
+        buf.getvalue(), mimetype="application/zip",
+        headers={"Content-Disposition":
+                 'attachment; filename="frames.zip"'})
 
 
 @app.get("/api/export.png")
