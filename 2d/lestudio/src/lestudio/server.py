@@ -22,7 +22,7 @@ import uuid
 from . import (OPS, Document, NodeGraph, accel_status, decode_image, image_dpi,
                parallel_advice, load_workspace,
                mind, op_catalog, png_bytes, save_workspace, sdf_to_glsl,
-               BLEND_MODES)
+               BLEND_MODES, _MATERIALS, _PAPERS)
 
 try:
     from flask import Flask, Response, jsonify, request, send_file
@@ -98,7 +98,79 @@ class _Active:
             setattr(getattr(WS, self._attr), name, value)
 
 
+class _Gone(Exception):
+    """A user error the app should explain, not a server fault."""
+
+
+def _finite(v, name, lo=None, hi=None, default=None):
+    """One number, checked. NaN and infinity are the dangerous ones: they do
+    not raise, they PROPAGATE -- a NaN colour returned 200 and then spread
+    through the layer's pixels and height map, corrupting the document
+    silently, which is worse than any crash."""
+    if v is None:
+        return default
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        raise _Gone("%s must be a number" % name)
+    if f != f or f in (float("inf"), float("-inf")):
+        raise _Gone("%s must be a real number" % name)
+    if lo is not None:
+        f = max(lo, f)
+    if hi is not None:
+        f = min(hi, f)
+    return f
+
+
+def _clean_points(pts):
+    """A stroke path, checked. Every one of these came back a 500 from the
+    fuzz pass: a string instead of a list, a point with one number, missing
+    entirely, NaN or infinite coordinates."""
+    if pts is None:
+        raise _Gone("this stroke has no points")
+    if isinstance(pts, (str, bytes)) or not isinstance(pts, (list, tuple)):
+        raise _Gone("points must be a list of [x, y] pairs")
+    out = []
+    for p in pts:
+        if isinstance(p, (str, bytes)) or not isinstance(p, (list, tuple)) \
+                or len(p) < 2:
+            raise _Gone("every point must be an [x, y] pair")
+        x = _finite(p[0], "x")
+        y = _finite(p[1], "y")
+        rest = [_finite(v, "pressure", 0.0, 4.0) for v in p[2:3]]
+        out.append([x, y] + rest)
+    return out
+
+
+def _clean_paint(d):
+    """Validate a paint payload ONCE, at the entrance, rather than letting bad
+    numbers reach the engine."""
+    d["points"] = _clean_points(d.get("points"))
+    col = d.get("color")
+    if col is not None:
+        if isinstance(col, (str, bytes)) or not isinstance(col, (list, tuple)):
+            raise _Gone("colour must be [r, g, b] numbers from 0 to 1")
+        d["color"] = [_finite(v, "colour", 0.0, 1.0) for v in list(col)[:3]]
+        if len(d["color"]) < 3:
+            raise _Gone("colour must be [r, g, b] numbers from 0 to 1")
+    for k, lo, hi in (("radius", 0.05, 8000.0), ("opacity", 0.0, 1.0),
+                      ("load", 0.0, 40.0), ("mix", 0.0, 1.0),
+                      ("hardness", 0.0, 1.0), ("taper", 0.0, 1.0)):
+        if k in d and d[k] is not None:
+            d[k] = _finite(d[k], k, lo, hi)
+    return d
+
+
 DOC = _Active("doc")
+
+# Compositing reads the document's SIZE and then its LAYERS. Those are two
+# separate reads, so a resize landing between them composites layers of the
+# old shape into a frame of the new one:
+#   "operands could not be broadcast together with shapes (350,500,3) (200,300,3)"
+# -- a 500 on /api/composite.png, reproduced 5 times in 40 runs of the
+# concurrency test and unexplained for four sightings before this. Re-entrant
+# because composite handlers call back into other guarded helpers.
+_DOC_LOCK = threading.RLock()
 GRAPH = _Active("graph")
 
 
@@ -509,6 +581,23 @@ def light_edit():
     any of those; remove takes id. Multiple lights sum; directionals cast
     height-field shadows across the canvas."""
     d = request.json or {}
+    # A NaN here is not caught anywhere downstream and makes the whole LIT
+    # RENDER non-finite -- the picture is corrupted and it is invisible until
+    # you look at the output. Numbers get checked before they reach the rig.
+    try:
+        for k in ("intensity", "azimuth", "elevation", "x", "y", "z",
+                  "aim_x", "aim_y", "cone", "soft", "radius"):
+            if d.get(k) is not None:
+                d[k] = _finite(d[k], k, -1e6, 1e6)
+        for k in ("color", "color2"):
+            col = d.get(k)
+            if col is not None:
+                if isinstance(col, (str, bytes)) or not isinstance(
+                        col, (list, tuple)) or len(col) < 3:
+                    raise _Gone("%s must be [r, g, b] numbers" % k)
+                d[k] = [_finite(v, k, 0.0, 64.0) for v in list(col)[:3]]
+    except _Gone as e:
+        return jsonify(error=str(e)), 400
     act = d.get("action", "add")
     try:
         if act == "add":
@@ -1584,12 +1673,39 @@ def state():
         "output_node": GRAPH.output_node(),
         "ops": op_catalog(),
         "blend_modes": list(BLEND_MODES),
+        # the stock everything is painted on: it decides where thin
+        # paint catches, where a wash pools, and how much it granulates
+        "paper": str(getattr(DOC, "paper", "canvas")),
+        # spill a full layer onto a fresh stratum instead of flattening
+        "auto_stratum": bool(getattr(DOC, "auto_stratum", False)),
+        # so the app can point at / hide the palette without guessing
+        # the palette lives on its OWN surface; the app talks to it through
+        # /api/palette/* rather than by painting a layer of the picture
+        "palette_ready": DOC.palette_doc(create=False) is not None,
+        "papers": sorted(_PAPERS),
+        # what is physically on the brush right now, for the charge meter
+        "brush_state": DOC.brush_state(),
+        "stroke_groups": [dict(g, strokes=list(g["strokes"]))
+                          for g in DOC.stroke_groups],
+        # the materials catalog rides in state so the client builds its menu
+        # from the ENGINE's table -- one source of truth, and a custom or
+        # future preset appears in the UI without a client edit
+        "materials": [{"name": k, "rough": v["rough"], "metal": v["metal"],
+                       "color": (list(v["color"]) if v.get("color") else None)}
+                      for k, v in _MATERIALS.items()],
         "can_undo": bool(DOC._undo), "can_redo": bool(DOC._redo),
     })
 
 
 @app.post("/api/new")
 def new_doc():
+    # creating a document SWITCHES the active one, which is the same
+    # shape-change race the composite is guarded against
+    with _DOC_LOCK:
+        return _new_doc_locked()
+
+
+def _new_doc_locked():
     """Create a document: {"name", "width", "height", "background"?: [r,g,b] or null for transparent}. Activates it."""
     d = request.json or {}
     bg = d.get("background", (1.0, 1.0, 1.0))   # null -> transparent
@@ -1617,6 +1733,13 @@ def new_doc():
 @app.post("/api/doc")
 def doc_ops():
     """Document ops: {"action": "activate"|"rename"|"close"|"settings", "id", ...}. close needs force:true if unsaved."""
+    # resize and close change the document's SHAPE under any composite that
+    # is mid-flight -- the other half of the race guarded in comp_png
+    with _DOC_LOCK:
+        return _doc_ops_locked()
+
+
+def _doc_ops_locked():
     d = request.json or {}
     act = d.get("action")
     if act == "activate":
@@ -2548,8 +2671,18 @@ def autosave_write():
                    "meta": {"name": a["name"], "ext": a["ext"]},
                    "arrays": {"data": np.frombuffer(a["data"], np.uint8)}}
                   for k, a in ASSETS.items()]
-    data = save_workspace(WS.docs, WS.graphs, WS.active,
-                          extras=list(WS.extras) + asset_secs)
+    try:
+        data = save_workspace(WS.docs, WS.graphs, WS.active,
+                              extras=list(WS.extras) + asset_secs)
+    except Exception as e:
+        # Autosave is the crash net. If it cannot run, the person needs to
+        # know their work is NOT being kept behind them and to save it
+        # themselves -- a 500 carrying a raw Python error (this failed with
+        # "No module named 'holographic'") tells them neither.
+        return jsonify(ok=False, saved=False,
+                       error="autosave is not working, so nothing is being "
+                             "kept for you in the background - save your work "
+                             "yourself (%s)" % type(e).__name__), 200
     # excluded from the after_request rev bump: an autosave changes NOTHING in
     # the workspace, and bumping made every other client run its full
     # foreign-edit refresh -- with several editors' timers that read as the UI
@@ -2703,6 +2836,11 @@ def open_image():
 @app.get("/api/composite.png")
 def comp_png():
     """The composited canvas as PNG. ?fmt=auto serves JPEG when fully opaque; ?maxw= caps width. Window-patched cache: cheap after strokes."""
+    with _DOC_LOCK:
+        return _comp_png_locked()
+
+
+def _comp_png_locked():
     # ?maxw= is the width the CANVAS is actually showing. The composite is then
     # built at the smallest power-of-two reduction that still has at least that
     # many pixels -- never fewer than the screen displays, and skipped entirely
@@ -2813,6 +2951,12 @@ def layer_edit():
         # both verbs: the docstring said "delete" for years while the code
         # only matched "remove", and an unknown action fell through to
         # ok:True -- a SILENT no-op that a dup-cleanup click hit in E2E
+        # A document with NO layers is a dead end: painting into it 500s with
+        # "no such item", and the app offers nothing to paint on. Keep the
+        # last one rather than letting a click strand the user.
+        if len([l for l in DOC.canvas_layers()]) <= 1:
+            return jsonify(error="that is the only layer - add another before "
+                                 "deleting this one, or clear it instead"), 400
         DOC.remove_layer(d["id"])
     elif act == "fill":
         try:
@@ -2838,12 +2982,20 @@ def layer_edit():
                                        "z_off",
                                        "tilt_x", "tilt_y", "curve", "dome",
                                        "field",
-                                       "field_mode", "field_strength", "curve_axis", "curve_profile", "dome_profile", "locked", "relief", "optical", "media_res",
+                                       "field_mode", "field_strength", "curve_axis", "curve_profile", "dome_profile", "locked", "relief", "gravity", "gravity_angle", "optical", "media_res",
                                   "media_time")}
         if "mask" in d:
             props["mask"] = d.get("mask")
         if "bg" in d:                    # None -> transparent sheet
             props["bg"] = d.get("bg")
+        if not d.get("id"):
+            # a missing id 500'd with "no such item: None"
+            return jsonify(error="which layer? this needs a layer id"), 400
+        try:
+            DOC.layer(d["id"])
+        except KeyError:
+            return jsonify(error="layer %s is gone - pick another in the "
+                                 "layer list" % d["id"]), 400
         DOC.edit_layer(d["id"], **props)
         GRAPH.commit_layer_outputs()
     elif act:
@@ -2895,6 +3047,19 @@ def mask_edit():
 def select():
     """Make a selection: {"tool": "rect"|"ellipse"|"wand"|"lum"|"obj", "params": {...}, "mode": "new"|"add"|"sub"}."""
     d = request.json or {}
+    # A selection built from NaN silently produced a mask nothing could use,
+    # and a missing corner reported just "'x0'" -- true, and useless.
+    prm = d.get("params") or {}
+    if str(d.get("tool")) in ("rect", "ellipse"):
+        try:
+            for k in ("x0", "y0", "x1", "y1"):
+                if k not in prm:
+                    return jsonify(error="a %s selection needs x0, y0, x1 and "
+                                         "y1" % d.get("tool")), 400
+                prm[k] = _finite(prm[k], k, -1e6, 1e6)
+        except _Gone as e:
+            return jsonify(error=str(e)), 400
+        d["params"] = prm
     try:
         sel = DOC.select(d["tool"], d.get("params", {}), mode=d.get("mode", "new"),
                          target=d.get("target"), name=d.get("name"),
@@ -2991,8 +3156,15 @@ def mask_png(mid):
 
 @app.post("/api/paint")
 def paint():
-    """Paint a stroke: {"layer", "points": [[x,y,widthFactor?]...], "color", "radius", "opacity", "hardness", "erase"?, "media"?: "oil"|"acrylic"|"water" (impasto body + gravity), "load"?, "mode"?: "brush"|"smudge"|"clone"|"heal"|"erase_strokes" (whole strokes under the path)|"erase_top" (only the topmost stroke)|"erase_undo" (restore the area to its pre-stroke base)|"erase_depth" (carve the impasto body first)|"node", "selection"?, "brush"?, "live"?, "record"}. Returns {ok, sid}. Layer alpha_lock is honoured and recorded."""
+    """Paint a stroke: {"layer", "points": [[x,y,widthFactor?]...], "color", "radius", "opacity", "hardness", "erase"?, "media"?: "oil"|"acrylic"|"water" (impasto body + gravity), "material"?: a preset name from /api/state materials (gold, chrome, chalk, ...) or {"preset"?, "rough" 0..1, "metal" 0..1, "grain", "hold", "flow", "iters"} -- the stroke lays a PBR surface (per-pixel roughness/metalness lit by the composite; the brush colour is the albedo, so gold gleams in YOUR gold) plus a paint body, "load"?, "mode"?: "brush"|"knife" (the PALETTE KNIFE: shapes the paint already there instead of adding more, working the whole paint COLUMN across every stratum, with "knife": "smooth" to level a surface and cure stepping between layers, "push" to plough a ridge with volume conserved, "scrape" to take the tops off, "spread" to drag it into a thin film)|"blend" (the BLENDER: carries no pigment, softens and drags the WET paint already on canvas, gated by paint body -- and unlike smudge it is a recorded stroke, so the layer keeps full stroke editing and a blend re-derives when you nudge the colours under it)|"smudge"|"clone"|"heal"|"erase_strokes" (whole strokes under the path)|"erase_top" (only the topmost stroke)|"erase_undo" (restore the area to its pre-stroke base)|"erase_depth" (carve the impasto body first)|"node", "selection"?, "brush"?, "live"?, "record"}. Returns {ok, sid}. Layer alpha_lock is honoured and recorded."""
     d = request.json or {}
+    # FIRST, before anything reads the payload. The bounding box below is
+    # computed straight from the points, so NaN or a string in there crashed
+    # with a 500 long before the engine was reached.
+    try:
+        d = _clean_paint(d)
+    except _Gone as e:
+        return jsonify(error=str(e)), 400
     mode = d.get("mode", "brush")
     # WHY DIDN'T THAT PAINT? Professional trust: a stroke that can have
     # no visible effect gets a diagnosis, never a silent no-op. These
@@ -3002,7 +3174,7 @@ def paint():
         _l = DOC.layer(d.get("layer", ""))
     except Exception:
         _l = None
-    if _l is not None and mode in ("brush", "smudge", "clone", "heal",
+    if _l is not None and mode in ("brush", "knife", "blend", "smudge", "clone", "heal",
                                    "node"):
         import numpy as _np
         pts = d.get("points") or []
@@ -3038,7 +3210,12 @@ def paint():
                         "the paint shows only where the base has pixels"
                         % base.name)
     try:
-        resp = _paint_dispatch(d, mode)
+        try:
+            resp = _paint_dispatch(d, mode)
+        except _Gone as e:
+            # a stale or hidden layer is a user error the app can explain,
+            # not a server fault
+            return jsonify(error=str(e)), 400
         if warn is not None:
             body = resp.get_json(silent=True) or {}
             body["warning"] = warn
@@ -3051,7 +3228,44 @@ def paint():
 
 
 def _paint_dispatch(d, mode):
-    if mode == "smudge":
+    DOC._edited_palette_last = False   # this edit was on the picture
+    lid = d.get("layer")
+    if lid is not None:
+        try:
+            _l = DOC.layer(lid)
+        except KeyError:
+            # deleting a layer and painting into it 500'd with a bare
+            # "no such item"; it is a stale reference, not a server fault
+            # name the layer as well as explaining: an error that identifies
+            # the offending item is what makes a bug report actionable, and a
+            # friendly message that drops the id trades one kind of useless
+            # for another
+            raise _Gone("layer %s is gone - pick another in the layer list"
+                        % lid)
+        if not getattr(_l, "visible", True):
+            # painting a hidden layer succeeded silently: the user saw
+            # nothing happen and had no way to know why
+            raise _Gone("that layer is hidden - the paint would not show. "
+                        "Turn its eye back on first.")
+    if mode == "knife":
+        # the PALETTE KNIFE shapes existing paint across the whole stratum
+        # chain rather than adding more
+        DOC.knife(d["layer"], d["points"],
+                  mode=str(d.get("knife", "smooth")),
+                  radius=float(d.get("radius", 26)),
+                  strength=float(d.get("opacity", 0.7)),
+                  record=bool(d.get("record", True)),
+                  stroke_new=bool(d.get("record", True)))
+    elif mode == "blend":
+        # the BLENDER: no pigment, works the wet paint already there. Unlike
+        # smudge this is a recorded stroke, so the layer keeps stroke editing
+        DOC.blend_stroke(d["layer"], d["points"],
+                         radius=float(d.get("radius", 18)),
+                         strength=float(d.get("opacity", 0.6)),
+                         brush=d.get("brush"),
+                         record=bool(d.get("record", True)),
+                         stroke_new=bool(d.get("record", True)))
+    elif mode == "smudge":
         DOC.smudge(d["layer"], d["points"], radius=float(d.get("radius", 12)),
                    strength=float(d.get("opacity", 0.6)), brush=d.get("brush"),
                    record=bool(d.get("record", True)))
@@ -3113,6 +3327,9 @@ def _paint_dispatch(d, mode):
                        sel_invert=bool(d.get("sel_invert")),
                        brush=d.get("brush"),
                        media=(d.get("media") or None),
+                       material=(d.get("material") or None),
+                       mix=float(d.get("mix", 0.0)),
+                       real_brush=bool(d.get("real_brush", False)),
                        load=float(d.get("load", 0.6)),
                        taper=float(d.get("stroke_taper", 0.0)))
     else:
@@ -3124,6 +3341,9 @@ def _paint_dispatch(d, mode):
                   selection=d.get("selection"), sel_invert=bool(d.get("sel_invert")),
                   brush=d.get("brush"),
                   media=(d.get("media") or None),
+                  material=(d.get("material") or None),
+                  mix=float(d.get("mix", 0.0)),
+                  real_brush=bool(d.get("real_brush", False)),
                   load=float(d.get("load", 0.6)),
                   taper=float(d.get("stroke_taper", 0.0)))
     GRAPH.commit_layer_outputs()
@@ -3150,16 +3370,41 @@ def _paint_dispatch(d, mode):
     return jsonify(ok=True, sid=sid, patch=patch)
 
 
+def _last_surface():
+    """Where the last edit happened -- the picture, or the palette.
+
+    Undo has to undo THE LAST THING YOU DID, wherever you did it. Mixing a
+    colour on the palette and pressing Ctrl+Z did nothing at all, because
+    undo only ever spoke to the picture while the palette kept its own stack.
+    """
+    pd = DOC.palette_doc(create=False)
+    if pd is not None and getattr(DOC, "_edited_palette_last", False):
+        return pd
+    return DOC
+
+
 @app.post("/api/undo")
 def undo():
-    """Undo the last operation (document-wide, includes impasto height)."""
-    return jsonify(ok=DOC.undo())
+    """Undo the last operation, on the picture or the palette -- whichever was
+    edited last. Includes impasto height."""
+    with _DOC_LOCK:
+        surf = _last_surface()
+        ok = surf.undo()
+        if not ok and surf is not DOC:
+            DOC._edited_palette_last = False       # fall back to the picture
+            ok = DOC.undo()
+    return jsonify(ok=ok)
 
 
 @app.post("/api/redo")
 def redo():
-    """Redo."""
-    return jsonify(ok=DOC.redo())
+    """Redo, on whichever surface was edited last."""
+    with _DOC_LOCK:
+        surf = _last_surface()
+        ok = surf.redo()
+        if not ok and surf is not DOC:
+            ok = DOC.redo()
+    return jsonify(ok=ok)
 
 
 @app.post("/api/graph")
@@ -3738,3 +3983,209 @@ def main():  # console entry point
 
 if __name__ == "__main__":
     main()
+
+
+@app.post("/api/brush_load")
+def brush_load():
+    """Dip the brush in the palette: {"color"?: [r,g,b], "amount"?: 0..1}.
+    Real brush mode lets paint run out; this is how you fill it back up
+    without going to find a thick passage to scrape."""
+    d = request.get_json(force=True, silent=True) or {}
+    try:
+        # a NaN charge and a string colour both got through: one crashed,
+        # the other quietly put NaN on the brush
+        amt = _finite(d.get("amount", 1.0), "amount", 0.0, 1.0, 1.0)
+        col = d.get("color")
+        if col is not None:
+            if isinstance(col, (str, bytes)) or not isinstance(
+                    col, (list, tuple)) or len(col) < 3:
+                raise _Gone("colour must be [r, g, b] numbers from 0 to 1")
+            col = [_finite(v, "colour", 0.0, 1.0) for v in list(col)[:3]]
+    except _Gone as e:
+        return jsonify(error=str(e)), 400
+    st = DOC.load_brush(color=col, amount=amt)
+    return jsonify(ok=True, brush_state=st)
+
+
+@app.post("/api/stroke_group")
+def stroke_group():
+    """Bundle a blended passage into one editable object:
+    {"action": "create"|"dissolve", "strokes"?: [sid|gid, ...], "name"?,
+     "group"?}. A group id is accepted anywhere a stroke id is, so the whole
+    passage transforms as a unit while every member stays individually
+    editable."""
+    d = request.get_json(force=True, silent=True) or {}
+    act = str(d.get("action", "create"))
+    try:
+        if act == "create":
+            gid = DOC.group_strokes(d.get("strokes") or [], name=d.get("name"))
+            if gid is None:
+                return jsonify(error="no strokes to group"), 400
+            return jsonify(ok=True, group=gid)
+        if act == "dissolve":
+            return jsonify(ok=True, strokes=DOC.ungroup_strokes(d["group"]))
+    except KeyError as e:
+        return jsonify(error="no such group: %s" % e), 404
+    return jsonify(error="unknown action %r" % act), 400
+
+
+@app.post("/api/palette")
+def palette_squeeze():
+    """Squeeze mounds of thick paint onto a layer:
+    {"colors": [[r,g,b], ...], "layer"?, "x"?, "y"?, "size"?, "media"?}.
+    Without "layer" the paint goes onto a dedicated Palette layer, so the
+    mounds sit beside the picture instead of in it.
+
+    A palette is not a picker -- it is real paint. The mounds are ordinary
+    strokes at a heavy load, thick enough to count as a pile the brush can
+    reload from, so dipping, carrying two colours at once and scraping a
+    mound thinner all come from the physics that is already there."""
+    d = request.get_json(force=True, silent=True) or {}
+    cols = d.get("colors") or []
+    if not cols:
+        return jsonify(error="no colours to squeeze out"), 400
+    try:
+        if isinstance(cols, (str, bytes)) or not isinstance(cols, (list, tuple)):
+            raise _Gone("colours must be [r, g, b] numbers from 0 to 1")
+        rgb = []
+        for one in cols:
+            if isinstance(one, (str, bytes)) or not isinstance(
+                    one, (list, tuple)) or len(one) < 3:
+                raise _Gone("colours must be [r, g, b] numbers from 0 to 1")
+            rgb.append(tuple(_finite(v, "colour", 0.0, 1.0) for v in one[:3]))
+        for k in ("x", "y", "size"):
+            if d.get(k) is not None:
+                d[k] = _finite(d[k], k, 1.0, 20000.0)
+    except _Gone as e:
+        return jsonify(error=str(e)), 400
+    try:
+        # the palette is its own SURFACE now -- not a layer of the picture,
+        # so it can never be nudged, exported, or spill into strata
+        pd = DOC.palette_doc()
+        # sized for the palette surface, not derived from a canvas's
+        # dimensions -- the default made pea-sized mounds you could not dip in
+        n = max(len(rgb), 1)
+        size = float(d.get("size") or min(34.0, (pd.width - 60.0) / (n * 2.7)))
+        spots = pd.lay_palette(
+            d.get("layer"), rgb,
+            x=d.get("x", size * 1.5), y=d.get("y", pd.height * 0.5),
+            size=size, media=str(d.get("media", "oil")))
+    except (KeyError, ValueError, IndexError) as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(ok=True,
+                   spots=[[float(a), float(b)] for a, b in spots])
+
+
+@app.post("/api/paper")
+def set_paper():
+    """Choose the stock: {"paper": "canvas"|"rough"|"cold_press"|
+    "hot_press"|"smooth"|"linen"}. The substrate decides where thin paint
+    catches (stiff paint on the risen threads), where a wash pools (in the
+    dips), how hard dry-brush breaks up and how strongly watercolour
+    granulates."""
+    d = request.get_json(force=True, silent=True) or {}
+    try:
+        name = DOC.set_paper(str(d.get("paper", "canvas")))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(ok=True, paper=name)
+
+
+@app.post("/api/stratum")
+def set_stratum():
+    """Spill a full layer onto a new one: {"on": true|false}.
+
+    A layer holds a finite amount of paint; past that the height field used
+    to be clipped, so a worked passage saturated after about two loaded
+    passes and flattened to a plateau. With this on, the excess starts a
+    fresh stratum from zero and the build-up keeps going."""
+    d = request.get_json(force=True, silent=True) or {}
+    DOC.auto_stratum = bool(d.get("on", True))
+    return jsonify(ok=True, auto_stratum=DOC.auto_stratum)
+
+
+@app.get("/api/palette.png")
+def palette_png():
+    """The palette, cropped to the paint, for the dock beside the canvas.
+
+    The palette is excluded from `canvas_layers()`, so it appears in neither
+    the canvas view nor an export -- it is a surface you work beside the
+    picture, and this is where it is drawn. The header carries the region it
+    occupies on the document so the app can map a dip back to real
+    coordinates."""
+    with _DOC_LOCK:
+        pd = DOC.palette_doc(create=False)
+        got = pd.palette_png() if pd is not None else None
+    if got is None:
+        return jsonify(error="no palette yet - squeeze some paint out first"), 404
+    img, box = got
+    r = Response(png_bytes(img), mimetype="image/png")
+    r.headers["X-Palette-Box"] = ",".join(str(int(v)) for v in box)
+    r.headers["Cache-Control"] = "no-store"
+    return r
+
+
+@app.post("/api/palette/paint")
+def palette_paint():
+    """Paint ON the palette: {"points": [[x,y],...], "color", "radius",
+    "media"?, "load"?, "mix"?, "real_brush"?, "mode"?: "blend"|"knife"}.
+
+    This is how you dip and how you mix. It is ORDINARY painting on the
+    palette surface -- same physics, and the same brush reservoir as the
+    picture, so a dip here loads the brush you go on to paint with. `mode`
+    lets the blender and knife work there too, which is what mixing on a
+    palette actually is."""
+    d = request.get_json(force=True, silent=True) or {}
+    try:
+        d = _clean_paint(d)          # the same gate the picture gets
+    except _Gone as e:
+        return jsonify(error=str(e)), 400
+    pts = d["points"]
+    if len(pts) < 1:
+        return jsonify(error="a dip needs somewhere to go"), 400
+    with _DOC_LOCK:
+        pd = DOC.palette_doc()
+        lid = (pd.palette_layer(create=False) or pd.layers[-1]).id
+        mode = str(d.get("mode", "brush"))
+        try:
+            if mode == "blend":
+                pd.blend_stroke(lid, pts, radius=float(d.get("radius", 22)),
+                                strength=float(d.get("opacity", 0.6)))
+            elif mode == "knife":
+                pd.knife(lid, pts, mode=str(d.get("knife", "smooth")),
+                         radius=float(d.get("radius", 26)),
+                         strength=float(d.get("opacity", 0.7)))
+            else:
+                pd.paint(lid, pts,
+                         color=tuple(d.get("color", (0.5, 0.5, 0.5))),
+                         radius=float(d.get("radius", 14)),
+                         opacity=float(d.get("opacity", 1.0)),
+                         media=(d.get("media") or None),
+                         load=float(d.get("load", 1.2)),
+                         mix=float(d.get("mix", 1.0)),
+                         real_brush=bool(d.get("real_brush", True)))
+        except (KeyError, ValueError) as e:
+            return jsonify(error=str(e)), 400
+    DOC._edited_palette_last = True
+    return jsonify(ok=True, brush_state=DOC.brush_state())
+
+
+@app.post("/api/palette/clear")
+def palette_clear():
+    """Scrape the palette back to bare board -- UNDOABLY.
+
+    Dropping the surface outright destroyed a session of mixing on one click
+    with nothing to press afterwards. Clearing the paint through the palette's
+    own history keeps it on the undo stack like any other edit."""
+    with _DOC_LOCK:
+        pd = DOC.palette_doc(create=False)
+        if pd is None:
+            return jsonify(ok=True)
+        pd.record("Scrape palette")
+        for l in pd.layers:
+            l.pixels[...] = 0.0
+            if getattr(l, "height_map", None) is not None:
+                l.height_map[...] = 0.0
+        pd.strokes = [k for k in pd.strokes if False]
+        DOC._edited_palette_last = True      # so Ctrl+Z reaches it
+    return jsonify(ok=True)
