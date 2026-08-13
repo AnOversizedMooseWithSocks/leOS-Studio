@@ -1,0 +1,14 @@
+leos-core>=0.2.9
+flask>=2.0
+pillow>=9.0
+numpy
+opencv-python-headless
+
+[accel]
+leos-core[fft,jit,zig]
+
+[gpu]
+leos-core[gpu]
+
+[media]
+yt-dlp
