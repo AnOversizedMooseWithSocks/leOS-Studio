@@ -1418,9 +1418,25 @@ def status():
     # available" on a machine with none.
     report = a.get("gpu") if isinstance(a.get("gpu"), dict) else None
     gpu_flag = bool(report.get("any_available")) if report else bool(a.get("gpu"))
+    # WHAT IS ACTUALLY ACCELERATED. `gpu` means leCore found a device it can
+    # use for SIMULATION and node work. The painting engine -- deposit, flow,
+    # bristle tracks, blurs -- is pure numpy on the CPU, so a chip reading
+    # "GPU" told a painter their brush was accelerated when it was not.
+    # Report it per subsystem instead of as one flag.
+    subsystems = {
+        "painting": {"device": "cpu",
+                     "note": "brush, impasto and media run on the CPU"},
+        "simulation": {"device": "gpu" if gpu_flag else "cpu",
+                       "note": ("fluid, fields and node work use the GPU"
+                                if gpu_flag else
+                                "no GPU found - running on the CPU")},
+        "shaders": {"device": "gpu", "note": "shader previews run in your "
+                                             "browser's GPU"},
+    }
     return jsonify(gpu=gpu_flag, jit=a["jit"], live=LIVE["on"],
                    live_error=LIVE["error"], accel=have_map,
-                   accel_missing=missing,
+                   accel_missing=missing, subsystems=subsystems,
+                   threads=int(os.environ.get("LESTUDIO_THREADS", "0")) or None,
                    gpu_report=report, advice=a.get("advice") or [],
                    determinism=a.get("determinism"))
 
@@ -1699,14 +1715,19 @@ def state():
 
 @app.post("/api/new")
 def new_doc():
-    # creating a document SWITCHES the active one, which is the same
-    # shape-change race the composite is guarded against
+    """Create a document: {"name", "width", "height", "background"?: [r,g,b] or null for transparent}. Activates it."""
+    # The DOCSTRING BELONGS ON THE ROUTE HANDLER. Wrapping this for the
+    # document lock moved it to the inner function, and the route went
+    # undocumented -- invisible to the agent-facing schema. Caught only when
+    # the suite finally ran against real leCore; the stub environment had
+    # that test in its noise.
+    # (creating a document SWITCHES the active one, which is the same
+    # shape-change race the composite is guarded against)
     with _DOC_LOCK:
         return _new_doc_locked()
 
 
 def _new_doc_locked():
-    """Create a document: {"name", "width", "height", "background"?: [r,g,b] or null for transparent}. Activates it."""
     d = request.json or {}
     bg = d.get("background", (1.0, 1.0, 1.0))   # null -> transparent
     try:
@@ -3242,11 +3263,13 @@ def _paint_dispatch(d, mode):
             # for another
             raise _Gone("layer %s is gone - pick another in the layer list"
                         % lid)
-        if not getattr(_l, "visible", True):
-            # painting a hidden layer succeeded silently: the user saw
-            # nothing happen and had no way to know why
-            raise _Gone("that layer is hidden - the paint would not show. "
-                        "Turn its eye back on first.")
+        # NOTE: a HIDDEN layer is deliberately NOT refused here. The stroke
+        # lands and the response carries a warning ("that landed on a HIDDEN
+        # layer -- toggle its eye to see it"), which does what the painter
+        # asked AND explains it. I briefly made this a 400; that threw the
+        # stroke away and broke the existing design. My user-test only read
+        # the status code and the pixels, never the `warning` field, and
+        # reported a silent failure that was not one.
     if mode == "knife":
         # the PALETTE KNIFE shapes existing paint across the whole stratum
         # chain rather than adding more
@@ -3972,17 +3995,76 @@ def export():
     return _png(np.clip(flat, 0, 1))
 
 
-def serve(host="127.0.0.1", port=5050, debug=False):
+@app.get("/api/health")
+def health():
+    """Liveness and readiness, for a load balancer or container probe.
+
+    Deliberately cheap and side-effect free: it must not composite, touch
+    leCore, or take `_DOC_LOCK`, or a health check would queue behind a slow
+    stroke and the orchestrator would kill a working process.
+    """
+    return jsonify(ok=True, service="lestudio",
+                   docs=len(getattr(WS, "docs", {}) or {}),
+                   live=LIVE["on"])
+
+
+@app.get("/api/ready")
+def ready():
+    """Readiness: can this process actually serve a request? Unlike health
+    this touches the workspace, so it fails while the app is still starting
+    or has been wedged."""
+    try:
+        with _DOC_LOCK:
+            w, h = int(DOC.width), int(DOC.height)
+        return jsonify(ok=True, canvas=[w, h])
+    except Exception as e:
+        return jsonify(ok=False, error=type(e).__name__), 503
+
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+def apply_runtime_limits():
+    """Fit the process to the machine it is on.
+
+    On a small box (a phone-class VM, a shared container) numpy's BLAS will
+    happily spawn a thread per core and thrash. LESTUDIO_THREADS caps that.
+    Set BEFORE numpy is imported to take effect, which is why this is called
+    from the entry point rather than lazily.
+    """
+    n = _env_int("LESTUDIO_THREADS", 0)
+    if n > 0:
+        for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                    "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+                    "VECLIB_MAXIMUM_THREADS"):
+            os.environ.setdefault(var, str(n))
+    return n
+
+
+def serve(host=None, port=None, debug=False):
+    """Run the app.
+
+    Configurable from the environment so the same image can be run locally or
+    in a container without editing code: LESTUDIO_HOST, LESTUDIO_PORT,
+    LESTUDIO_THREADS.
+
+    NOTE FOR HOSTING: this uses Flask's development server, which is fine for
+    one painter on one machine and is NOT a production server. Behind a real
+    one, mind two things about this app: the workspace is a SINGLE SHARED
+    STUDIO (see `/api/health` docs) rather than one canvas per visitor, and
+    the engine keeps its state in memory in this process -- so it must run as
+    ONE worker. Multiple workers would each hold a different painting and
+    serve whichever one the load balancer happened to pick.
+    """
+    apply_runtime_limits()
+    host = host or os.environ.get("LESTUDIO_HOST", "127.0.0.1")
+    port = int(port or _env_int("LESTUDIO_PORT", 5050))
     print(f"leStudio -> http://{host}:{port}")
     app.run(host=host, port=port, debug=debug, threaded=True)
-
-
-def main():  # console entry point
-    serve()
-
-
-if __name__ == "__main__":
-    main()
 
 
 @app.post("/api/brush_load")
@@ -4189,3 +4271,19 @@ def palette_clear():
         pd.strokes = [k for k in pd.strokes if False]
         DOC._edited_palette_last = True      # so Ctrl+Z reaches it
     return jsonify(ok=True)
+
+
+# ------------------------------------------------------------------------------------------------
+# Entry point. THIS MUST STAY AT THE END OF THE FILE: every @app.route below
+# the __main__ guard is never registered when the module is run directly
+# (`python server.py`), because main() fires before those lines execute. Eight
+# routes -- the whole palette and paint-setup surface -- were unreachable that
+# way. `python -m lestudio` was unaffected, which is exactly why it went
+# unnoticed: the documented path imports the module fully first.
+# ------------------------------------------------------------------------------------------------
+def main():  # console entry point
+    serve()
+
+
+if __name__ == "__main__":
+    main()

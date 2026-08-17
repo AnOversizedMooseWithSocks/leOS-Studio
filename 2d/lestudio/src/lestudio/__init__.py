@@ -85,7 +85,17 @@ def engine_version():
     try:
         v = mind().version()
         if isinstance(v, dict):
-            return dict(v)
+            v = dict(v)
+            # A SOURCE CHECKOUT has no version. leCore's VERSION file is owned
+            # by its CI and excluded from source archives, so the engine falls
+            # back to a 0.0.0 sentinel -- which displays as if the user had an
+            # ancient build when they are actually running a development tree.
+            # Say what it is instead. (Harmless functionally: availability is
+            # decided by have(), never by comparing this string.)
+            if str(v.get("engine", "")).strip() in ("0.0.0", "", "0"):
+                v["engine"] = "development build"
+                v["unversioned"] = True
+            return v
     except Exception:
         pass
     try:
@@ -6797,16 +6807,20 @@ class Document:
         # name from the ROOT of the chain, not from the layer we spilled off,
         # or a deep build reads "p ~2 ~2 ~2 ~2 ~2 ~2"
         root = getattr(l, "stratum_root", None)
-        base_name = root or re.sub(r" ~\d+$", "", getattr(l, "name", "paint"))
+        base_name = root or re.sub(r" \u00b7 build-up \d+$", "",
+                                   getattr(l, "name", "paint"))
         n = 2
-        while any(x.name == "%s ~%d" % (base_name, n) for x in self.layers):
+        # "p ~2" means nothing to a painter looking at their layer list -- it
+        # was the mystery layer in the first user report. Say what it is.
+        while any(x.name == "%s \u00b7 build-up %d" % (base_name, n)
+                  for x in self.layers):
             n += 1
         idx = [x.id for x in self.layers].index(lid)
         above = (self.layers[idx + 1].id if idx + 1 < len(self.layers)
                  else None)
-        new = (self.add_layer("%s ~%d" % (base_name, n), record=False,
-                              below=above) if above
-               else self.add_layer("%s ~%d" % (base_name, n), record=False))
+        nm = "%s \u00b7 build-up %d" % (base_name, n)
+        new = (self.add_layer(nm, record=False, below=above) if above
+               else self.add_layer(nm, record=False))
         new = new if hasattr(new, "id") else self.layers[-1]   # USE THE RETURN VALUE
         # it is the same paint, one stratum higher
         new.paper = getattr(l, "paper", "canvas")
@@ -8468,6 +8482,7 @@ class Document:
         # without computing the stroke frame twice.
         _dep_cache = None
         _wetcol = None
+        _had_relief = True          # only false on a layer's FIRST relief
         if not erase and (matdef is not None or media in _MEDIA):
             _med0 = matdef if matdef is not None else _MEDIA[media]
             _walk = _lf = None
@@ -8631,6 +8646,15 @@ class Document:
                 # stroke must not re-tune how the layer's existing oil shades
                 l.paint_gloss = med["gloss"]
                 l.paint_media = media
+            # Did this layer already carry relief? The FIRST height map changes
+            # how the WHOLE layer is lit -- canvas tooth starts applying to
+            # every painted pixel, not just this stroke -- so a window patch
+            # cannot represent it and the composite cache must be rebuilt in
+            # full. Baseline drifted 0.0015 here and got away with it; with
+            # deeper canvas relief the same gap is 0.127, which is visible.
+            _had_relief = getattr(l, "_shade_rev", None) is not None and \
+                getattr(l, "height_map", None) is not None and \
+                bool((l.height_map > 0.02).any())
             hw = l.height_map[y0b:y1b, x0b:x1b]
             # the brush LAYS paint: a real surface, not a rescaled alpha.
             # Height accumulates across strokes -- that is the build-up.
@@ -8725,7 +8749,19 @@ class Document:
         # realtime feedback: re-light and re-blend ONLY this stroke's window.
         # Validity is judged against the revision captured on entry, so the
         # record/announce bumps inside this very call don't invalidate it.
-        if not getattr(self, "_replaying", False):
+        if not getattr(self, "_replaying", False) and not _had_relief \
+                and getattr(l, "height_map", None) is not None:
+            # FIRST RELIEF ON THIS LAYER. Canvas tooth now lights every
+            # painted pixel, not just this stroke, so a window patch cannot
+            # describe it -- but skipping the patch outright left `_shade_rev`
+            # unset, so the layer never counted as "already relief" and EVERY
+            # later stroke fell back to a full rebuild (measured 1365 ms).
+            # Re-light the layer once, in full, and patch the composite over
+            # everything it covers; from here the window patch is valid again.
+            _shaded_pixels(l)
+            composite_patch(self, 0, 0, w, h, rev_entry)
+            self._last_paint_rect = (0, 0, w, h)
+        elif not getattr(self, "_replaying", False):
             _shade_patch(l, x0b, y0b, x1b, flow_bottom, rev_entry)
             # the composite (and the client's dirty window) must cover
             # the RE-LIT ring around the stroke, not just the pigment

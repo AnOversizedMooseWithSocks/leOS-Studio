@@ -2472,7 +2472,11 @@ def test_accelerators_are_optional_with_fallbacks():
     assert sh.startswith("#!/usr/bin/env bash")
     assert '"${1:-}" = "accel"' in sh and ".[accel]" in sh
     assert "pip install -e ." in sh
-    assert 'Darwin) open "http://127.0.0.1:5050"' in sh      # macOS opens the UI
+    # INTENT: macOS opens the UI in a browser. Pinned as the behaviour, not
+    # the literal URL -- the launchers stopped hardcoding the address when
+    # they learned to honour LESTUDIO_HOST/PORT, and a text match failed on a
+    # correct change.
+    assert 'Darwin) open "$URL"' in sh and 'URL="http://${HOST}:${PORT}"' in sh
     assert os.access(os.path.join(root, "run.sh"), os.X_OK)  # executable bit
     # status reports what is missing, with how to get it
     from lestudio.server import app
@@ -5716,6 +5720,8 @@ def test_sweep_every_endpoint_is_reachable():
         "/api/mind": "capability discovery for scripts",
         "/api/presence/name": "set by the join flow, not a user control",
         "/api/schema": "self-description for external tooling",
+        "/api/health": "liveness probe for a load balancer, not a user control",
+        "/api/ready": "readiness probe for an orchestrator",
     }
     unreached = []
     for rule in sorted({str(r.rule) for r in app.url_map.iter_rules()
@@ -6949,7 +6955,9 @@ def test_ux_sweep_discoverability():
     ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
                            "static", "index.html")).read()
     api_only = {"/api/analyze", "/api/graph/node/<nid>", "/api/histogram",
-                "/api/mind", "/api/presence/name", "/api/schema", "/api/prefs"}
+                "/api/mind", "/api/presence/name", "/api/schema", "/api/prefs",
+                # probes for a host's orchestrator: deliberately not controls
+                "/api/health", "/api/ready"}
     for rule in sorted({str(x.rule) for x in app.url_map.iter_rules()
                         if str(x.rule).startswith("/api")}):
         stem = rule.split("<")[0].rstrip("/")
@@ -7042,7 +7050,13 @@ def test_lecore_027_gpu_report_and_advice():
     ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
                            "static", "index.html")).read()
     assert "s.gpu_report" in ui and "a.worth_it" in ui
-    assert "(s.gpu?'GPU':'CPU')" in ui          # still a boolean at the chip
+    # the chip must read the BOOLEAN, never a truthy gpu_report dict. Pinned
+    # as intent: the literal expression was rewritten when the chip started
+    # naming which subsystem is accelerated.
+    import re as _re
+    chip = ui[ui.index("api('/api/status')"):][:600]
+    assert "s.gpu?" in chip and "s.subsystems" in chip
+    assert "s.gpu_report" not in chip, "the chip must not read the report dict"
 
 
 def test_lecore_027_no_faster_path_for_our_faculties():
@@ -8854,7 +8868,11 @@ def test_impasto_paint_body_and_gravity():
     assert l3.height_map is not None
     assert float(np.abs(l3.height_map - d1.layer(a1).height_map).max()) < 1e-6
     assert getattr(l3, "paint_media", None) == "oil"
-    assert abs(getattr(l3, "paint_gloss", 0) - 0.55) < 1e-6
+    # the gloss must SURVIVE the round trip; the number itself is a tuning
+    # value on the medium (oil moved 0.55 -> 0.34 when the media were
+    # reworked) and pinning the constant tested the tuning, not persistence
+    assert abs(getattr(l3, "paint_gloss", 0)
+               - getattr(d1.layer(a1), "paint_gloss", -1)) < 1e-6
     assert d3.strokes[-1]["brush"].get("media") == "oil"
     assert float(np.abs(d3.composite() - d1.composite()).max()) < 1e-5
 
@@ -8880,7 +8898,14 @@ def test_impasto_paint_body_and_gravity():
                            "static", "index.html")).read()
     for el in ("bMedia", "bLoad", "bLoadRow"):
         assert 'id="%s"' % el in ui, el
-    assert "media:((tool==='brush'||tool==='erase')&&$('bMedia').value)||undefined" in ui
+    # INTENT, not the literal line: the medium goes with a brush stroke and
+    # with an ERASE (the eraser has to take the paint body away with the
+    # pigment), and with nothing else. The expression was rewritten when
+    # materials joined the same select, so pinning its text tested the
+    # spelling rather than the rule.
+    body = ui[ui.index("function strokeBody("):][:900]
+    assert "tool==='brush'?brushBody()" in body, body[:200]
+    assert "tool==='erase'?{media:brushBody().media}" in body, body[:200]
     assert 'value="water">Watercolor' in ui
 
 
@@ -12802,8 +12827,24 @@ def test_new_user_feedback_sweep():
     assert 'if not getattr(self, "_replaying", False)' not in ui  # engine-side
     eng = open(os.path.join(os.path.dirname(__file__), "..", "src",
                             "lestudio", "__init__.py")).read()
-    assert 'if not getattr(self, "_replaying", False):' in eng and \
-        "read-only PROBE" in eng, "the replay-patch fix must stay"
+    # INTENT: a replay must never patch the shading cache -- it rebuilds the
+    # layer from scratch, so a window patch would describe a picture that no
+    # longer exists. Pinned as the GUARANTEE, not the literal condition: the
+    # line gained a second clause (first-relief strokes also skip the patch)
+    # and a source-text match broke on a correct change.
+    assert '_replaying' in eng and "read-only PROBE" in eng, \
+        "the replay-patch fix must stay"
+    import numpy as _np
+    from lestudio import Document as _D
+    _d = _D(240, 160)
+    _d.add_layer("p")
+    _lid = _d.layers[-1].id
+    for _ in range(3):
+        _d.paint(_lid, [[30, 80], [210, 90]], color=(0.8, 0.3, 0.2),
+                 radius=16, media="oil", load=1.2)
+    _before = _d.layer(_lid).pixels.copy()
+    assert _np.allclose(_d.replay_layer(_lid), _before, atol=1e-5), \
+        "a replay must rebuild exactly, not patch"
     # Floating containers stay capped -- but note this assertion used to
     # pin the LITERAL selector, `.tbm` included, and `.tbm` was the bug:
     # capping the dropdown WRAPPER clipped the panel inside it to a
@@ -18000,7 +18041,7 @@ def test_paint_spills_onto_a_new_stratum_instead_of_flattening():
     for l in st1:
         assert float(l.height_map.max()) <= _HEIGHT_CAP + 1e-3, l.name
     # named from the ROOT of the chain, not "p ~2 ~2 ~2 ~2"
-    assert all(l.name.count("~") <= 1 for l in d1.layers), \
+    assert all(l.name.count("build-up") <= 1 for l in d1.layers), \
         [l.name for l in d1.layers]
     # each stratum sits one cap higher than the last
     zs = [float(getattr(l, "z_off", 0.0)) for l in st1]
@@ -18385,7 +18426,7 @@ def test_the_palette_is_its_own_surface_not_a_layer():
                    x=50, y=75, size=30)
     assert [l.name for l in d.layers] == ["Background"], \
         "the picture must have no palette layer at all: %s" % [l.name for l in d.layers]
-    assert not any("~" in l.name for l in pd.layers), \
+    assert not any(getattr(l, "stratum_of", None) for l in pd.layers), \
         "and the palette must not spill: %s" % [l.name for l in pd.layers]
     assert d.palette_doc() is pd, "it is reused, not rebuilt"
 
@@ -18589,9 +18630,9 @@ def test_you_cannot_strand_yourself_with_no_layer():
 
 
 def test_painting_explains_itself_instead_of_failing_silently():
-    """Two user-test findings: painting a HIDDEN layer succeeded silently --
-    the user saw nothing happen and had no way to know why -- and painting a
-    layer that had been deleted crashed with a 500."""
+    """Painting a layer that had been deleted crashed with a 500; it is a
+    stale reference, a user error, not a server fault. Painting a HIDDEN
+    layer is a different case and must NOT be refused -- see below."""
     import json
     import lestudio.server as SV
     c = SV.app.test_client()
@@ -18605,9 +18646,15 @@ def test_painting_explains_itself_instead_of_failing_silently():
     stroke = {"points": [[10, 10], [120, 50]], "color": [0.8, 0.3, 0.2],
               "radius": 20}
 
+    # A HIDDEN layer is NOT refused: the stroke lands and the response warns.
+    # That does what the painter asked and explains it; refusing throws the
+    # stroke away. (I got this wrong once -- my scenario read only the status
+    # code and the pixels, never `warning`, and called it a silent failure.)
     post("/api/layer", {"action": "edit", "id": lid, "visible": False})
     r = post("/api/paint", dict(stroke, layer=lid))
-    assert r.status_code == 400 and "hidden" in r.json["error"].lower()
+    assert r.status_code == 200
+    assert "HIDDEN" in (r.json.get("warning") or ""), \
+        "it must say why nothing appeared: %s" % r.json
 
     r = post("/api/paint", dict(stroke, layer="L999"))
     assert r.status_code == 400, "a stale layer is a user error, not a 500"
@@ -18649,7 +18696,7 @@ def test_the_eraser_goes_through_the_whole_paint_column():
     for _ in range(6):
         d.paint(lid, [[40, 150], [360, 150]], color=(0.8, 0.3, 0.2),
                 radius=28, media="oil", load=1.5)
-    strata = [l for l in d.layers if "~" in l.name]
+    strata = [l for l in d.layers if getattr(l, "stratum_of", None)]
     assert len(strata) >= 2, "the test needs a column that spans strata"
     core = np.s_[140:160, 100:300]
     assert any(float(l.pixels[..., 3][core].max()) > 0.5 for l in strata)
@@ -18687,7 +18734,8 @@ def test_strata_do_not_break_replay_determinism():
                 radius=26, media="oil", load=1.5, real_brush=True, mix=0.4)
     d.blend_stroke(lid, [[40, 150], [360, 150]], radius=24, strength=0.5)
     d.knife(lid, [[40, 150], [360, 150]], mode="smooth", radius=30)
-    assert any("~" in l.name for l in d.layers), "the test needs strata"
+    assert any(getattr(l, "stratum_of", None) for l in d.layers), \
+        "the test needs strata"
 
     before = d.layer(lid).pixels.copy()
     n0 = len(d.layers)
@@ -18718,7 +18766,7 @@ def test_a_stratum_inherits_how_its_base_meets_the_picture():
     for _ in range(6):
         d.paint(g, [[40, 150], [360, 150]], color=(0.5, 0.2, 0.2), radius=26,
                 media="oil", load=1.5)
-    strata = [l for l in d.layers if "~" in l.name]
+    strata = [l for l in d.layers if getattr(l, "stratum_of", None)]
     assert strata, "the test needs strata"
     for l in strata:
         assert getattr(l, "clip", False) is True, "%s is not clipped" % l.name
@@ -18969,3 +19017,299 @@ def test_selection_corners_are_checked_and_explained():
         "the message must say what is missing: %s" % r.json["error"]
     assert post({"tool": "rect", "params": {"x0": 0, "y0": 0, "x1": 50,
                                             "y1": 40}}).status_code == 200
+
+
+def test_dipping_changes_the_colour_you_paint_with():
+    """Usability test, task 2: a user dips in red and paints, and gets their
+    old colour. Painting always sends the COLOUR SWATCH, so with "runs out"
+    off the dip did nothing at all -- a physical, satisfying action with no
+    effect and no hint why. And nothing anywhere showed what was on the brush.
+
+    Putting the dipped colour into the swatch fixes both: the dip works in
+    either mode, and the swatch is the confirmation."""
+    import os
+    import re
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html"), encoding="utf-8").read()
+    i = ui.index("/api/palette/paint")
+    seg = ui[i:i + 1200]
+    assert "brush_state" in seg, "the dip must read back what it loaded"
+    assert "$('bColor').value=hex" in seg, \
+        "and put it in the swatch, or a dip with 'runs out' off does nothing"
+    assert "!mixing" in seg, "mixing must NOT hijack the colour swatch"
+
+    # the endpoint has to supply it
+    import json
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+    c.post("/api/palette", data=json.dumps(
+        {"colors": [[0.85, 0.08, 0.05]]}), **J)
+    r = c.post("/api/palette/paint", data=json.dumps(
+        {"points": [[40, 60], [80, 70]], "color": [0.5, 0.5, 0.5],
+         "radius": 12, "media": "oil", "load": 1.2, "real_brush": True,
+         "mix": 1.0}), **J)
+    assert r.status_code == 200 and "brush_state" in r.json
+    assert len(r.json["brush_state"]["color"]) == 3
+
+
+def test_build_up_layers_say_what_they_are():
+    """Usability test, task 5: turning on "build up" silently added layers
+    named "p ~2" to the layer list. That cryptic name was the mystery layer
+    in the first user report, and it says nothing about what it is or why it
+    appeared."""
+    import os
+    from lestudio import Document
+    d = Document(400, 300)
+    d.auto_stratum = True
+    d.add_layer("sky")
+    lid = d.layers[-1].id
+    for _ in range(9):
+        d.paint(lid, [[40, 150], [360, 150]], color=(0.8, 0.3, 0.2),
+                radius=28, media="oil", load=1.5)
+    strata = [l for l in d.layers if getattr(l, "stratum_of", None)]
+    assert strata, "the test needs strata"
+    for l in strata:
+        assert "build-up" in l.name, "cryptic stratum name: %r" % l.name
+        assert l.name.startswith("sky"), "it must name its parent: %r" % l.name
+        assert "~" not in l.name
+    # a deep build must not compound the suffix
+    assert all(l.name.count("build-up") == 1 for l in strata), \
+        [l.name for l in strata]
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html"), encoding="utf-8").read()
+    assert "starts a new one below it in the list" in ui, \
+        "and switching it on must say what will happen"
+
+
+def test_acceleration_is_reported_per_subsystem():
+    """The status chip read "GPU" whenever leCore found a device -- but the
+    PAINTING engine (deposit, flow, bristle tracks, blurs) is pure numpy on
+    the CPU whatever hardware is present. A painter with a GPU was told their
+    brush was accelerated when it was not."""
+    import os
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    j = c.get("/api/status").json
+    subs = j.get("subsystems")
+    assert subs, "status must say WHAT is accelerated, not just that a GPU exists"
+    assert subs["painting"]["device"] == "cpu", \
+        "painting is numpy on the CPU - do not claim otherwise"
+    for k in ("painting", "simulation", "shaders"):
+        assert subs[k].get("note"), "%s needs a plain-words note" % k
+    # simulation follows the actual device, and the flag stays a bool
+    assert subs["simulation"]["device"] == ("gpu" if j["gpu"] else "cpu")
+    assert isinstance(j["gpu"], bool)
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html"), encoding="utf-8").read()
+    assert "paint: CPU" in ui, "the chip must not imply GPU painting"
+
+
+def test_health_stays_answerable_while_the_engine_is_busy():
+    """A health probe that queues behind a slow stroke gets the process
+    killed by its orchestrator while it is working perfectly. /api/health is
+    deliberately cheap and takes no lock; /api/ready does touch the workspace,
+    which is what makes it a readiness check rather than a liveness one."""
+    import json
+    import threading
+    import time
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+
+    def post(u, b={}):
+        return c.post(u, data=json.dumps(b), **J)
+
+    assert c.get("/api/health").json["ok"] is True
+    assert c.get("/api/ready").json["ok"] is True
+
+    post("/api/new", {"width": 900, "height": 700})
+    post("/api/layer", {"action": "add"})
+    lid = c.get("/api/state").json["layers"][-1]["id"]
+    lat, stop = [], [False]
+
+    def probe():
+        while not stop[0]:
+            t = time.perf_counter()
+            r = c.get("/api/health")
+            lat.append(((time.perf_counter() - t) * 1000, r.status_code))
+            time.sleep(0.005)
+
+    t = threading.Thread(target=probe)
+    t.start()
+    try:
+        for i in range(3):
+            post("/api/paint", {"layer": lid,
+                                "points": [[80 + j * 8, 200 + i * 90]
+                                           for j in range(90)],
+                                "color": [0.3, 0.5, 0.8], "radius": 26,
+                                "media": "water", "load": 1.2})
+    finally:
+        stop[0] = True
+        t.join()
+    assert lat, "the probe must have run"
+    assert all(s == 200 for _, s in lat), "health must not fail under load"
+    worst = max(ms for ms, _ in lat)
+    assert worst < 250, "health blocked for %.0f ms behind the engine" % worst
+
+
+def test_the_runtime_fits_the_machine_it_is_on():
+    """Hosting knobs, so the same build runs on a laptop and in a small
+    container without editing code. LESTUDIO_THREADS caps numpy's BLAS
+    threads, which on a shared or phone-class box otherwise spawns a thread
+    per core and thrashes."""
+    import os
+    import inspect
+    import lestudio.server as SV
+    old = os.environ.get("LESTUDIO_THREADS")
+    try:
+        os.environ["LESTUDIO_THREADS"] = "2"
+        for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                    "MKL_NUM_THREADS"):
+            os.environ.pop(var, None)
+        assert SV.apply_runtime_limits() == 2
+        assert os.environ["OMP_NUM_THREADS"] == "2"
+        os.environ["LESTUDIO_THREADS"] = "not a number"
+        assert SV.apply_runtime_limits() == 0, "a bad value must not crash"
+    finally:
+        if old is None:
+            os.environ.pop("LESTUDIO_THREADS", None)
+        else:
+            os.environ["LESTUDIO_THREADS"] = old
+    src = inspect.getsource(SV.serve)
+    assert "LESTUDIO_HOST" in src and "LESTUDIO_PORT" in src
+    # the single-worker constraint is the thing a host most needs to know
+    assert "ONE worker" in src and "SINGLE SHARED" in src
+
+
+def test_a_source_checkout_does_not_report_as_ancient():
+    """leCore's VERSION file is owned by its CI and excluded from source
+    archives, so a development tree reports a 0.0.0 sentinel -- which
+    DISPLAYS as if the user had an ancient engine when they are running the
+    newest one. Harmless functionally (availability is decided by have(),
+    never by comparing the string) but misleading on screen."""
+    from lestudio import engine_version
+    v = engine_version()
+    assert isinstance(v, dict) and v.get("engine")
+    assert str(v["engine"]) != "0.0.0", "0.0.0 must not reach the user"
+    if v.get("unversioned"):
+        assert v["engine"] == "development build"
+
+
+def test_the_first_relief_stroke_keeps_the_cache_honest_and_fast():
+    """Found running against real leCore: when a layer gains its FIRST height
+    map, canvas tooth starts lighting every painted pixel, not just the new
+    stroke -- so a window patch describes a picture that no longer exists.
+    Measured drift 0.127 (baseline got away with 0.0015 before the relief was
+    deepened).
+
+    The fix must not cost the cache: skipping the patch outright left
+    `_shade_rev` unset, so the layer never counted as "already relief" and
+    EVERY later stroke fell back to a full rebuild (1365 ms). Re-light once,
+    in full, then resume window patching."""
+    import time
+    import numpy as np
+    from lestudio import Document, composite_cached, composite
+    rng = np.random.default_rng(7)
+    d = Document(360, 240)
+    la = d.add_layer("a").id
+    lb = d.add_layer("b").id
+    d.edit_layer(lb, opacity=0.8)
+    composite_cached(d)
+    worst = 0.0
+    for i in range(8):
+        lid = la if i % 2 else lb
+        x0, y0 = rng.uniform(20, 320), rng.uniform(20, 200)
+        pts = [(float(x0), float(y0)),
+               (float(x0 + rng.uniform(-60, 60)),
+                float(y0 + rng.uniform(-60, 60)))]
+        d.paint(lid, pts, color=tuple(rng.uniform(0.1, 0.9, 3)),
+                radius=float(rng.uniform(6, 18)),
+                media=("oil" if i % 3 else ""), load=1.0,
+                opacity=float(rng.uniform(0.5, 1.0)))
+        worst = max(worst, float(np.abs(
+            composite_cached(d)
+            - composite(d.layers, d.height, d.width, d.mask_map())).max()))
+    assert worst < 2 / 255, "cache drift %.5f when a layer gained relief" % worst
+
+    # and the cache must still HIT afterwards: many strokes on a layer that
+    # already has relief stay cheap
+    d2 = Document(600, 400)
+    lid = d2.add_layer("p").id
+    d2.paint(lid, [[40, 200], [560, 210]], color=(0.8, 0.3, 0.2), radius=20,
+             media="oil", load=1.2)
+    composite_cached(d2)
+    t = time.perf_counter()
+    for k in range(6):
+        d2.paint(lid, [[40, 120 + k * 30], [560, 130 + k * 30]],
+                 color=(0.8, 0.3, 0.2), radius=20, media="oil", load=1.2)
+        composite_cached(d2)
+    ms = (time.perf_counter() - t) * 1000 / 6
+    assert ms < 400, "%.0f ms per stroke+composite - the cache stopped hitting" % ms
+
+
+def test_every_lecore_faculty_we_depend_on_is_present():
+    """An engine upgrade must not silently downgrade a medium. leStudio gates
+    at runtime with have(), so a RENAMED faculty is invisible to a version
+    pin -- this names the ones the app actually calls so an upgrade that drops
+    one fails loudly here instead of dimming a feature in front of a user."""
+    from lestudio import have, engine_version
+    used = ["depth_from_image", "auto_fuse_depth", "haze_depth",
+            "sharpness_depth", "ground_plane_depth", "depth_fog",
+            "pattern_field", "escape_time", "color_transfer", "segment_image",
+            "texture_image", "mask_refraction", "cloud_scene", "render_water",
+            "ramp", "fit_shape", "gpu_report", "should_pool", "should_offload",
+            "wrap_webgl2", "create_invite_link"]
+    if str(engine_version().get("engine")) == "stub":
+        return                       # the stub answers nothing; nothing to check
+    missing = [f for f in used if not have(f)]
+    assert not missing, "engine is missing faculties leStudio calls: %s" % missing
+
+
+def test_the_entry_point_registers_every_route():
+    """RELEASE CHECK: `main()` and the `__main__` guard sat MID-FILE, with
+    eight routes defined after them -- the whole palette and paint-setup
+    surface. Any invocation that executes the module top-to-bottom and stops
+    at the guard would register only part of the app.
+
+    (Latent rather than live: `python -m lestudio` and the console script both
+    import the module fully first, and running server.py directly fails on its
+    relative imports anyway. Pinned because the structure is a trap: appending
+    a route to the end of the file is the natural thing to do.)"""
+    import os
+    import re
+    src = open(os.path.join(os.path.dirname(__file__), "..", "src",
+                            "lestudio", "server.py"), encoding="utf-8").read()
+    guard = src.index('if __name__ == "__main__"')
+    after = re.findall(r'@app\.(?:post|get)\(', src[guard:])
+    assert not after, "%d routes are defined after the __main__ guard" % len(after)
+
+
+def test_the_launchers_agree_with_the_server_about_where_it_listens():
+    """The launchers hardcoded 5050 while serve() reads LESTUDIO_PORT, so
+    setting it made run.sh announce -- and open a browser at -- a URL nothing
+    was listening on."""
+    import os
+    here = os.path.dirname(__file__)
+    for name in ("run.sh", "run.bat"):
+        txt = open(os.path.join(here, "..", name), encoding="utf-8",
+                   errors="replace").read()
+        assert "LESTUDIO_PORT" in txt, "%s ignores the port setting" % name
+        assert "LESTUDIO_HOST" in txt, "%s ignores the host setting" % name
+        # the only 5050 left may be the default
+        for line in txt.splitlines():
+            if "5050" in line:
+                assert "LESTUDIO_PORT" in line, \
+                    "%s hardcodes a URL: %s" % (name, line.strip())
+
+
+def test_the_readme_describes_what_the_app_now_does():
+    """A release that ships undocumented headline features is a release the
+    user cannot find the features in."""
+    import os
+    txt = open(os.path.join(os.path.dirname(__file__), "..", "README.md"),
+               encoding="utf-8").read().lower()
+    for topic in ("palette knife", "runs out", "build up", "watercolour",
+                  "paper", "gravity", "lestudio_port", "/api/health",
+                  "single shared"):
+        assert topic in txt, "the README never mentions %r" % topic

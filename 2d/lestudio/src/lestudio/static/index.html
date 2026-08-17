@@ -834,7 +834,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
       </select><button id="bMatCol" title="Set the brush colour to this material's classic colour (gold paints gold) — any colour works; the brush colour is the albedo" style="display:none;flex:0 0 22px;width:22px;height:20px;border:1px solid var(--line,#555);border-radius:4px;padding:0;cursor:pointer"></button></div>
       <div class="row" id="bLoadRow" style="display:none"><label title="How much paint is on the brush for each stroke. Heavier loads build thicker ridges - and past what the medium can hold, gravity takes the excess downhill.">Load</label><input type="range" id="bLoad" min="10" max="150" value="60" title="How much paint the brush carries into each stroke."><span class="val" id="bLoadV">.60</span><label style="flex:0 0 auto;margin-left:8px" title="Wet-on-wet. At 0 the brush lays pure colour. Above 0 it PICKS UP the wet paint it crosses and carries it forward, so a stroke changes colour from the crossing onward - the way real paint mixes on the canvas rather than in a picker.">Mix</label><input type="range" id="bMix" min="0" max="100" value="0" style="flex:1 1 40px" title="How readily the brush lifts wet paint it crosses."><span class="val" id="bMixV">0</span></div><div class="row" id="bBrushModeRow" style="display:none"><label title="How the brush behaves as a physical object.">Brush</label><button id="bReal" style="flex:1 1 auto;font-size:10px" title="Turn the brush into a real one that RUNS OUT of paint. While it is on, the meter beside it shows how much is left; it empties as you work and eventually lays nothing. Reload by dragging across a colour in the palette strip below, or click the meter to fill it from the current colour. Off means an endless brush.">runs out</button><button id="bCharge" style="flex:0 0 62px;font-size:10px" title="Paint left on the brush. Click to fill it right up from the current colour." disabled>paint &#8734;</button><button id="bStrat" style="flex:1 1 auto;font-size:10px" title="Let paint build up past a layer's limit. A layer holds a finite amount; past that the surface stops getting thicker and a worked passage flattens to a plateau. With this on, the excess starts a new layer and the build-up keeps going - the way heavy impasto is built up in campaigns.">build up</button></div>
       <div class="row"><label>Smoothing</label><input type="range" id="bSmooth" title="Stroke smoothing: steadies shaky lines as you draw" min="0" max="95" value="0" style="min-width:0"><span class="val" id="bSmoothV">.00</span><label style="margin-left:6px;font-size:11px;white-space:nowrap" title="Inference — stroke starts snap to nearby stroke endpoints, and direction locks to VP rays, verticals, or horizontals">snap <input type="checkbox" id="bInfer" title="Inference assist: snaps stroke starts to nearby stroke ends and straightens toward vanishing points" style="vertical-align:middle"></label></div><div class="row"><label title="Ramp the stroke's width in at the start and out at the end — brush-pen feel; recorded into the stroke, so it replays and the joint tools still work on top">Taper</label><input type="range" id="bTaper" min="0" max="50" value="0" title="Fraction of the stroke that ramps at each end (0 = uniform width)"><span class="val" id="bTaperV">.00</span><label style="margin-left:4px;font-size:11px;white-space:nowrap" title="Shape assist: after a freehand stroke, offer to replace it with a clean circle, rectangle or line. Only offers when two independent recognisers agree — it stays quiet rather than guess. Press S to accept.">shapes <input type="checkbox" id="bShapeSnap" title="Shape assist: offer to tidy a freehand circle, rectangle or line into a clean one. Press S to accept the offer; it stays silent unless it is sure." style="vertical-align:middle"></label></div><div class="row" id="eModeRow" style="display:none"><label title="What the eraser removes">Eraser</label><select id="eMode" title="Eraser mode — pixels (classic), whole strokes, the topmost stroke only, paint-undo (restore the area to its pre-stroke state), or depth (carve the impasto body first). Shift+E cycles."><option value="pixel">▭ Pixels (classic)</option><option value="erase_strokes">✂ Whole strokes</option><option value="erase_top">≣ Topmost stroke (peel)</option><option value="erase_undo">⤺ Paint undo (history brush)</option><option value="erase_depth">⛏ Depth (carve impasto)</option></select></div>
-      <div class="row"><label>Rail</label><select id="bRail" title="Constrain freehand strokes to slide along this spline"></select><label class="inl" title="Stream strokes to the server while dragging (needs a fast machine). Off: a lightweight preview is drawn and the stroke applies on release.">Live</label><input type="checkbox" id="bLive" title="Send the stroke to the engine WHILE dragging (off = only on release)"><label class="inl" title="Symmetry — every stroke paints twice, mirrored across the canvas centre. Both copies are real strokes: select, nudge, and edit them independently.">mirror</label><select id="bMirror" title="Mirror every stroke as you paint. Left-right and up-down mirror across the canvas centre; the numbered options repeat the stroke around the centre like a kaleidoscope. Every copy is a real stroke you can select and edit."><option value="">no mirror</option><option value="v">left-right</option><option value="h">up-down</option><option value="3">radial 3</option><option value="6">radial 6</option><option value="8">radial 8</option></select></div>
+      <div class="row"><label>Rail</label><select id="bRail" title="Constrain freehand strokes to slide along this spline"></select><label class="inl" title="Stream strokes to the server while dragging (needs a fast machine). Off: a lightweight preview is drawn and the stroke applies on release.">Live</label><input type="checkbox" id="bLive" title="Send the stroke to the engine WHILE dragging (off = only on release)"><label class="inl" title="Symmetry — every stroke paints twice, mirrored across the canvas centre. Both copies are real strokes: select, nudge, and edit them independently.">mirror</label><select id="bMirror" title="Mirror every stroke as you paint. Left-right and up-down mirror across the canvas centre; 'across' mirrors left-to-right and 'down' mirrors top-to-bottom; the N-way options repeat the stroke around the centre like a kaleidoscope. Every copy is a real stroke you can select and edit."><option value="">off</option><option value="v">across</option><option value="h">down</option><option value="3">3-way</option><option value="6">6-way</option><option value="8">8-way</option></select></div>
       <div class="row"><label>Selection</label><select id="bSel" title="Paint only inside a selection, or leave it unset to paint anywhere on the layer. Selections are made with the marquee, wand and lasso tools."><option value="">anywhere</option></select>
         <label style="flex:0 0 auto;display:flex;gap:4px;align-items:center;font-size:11px">
           <input type="checkbox" id="bSelInv" title="Paint OUTSIDE the active selection instead of inside">inv</label></div>
@@ -1181,6 +1181,17 @@ function dockToDoc(e){
          load:1.2, real_brush:true, mix:1.0};
     const r=await api('/api/palette/paint',{...J,body:JSON.stringify(body)});
     if(r&&r.error)return;
+    // A DIP MUST CHANGE THE COLOUR YOU PAINT WITH. Painting always sends the
+    // colour swatch, so with "runs out" off a dip did nothing at all -- the
+    // user drags through red, paints, and gets the old colour with no hint
+    // why. Putting the dipped colour in the swatch makes the dip work in
+    // both modes AND shows what is on the brush, which nothing did before.
+    if(!mixing && r && r.brush_state && r.brush_state.color){
+      const hex='#'+r.brush_state.color.map(v=>
+        Math.round(Math.max(0,Math.min(1,v))*255).toString(16).padStart(2,'0')).join('');
+      $('bColor').value=hex; if($('txColor'))$('txColor').value=hex;
+      rememberColor(hex); setStatus('brush loaded '+hex.toUpperCase());
+    }
     await refresh(); refreshDock();
   });
 })();
@@ -1351,7 +1362,9 @@ $('bStrat').onclick=async()=>{
   const r=await api('/api/stratum',{...J,body:JSON.stringify({on})});
   if(r&&r.error){toast(r.error);return;}
   state.auto_stratum=r.auto_stratum; $('bStrat').style.opacity=r.auto_stratum?'1':'0.45';
-  toast(r.auto_stratum?'Paint builds past the layer limit onto new layers':'Paint stops at the layer limit');
+  toast(r.auto_stratum
+    ?'Building up: when a layer fills with paint, the extra starts a new one below it in the list, named "build-up 2", "build-up 3" and so on'
+    :'Paint now stops at the layer limit');
 };
 // REAL BRUSH MODE: the brush is a physical object holding a finite amount of
 // paint. The meter is the honest readout -- if it says empty, strokes lay
@@ -7383,7 +7396,14 @@ $('svgExportBtn').onclick=async()=>{
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
   toast('lestudio.svg downloaded','info');
 };
-api('/api/status').then(s=>{$('accelChip').textContent=(s.gpu?'GPU':'CPU')+(s.jit?' · JIT':'');
+api('/api/status').then(s=>{
+  // Say what is accelerated, not just that a GPU EXISTS. Painting is CPU
+  // whatever hardware is present, so a bare 'GPU' chip told a painter their
+  // brush was accelerated when it was not.
+  $('accelChip').textContent='paint: CPU'+(s.gpu?' · sim: GPU':'')+(s.jit?' · JIT':'');
+  $('accelChip').title=(s.subsystems
+    ? Object.entries(s.subsystems).map(([k,v])=>k+': '+v.device.toUpperCase()+' - '+v.note).join('\n')
+    : 'engine acceleration');
   // leCore 0.2.7 reports WHY each GPU path is unavailable, with the install
   // line, and whether offloading would actually pay on this machine. Better
   // information than we can produce ourselves, so prefer it when present.

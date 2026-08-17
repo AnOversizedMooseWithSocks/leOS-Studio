@@ -47,9 +47,14 @@ if /I "%~1"=="accel" (
     echo [leStudio] Done. GPU is separate: pip install cupy-cuda12x ^(match your CUDA^).
 )
 
-echo [leStudio] Starting -- open http://127.0.0.1:5050 in your browser.
+REM Honour the same environment the app reads, or the launcher announces
+REM (and opens) a URL the server is not listening on.
+if "%LESTUDIO_HOST%"=="" set LESTUDIO_HOST=127.0.0.1
+if "%LESTUDIO_PORT%"=="" set LESTUDIO_PORT=5050
+set LESTUDIO_URL=http://%LESTUDIO_HOST%:%LESTUDIO_PORT%
+echo [leStudio] Starting -- open %LESTUDIO_URL% in your browser.
 echo [leStudio] Tip: `run.bat accel` installs optional fast paths ^(2-5x on heavy nodes^).
-start "" http://127.0.0.1:5050
+start "" %LESTUDIO_URL%
 ".venv\Scripts\python.exe" -m lestudio
 
 endlocal

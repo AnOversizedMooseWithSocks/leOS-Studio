@@ -237,6 +237,183 @@ RULE OF THUMB for anything added from here: if it lives on a Document or a
 Layer and a painter would notice it missing, it needs a line in BOTH helpers
 and a line in the round-trip test.
 
+## Release pass
+Checked the things a RELEASE breaks on rather than more feature behaviour.
+
+1. THE ENTRY POINT SAT MID-FILE. `main()` and the `__main__` guard were
+   ~200 lines from the end, with EIGHT routes defined after them -- the whole
+   palette and paint-setup surface, all of it appended by me. Moved to the
+   end, pinned by a test. Be precise about severity: this was LATENT, not
+   live. `python -m lestudio` and the console script both import the module
+   fully first, and running `server.py` directly fails on its relative
+   imports anyway. But appending a route to the end of a file is the natural
+   thing to do, so the structure was a trap.
+2. THE LAUNCHERS HARDCODED 5050 while `serve()` reads LESTUDIO_PORT, so
+   setting the port made run.sh announce -- and open a browser at -- a URL
+   nothing was listening on. Both launchers now read the same environment.
+3. THE README DOCUMENTED NONE OF IT. Palette, knife, real brush, build-up,
+   paper, watercolour, gravity, the hosting knobs: zero mentions. A release
+   that ships undocumented headline features ships features nobody finds.
+   Added a "Painting with real media" section and a "Running it as a service"
+   section, the latter stating plainly that the workspace is a SINGLE SHARED
+   STUDIO and must run as one worker.
+
+VERIFIED, not assumed: the packaged zip is clean (no __pycache__ or .pyc --
+the ones I first saw were created by running tests in the extraction dir),
+`static/index.html` is the only static asset and is declared in package-data,
+and the app serves `/`, `/api/health`, `/api/state` and `/api/composite.png`
+over real HTTP from a fresh unzip.
+
+One more test pinned presentation: `test_accelerators_are_optional_with_fallbacks`
+asserted the literal launcher URL. Re-pinned to the behaviour.
+
+## leCore upgrade check (second snapshot)
+A newer leCore tree was supplied. **Clean upgrade: 0 failures on all four
+chunks, all three JS gates green, no code change needed.** Features went
+1973 -> 2057, and all 21 faculties leStudio actually depends on are present;
+the wall-boundary advect path still takes the fast route and keeps 100% of
+the mass.
+
+NOTHING IN IT IS WORTH ADOPTING FOR THIS APP, and that is the honest answer
+rather than a shrug. The 84 new faculties are almost entirely 3D creature
+work (face/head specs, fur shells, groom maps, tet meshes, template wrap,
+FEM, morphogenesis) plus a Lean logic layer. Two looked applicable to 2D and
+were MEASURED before being dismissed:
+- `skin_sss_shade(base_rgb, ndl, thickness, ...)` -- subsurface scattering,
+  and paint really does scatter (wax, thick glazes). But: 349 ms per call at
+  1080p against a ~75 ms whole-stroke budget, it darkens thin paint to near
+  black (0.029 where plain shading gives 0.780) because it models skin, and
+  the difference at thickness 3 is 0.793 vs 0.780. Wrong model, wrong price.
+- `sfs_debas_relief(depth, mask)` -- removes the bas-relief flattening/tilting
+  ambiguity from ESTIMATED depth. Our height map is known exactly, so there is
+  no ambiguity to remove; and the one place leStudio estimates depth is
+  `_depthfog`, where a global flattening does not change the result.
+
+WHEN A NEW ENGINE ARRIVES: run all four chunks, check `have()` for the 21
+used faculties, exercise `_advect_walled` (its gate is a direct module import
+with a fallback, not a feature name, so a rename would silently downgrade
+the medium rather than fail), and diff `features()` against the old build --
+that diff is the only reliable list of what actually changed.
+
+## VERIFIED AGAINST REAL leCORE (first time)
+A leCore source tree was supplied and the whole suite ran against it:
+**0 failures in all four chunks**, and the stub environment still shows the
+same 91 and no more. So the long-standing "the 91 are environmental" claim
+was broadly right -- but the stub was ALSO MASKING FIVE REAL BUGS, four of
+them mine. Never treat a stubbed failure list as noise; it is a blindfold.
+
+WHAT THE STUB HID:
+1. `/api/new` LOST ITS DOCSTRING. Wrapping the route for `_DOC_LOCK` moved it
+   to the inner function and the route went undocumented -- invisible to the
+   agent-facing schema. Checked the other two lock wrappers keep theirs.
+2. COMPOSITE CACHE DRIFT OF 0.127 (mine, the serious one). When a layer gains
+   its FIRST height map, canvas tooth starts lighting EVERY painted pixel,
+   not just the new stroke, so a window patch describes a picture that no
+   longer exists. Baseline drifted 0.0015 and got away with it; deepening the
+   canvas relief made the same gap visible.
+   THE FIX HAS TWO HALVES -- the first attempt was correct and 4x too slow.
+   Skipping the patch left `_shade_rev` unset, so the layer never counted as
+   "already relief" and every later stroke fell back to a full rebuild
+   (measured 1365 ms). Re-light the layer ONCE in full, patch the composite
+   over its whole extent, then resume window patching. Now 0.000 drift AND
+   the budget passes.
+3. The mirror labels from the previous round TRUNCATE in that narrow select --
+   which reads as broken rather than terse, i.e. worse than the glyphs they
+   replaced. Short words instead ("across", "down", "3-way"); the row's own
+   "mirror" label carries the meaning.
+4. I WAS WRONG ABOUT HIDDEN LAYERS. My user-test reported "painting a hidden
+   layer succeeds silently" and I made it a 400. The app ALREADY warned
+   ("that landed on a HIDDEN layer -- toggle its eye to see it"); my scenario
+   read only the status code and the pixels, never the `warning` field. The
+   400 threw the stroke away and broke a deliberate design. Reverted.
+5. Three tests pinned CONSTANTS or SOURCE TEXT rather than intent: an oil
+   gloss of 0.55 (the medium moved to 0.34), a literal `strokeBody` line, and
+   the literal `_replaying` condition. All re-pinned to the guarantee.
+
+ENGINE NOTES FOR THIS BUILD:
+- It reports version "0.0.0": leCore's VERSION file is CI-owned and excluded
+  from source archives. Functionally harmless -- availability is decided by
+  `have()`, never by comparing the string -- but it DISPLAYED as an ancient
+  engine. `engine_version()` now says "development build" for the sentinel.
+- `have("advect")` and `have("boundary_wall")` read FALSE on this build: the
+  faculty is named `advect_field`, and `boundary="wall"` is an ARGUMENT, not
+  a faculty. Not a problem -- `_advect_walled` imports the module directly
+  and falls back -- and verified working here: wall path taken, 100% of the
+  mass kept. This is exactly why the pin comment says a version number cannot
+  answer "is THIS faculty present".
+
+## Acceleration, and what it would take to host this
+### What is actually accelerated (measured, not assumed)
+The PAINTING engine -- `_deposit`, `_paint_flow`, `_bristle_tracks`,
+`_gauss_small`, `_stroke_frame` -- is PURE NUMPY ON THE CPU. Checked each
+function: none touches leCore or any accelerator. leCore's GPU support covers
+SIMULATION and node work only.
+
+So the status chip reading "GPU" whenever leCore found a device was a
+misreport: a painter with a good card was told their brush was accelerated
+when every stroke ran on the CPU. `/api/status` now returns a `subsystems`
+map (painting: cpu, simulation: gpu-or-cpu, shaders: browser gpu) and the
+chip reads "paint: CPU - sim: GPU". Pinned.
+
+### NOT DONE, and why: GPU painting
+Porting the paint path to CuPy is a genuine project, not a sweep item. CuPy
+is close to a drop-in for the array ops used here, but the deposit returns
+arrays that are written straight into numpy layer buffers, so the seam has to
+be drawn carefully or every stroke pays a host<->device copy that costs more
+than it saves. This container has NO cupy, NO GPU and NO leCore, so anything
+written here would be untested and unmeasured -- shipping it would be a claim
+rather than a capability. Do it against real hardware, profile the copies
+first, and keep numpy as the default path.
+
+### Hosting: what exists now
+- `GET /api/health` -- liveness. Deliberately cheap, takes NO lock and does
+  not composite: measured 0.3 ms median while the engine was saturated with
+  watercolour strokes. A probe that queues behind a slow stroke gets a
+  working process killed by its orchestrator.
+- `GET /api/ready` -- readiness; takes the lock and reads the canvas, so it
+  fails while starting or wedged.
+- `LESTUDIO_HOST` / `LESTUDIO_PORT` / `LESTUDIO_THREADS`. The thread cap sets
+  the BLAS variables, which on a shared or phone-class box otherwise spawn a
+  thread per core and thrash. It must run before numpy is imported, hence
+  from the entry point.
+
+### Hosting: the constraints a host MUST know
+1. THE WORKSPACE IS ONE SHARED STUDIO, not a canvas per visitor. `WS` and
+   `DOC` are module globals and the invite/presence machinery is built around
+   collaboration. Expose it publicly and everyone paints on the same picture.
+   Per-user isolation would mean keying the workspace by session and is a
+   substantial change.
+2. IT MUST RUN AS ONE WORKER. State lives in memory in the process; multiple
+   workers would each hold a different painting.
+3. `app.run()` is Flask's development server. Fine for one painter; put a
+   real server in front for anything else.
+
+## Usability test: 7 tasks walked as a first-time user
+Task-based this time rather than fuzzing -- "paint in oil", "load your brush
+from the palette", "mix two colours", "undo a mistake", "make the paint
+thicker", "start over", "find out what a control does". Two failures, both in
+the FLOW rather than the code.
+
+1. A DIP DID NOTHING UNLESS "runs out" WAS ON. Painting always sends the
+   COLOUR SWATCH, and the reservoir is only consulted in real-brush mode --
+   so a user drags through the red mound, paints, and gets their old colour
+   with no hint why. Nothing anywhere showed what was on the brush either.
+   ONE FIX FOR BOTH: a dip now writes the loaded colour into the swatch, so
+   it works in either mode and the swatch is the confirmation. (Mixing must
+   NOT do this -- you are combining paint, not choosing a colour.)
+2. "BUILD UP" SILENTLY ADDED LAYERS CALLED "p ~2". That cryptic name was the
+   mystery layer in the very first user report; I fixed the palette case then
+   and left the general one. Strata are now "sky - build-up 2" and switching
+   the feature on says what will happen.
+
+PASSED: the oil setup and its one-line instruction; mixing (button and
+shift-drag, with a permanent hint); undo on the palette; the protected last
+layer; and every brush control now carries a tooltip.
+
+NOTE ON TESTS: four assertions pinned the stratum NAME ("~" in l.name), so a
+clarity rename broke them -- exactly the "pin intent, not presentation" trap.
+They now check `stratum_of`, which is the actual relationship.
+
 ## User-test scenarios, round 6 (stateful ops, and NaN again)
 Applied round 5's fuzzing to a different axis -- the STATEFUL endpoints
 (groups, stroke transforms, selections, lights, documents) plus concurrency

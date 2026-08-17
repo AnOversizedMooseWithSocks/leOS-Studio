@@ -105,6 +105,49 @@ worst case went 55 s → ~2 s; masks stay full-resolution), and optional CPU
 accelerators install with `run.bat accel` (Windows) or `./run.sh accel`
 (macOS / Linux) -- never installed silently.
 
+## Painting with real media
+
+Pick a setup from the **Media** menu — *oil painting*, *watercolour* or *ink
+drawing* — and the app configures the whole studio at once: the medium, the
+paper, the brush behaviour and a palette of colours to work from. That is one
+choice instead of five separate switches.
+
+**The palette is real paint, not a colour picker.** Press *palette* in the
+Colour row to squeeze your swatch colours out as mounds on a strip below the
+panel. Drag across one to load your brush from it; **shift-drag** (or the
+*mix here* button) to drag one colour into another and mix them, exactly as
+they would mix on the canvas. The mounds get dirty as you work them and go
+down as you take paint. It lives on its own surface, so it never appears in
+your picture or an export, and *scrape* clears it undoably.
+
+**runs out** turns the brush into a real one that empties as you paint, and
+lays nothing once it is dry — reload by dipping in the palette or by dragging
+through a thick passage on the canvas, which takes paint off it. The meter
+beside the button shows what is left.
+
+**build up** lets paint keep thickening past a single layer's limit: when a
+layer fills, the excess starts a new one named *"sky · build-up 2"* and so
+on. Without it a heavily worked passage flattens to a plateau.
+
+**Paper** (in the Layer panel) is the surface everything sits on. Rough and
+cold-press granulate a wash into cloudy mottles and break dry-brush up hard;
+hot-press and smooth stay even; linen shows its weave. Thick paint buries the
+tooth on any of them, the way real paint fills the cavities and levels off.
+
+**Watercolour** behaves as a fluid in paper rather than a film on a surface:
+washes wick outward through the fibres, darken at their edges as the water
+carries pigment to the perimeter, and granulate into the paper's dips.
+
+**Palette knife** (`Q`) shapes the paint that is already there instead of
+adding more, working the whole depth of the paint even where it spans several
+layers. Click the tool again to cycle the blade: *smooth* levels a surface,
+*push* ploughs a ridge ahead of it, *scrape* takes the tops off, *spread*
+drags it into a thin film.
+
+**Gravity** is a property of the surface, not an assumption: a canvas on an
+easel runs wet paint downward, one lying flat on a table lets a puddle level
+outward instead, and a layer standing on a wall runs down that wall.
+
 ## Image menu
 
 **File ▸ Image** holds the document-wide operations: crop to selection, rotate
@@ -158,6 +201,29 @@ configure something that cannot keep up, and suggests a rate that will.
 Opening the capture page turns Live on by itself, so the overlay is never
 blank, and the transparent path chains each frame off the last (with backoff on
 error) rather than queueing requests the server cannot answer.
+
+## Running it as a service
+
+`LESTUDIO_HOST`, `LESTUDIO_PORT` and `LESTUDIO_THREADS` configure the app from
+the environment, so the same build runs on a laptop and in a container without
+editing anything. The thread cap matters on a small or shared machine, where
+NumPy would otherwise spawn a worker per core and thrash.
+
+`GET /api/health` is a liveness probe — cheap, lock-free, and answerable while
+the engine is busy painting. `GET /api/ready` is a readiness probe and does
+touch the workspace, so it fails while starting up.
+
+**Two things to know before hosting it.** The workspace is a **single shared
+studio**, not one canvas per visitor — that is deliberate, it is what the
+invite and presence features are for, but it means everyone who connects
+paints on the same picture. And it must run as **one worker**: the engine
+keeps its state in memory in the process, so a second worker would hold a
+different painting. `run.sh` uses Flask's development server, which is right
+for one painter on one machine and not a production server.
+
+Painting itself runs on the CPU. The accelerator chip says which subsystems
+are accelerated — the GPU, when present, is used for simulation and node
+work, not for the brush.
 
 ## Files keep working
 
