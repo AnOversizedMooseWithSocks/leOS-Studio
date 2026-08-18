@@ -495,7 +495,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
   <div id="stage">
     <div id="firstRun">
     <span>Pick a colour and just paint — <b>B</b> brush, <b>E</b> eraser, <b>Ctrl+Z</b> undo.
-      Everything else can wait.</span>
+      For real paint you can dip a brush into, choose a studio from <b>Media</b> in the Brush panel.</span>
     <button id="firstRunTour" style="font-size:11px">Show me more</button>
     <button id="firstRunGo" style="font-size:11px">Got it</button>
   </div>
@@ -813,7 +813,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
     
     <div class="sect" data-tab="brush" id="brushSect">
       <h3 class="dup">Brush</h3>
-      <div class="row"><label>Color</label><input type="color" id="bColor" value="#2b7bff"><button id="bSqueeze" style="flex:0 0 auto;margin-left:6px;padding:0 5px;font-size:10px" title="Squeeze your swatch colours out as real mounds of paint, on their own Palette layer so they stay out of the picture. They are not a picker, they are PAINT: dip a brush in one, drag it through another to mix, and the mounds get dirty and go down as you take from them. Turn on real brush mode to load and reload from them, and hide the Palette layer when you want it out of the way.">palette</button></div>
+      <div class="row"><label>Color</label><input type="color" id="bColor" value="#2b7bff"><button id="bSqueeze" style="flex:0 0 auto;margin-left:6px;padding:0 5px;font-size:10px" title="Squeeze your swatch colours out as real mounds of paint, on their own surface beside the picture. They are not a picker, they are PAINT: drag across one to load your brush with it, drag one colour into another to mix them, and the mounds get dirty and go down as you take paint. The palette sits on its own surface, so it never appears in your picture or an export.">palette</button></div>
       <div class="row" id="palDockRow" style="display:none;padding:0;flex-direction:column;gap:2px"><div style="display:flex;gap:6px;align-items:center;width:100%"><span id="palHint" style="font-size:10px;opacity:.75;flex:1 1 auto">palette — drag across a colour to load the brush</span><button id="palMix" style="font-size:10px;padding:0 5px" title="Mixing mode. Instead of loading the brush, a drag here MIXES the paint on the palette - drag one colour into another and they blend, exactly as they would on the canvas. Turn it off to go back to dipping.">mix here</button><button id="palClear" style="font-size:10px;padding:0 5px" title="Scrape the palette clean. Undoable - Ctrl+Z brings the paint back.">scrape</button></div><canvas id="palDock" title="Your palette. Drag across a mound to load the brush from it, and drag from one into another to mix - exactly as on the canvas, because it IS paint. It is drawn here rather than on the picture, so it never appears in an export." style="width:100%;height:76px;border-radius:5px;cursor:crosshair;display:block"></canvas></div>
       <div id="swatches" title="Colours you have used or picked — click to reuse, Alt-click to remove"
            style="display:flex;flex-wrap:wrap;gap:3px;margin:2px 0 4px"></div>
@@ -1131,16 +1131,23 @@ async function refreshDock(){
   try{
     const r=await fetch('/api/palette.png?t='+Date.now());
     if(!r.ok){
+      // EMPTY STATE, always shown. Hiding the strip until a palette existed
+      // meant nobody discovered the palette existed: a reviewer looked for it
+      // and reported they could not find it anywhere. An empty shelf that
+      // says what it is for is how you learn the feature is there.
+      // Hidden when empty: an always-present shelf costs panel height and
+      // the Brush half has a no-scroll budget it was already at. Discovery
+      // happens in the first-run tip and in the Media setups instead, both
+      // of which cost nothing.
       palBox=null; cv.style.display='none';
-      // With no palette there was nothing at all to see, so someone who
-      // picked a medium without running a setup never learned the palette
-      // existed. Invite them at the moment it becomes relevant.
       const wantsPaint=!!$('bMedia').value;
       row.style.display=wantsPaint?'flex':'none';
+      $('palMix').style.display='none'; $('palClear').style.display='none';
       if(wantsPaint)$('palHint').textContent=
         'palette - press "palette" above to squeeze out paint you can dip into';
       return;
     }
+    $('palMix').style.display=''; $('palClear').style.display='';
     cv.style.display='block';
     palBox=(r.headers.get('X-Palette-Box')||'').split(',').map(Number);
     const b=await r.blob(), im=new Image();

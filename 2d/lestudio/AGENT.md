@@ -237,6 +237,39 @@ RULE OF THUMB for anything added from here: if it lives on a Document or a
 Layer and a painter would notice it missing, it needs a line in BOTH helpers
 and a line in the round-trip test.
 
+## USER-REPORTED: "stroke not saved -- too many values to unpack"
+A reviewer saw this toast A LOT, and it was every path tool broken for anyone
+with a tablet.
+
+A point may arrive as (x, y, PRESSURE) -- that is what a pen sends, and
+`paint` uses the third component for stroke width. But `_dense_points`
+appended the FIRST point WHOLE while building interpolated points as
+2-tuples, and every path-only tool unpacks `for (px, py) in ...`. So knife,
+blender, smudge, clone and heal all raised on their first iteration. Mouse
+users never saw it; pen users saw it constantly.
+
+Fixed at `_dense_points` -- the one place all those tools share -- rather than
+at five call sites. Pressure still shapes the brush (pinned: the heavy end of
+a ramp must be >1.8x the light end).
+
+WHY THE SUITE MISSED IT: every stroke test passes 2-tuples. The pressure
+tests only exercise `paint`. A test that feeds 3-component points to EVERY
+tool now exists. When a signature accepts an optional extra component, test
+the tools that DO NOT use it.
+
+## Palette discoverability: the layout budget wins
+The same reviewer could not find the palette at all. I first made the shelf
+permanently visible with an empty state -- correct instinct, but it broke
+`test_layout_fits_the_viewport`: the Brush half has a no-scroll budget it was
+already at. Discovery had to be FREE, so it moved to the first-run tip
+("For real paint you can dip a brush into, choose a studio from Media") and
+stays in the Media setups, which each squeeze a palette into the dock.
+
+Also found TWO stale tooltips still describing the palette as a LAYER, from
+before it became its own surface. When an architecture changes, grep the UI
+strings -- `grep -c` on one phrase found one of them and I nearly stopped
+there.
+
 ## Release pass
 Checked the things a RELEASE breaks on rather than more feature behaviour.
 

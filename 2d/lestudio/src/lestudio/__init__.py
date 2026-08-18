@@ -9021,7 +9021,18 @@ class Document:
                                 1.0 - (d - core) / max(r - core, 1e-3)), 0, 1).astype(np.float32)
 
     def _dense_points(self, points, step):
-        pts = [tuple(map(float, p)) for p in points] or []
+        """A path resampled to `step`, ALWAYS as plain (x, y) pairs.
+
+        A point may arrive as (x, y, pressure) -- that is what a pen sends,
+        and `paint` uses the third component for stroke width. The tools that
+        walk this path (knife, blender, smudge, clone, heal) are path-only and
+        unpack `for (px, py) in ...`, so passing the pressure through blew up
+        with "too many values to unpack (expected 2)" ON THE FIRST POINT:
+        interpolated points were built as 2-tuples but the first was appended
+        whole. Every one of those tools was broken for anyone using a tablet.
+        Normalise here, at the one place they all share.
+        """
+        pts = [(float(p[0]), float(p[1])) for p in points] or []
         dense = []
         for i, p in enumerate(pts):
             if i:

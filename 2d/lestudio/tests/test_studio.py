@@ -19313,3 +19313,80 @@ def test_the_readme_describes_what_the_app_now_does():
                   "paper", "gravity", "lestudio_port", "/api/health",
                   "single shared"):
         assert topic in txt, "the README never mentions %r" % topic
+
+
+def test_every_path_tool_accepts_pressure_bearing_points():
+    """REPORTED BY A USER as a toast they saw a lot: "stroke not saved -- too
+    many values to unpack (expected 2)".
+
+    A point may arrive as (x, y, PRESSURE) -- that is what a pen sends, and
+    `paint` uses the third component for stroke width. But `_dense_points`
+    appended the FIRST point whole while building interpolated ones as
+    2-tuples, and every path-only tool unpacks `for (px, py) in ...`. So the
+    knife, blender, smudge, clone and heal all failed on the first point for
+    anyone using a tablet. Normalised at `_dense_points`, the one place they
+    all share."""
+    import json
+    from lestudio import Document
+    import lestudio.server as SV
+
+    pts = [[40, 100, 0.8], [150, 140, 0.95], [340, 110, 0.6]]
+    d = Document(400, 300)
+    d.add_layer("p")
+    lid = d.layers[-1].id
+    d.paint(lid, pts, color=(0.8, 0.3, 0.2), radius=22, media="oil", load=1.3)
+    d.knife(lid, pts, mode="smooth", radius=24)
+    d.blend_stroke(lid, pts, radius=20, strength=0.5)
+    d.smudge(lid, pts, radius=18, strength=0.5)
+
+    # ...and through the API, which is where the user hit it
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+
+    def post(b):
+        return c.post("/api/paint", data=json.dumps(b), **J)
+
+    c.post("/api/new", data=json.dumps({"width": 400, "height": 300}), **J)
+    c.post("/api/layer", data=json.dumps({"action": "add"}), **J)
+    lid2 = c.get("/api/state").json["layers"][-1]["id"]
+    base = {"layer": lid2, "points": pts, "color": [0.5, 0.3, 0.7],
+            "radius": 20, "opacity": 1.0}
+    post(dict(base, media="oil", load=1.3))
+    for extra in ({}, {"mode": "knife", "knife": "smooth"},
+                  {"mode": "knife", "knife": "push"}, {"mode": "blend"},
+                  {"mode": "smudge"}, {"erase": True},
+                  {"mode": "clone", "source": [20, 20]},
+                  {"mode": "heal", "source": [20, 20]}):
+        r = post(dict(base, **extra))
+        assert r.status_code == 200, (extra, r.status_code,
+                                      (r.json or {}).get("error"))
+
+    # pressure must still SHAPE the brush -- the fix must not discard it
+    d2 = Document(300, 120)
+    d2.add_layer("q")
+    l2 = d2.layers[-1].id
+    d2.paint(l2, [[30, 60, 0.15], [270, 60, 1.3]], color=(0.2, 0.4, 0.8),
+             radius=22, media="oil", load=1.2)
+    a = d2.layers[-1].pixels[..., 3]
+    assert float(a[:, 240].sum()) > float(a[:, 60].sum()) * 1.8, \
+        "the heavy end of a pressure ramp must be fatter"
+
+
+def test_the_palette_is_findable_by_a_first_timer():
+    """A reviewer could not find the palette at all. It cannot live on screen
+    permanently -- the Brush panel has a no-scroll budget it is already at --
+    so discovery has to be free: the first-run tip points at the Media
+    setups, and every setup squeezes a palette into the dock."""
+    import os
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html"), encoding="utf-8").read()
+    first = ui[ui.index('id="firstRun"'):][:600]
+    assert "Media" in first and "dip" in first.lower(), \
+        "the first-run tip must point at the paint setups: %s" % first[:200]
+    j = ui.index("const STUDIOS=")
+    assert "/api/palette" in ui[ui.index("async function applyStudio"):][:1200], \
+        "every setup must leave a palette to dip into"
+    # and the tooltip must describe the palette as it IS now (a surface)
+    sq = ui[ui.index('id="bSqueeze"'):][:800]
+    assert "Palette layer" not in sq, "stale: the palette is not a layer"
+    assert "never appears in your picture" in sq
