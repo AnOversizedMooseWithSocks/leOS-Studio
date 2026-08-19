@@ -428,6 +428,8 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
         <button id="tBrush" class="cur active" title="Brush (B)">✏️</button>
         <button id="tErase" title="Eraser (E)">◻️</button>
         <button id="tSmudge" title="Smudge (S)">💧</button>
+        <button id="tBlend" title="Blender (Y) — a clean brush that carries no pigment and works the WET paint already on the canvas: softens two colours into a gradient and knocks the ridges down. Unlike Smudge it records as a stroke, so you can still select and nudge everything, and the blend re-derives when you move the colours underneath.">🪶</button>
+        <button id="tKnife" title="Palette knife (Q) - shapes the paint already on the canvas instead of adding more. It works the whole paint COLUMN, across every layer the body spans, so it also cures the stepping you get where thick paint spills onto new layers. Right-click the tool to cycle what the blade does: smooth, push, scrape, spread.">/</button>
       </div><span class="tgc"></span>
     </div>
     <div class="tgrp" data-grp="repair" title="Repair — clone and heal">
@@ -493,7 +495,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
   <div id="stage">
     <div id="firstRun">
     <span>Pick a colour and just paint — <b>B</b> brush, <b>E</b> eraser, <b>Ctrl+Z</b> undo.
-      Everything else can wait.</span>
+      For real paint you can dip a brush into, choose a studio from <b>Media</b> in the Brush panel.</span>
     <button id="firstRunTour" style="font-size:11px">Show me more</button>
     <button id="firstRunGo" style="font-size:11px">Got it</button>
   </div>
@@ -578,6 +580,9 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
         <input id="ssFwd" type="number" value="0" min="0" max="99" style="width:46px"></div>
       <label style="display:flex;gap:5px;align-items:center;font-size:11px;margin-top:4px">
         <input type="checkbox" id="ssPoints">edit points</label>
+      <div class="row" style="gap:6px;margin-top:4px">
+        <button id="ssGroup" style="flex:1 1 auto" title="Group the selected strokes into one editable object (Ctrl+G). A blended passage — the colours plus the blend gestures — moves as a unit, while every stroke inside stays individually editable.">Group</button>
+        <button id="ssUngroup" style="flex:1 1 auto" title="Dissolve the group (Ctrl+Shift+G). The strokes themselves are untouched — grouping never rewrote them.">Ungroup</button></div>
       <div class="mu" style="font-size:10px">click a joint · shift adds · alt-click grabs a group · rigged strokes pull like a thread</div>
       <div class="row" style="gap:4px"><label style="flex:0 0 auto" title="How far along the stroke a drag fades out, in canvas pixels. 0 = hard (only the grabbed joints move).">falloff</label>
         <input id="ssFall" type="range" min="0" max="300" value="60" style="flex:1">
@@ -684,6 +689,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
       <div id="layers"></div>
       <div class="subh">Selected layer</div>
       <div class="row"><label>Blend</label><select id="lBlend" style="flex:1"></select></div>
+      <div class="row"><label title="The stock everything is painted on. It decides where thin paint catches (stiff paint sits on the risen threads), where a wash pools (down in the dips), how hard dry-brush breaks up, and how strongly watercolour granulates. Rough rag drinks a wash; sized hot-press holds it on top.">Paper</label><select id="dPaper" style="flex:1" title="Rough and cold-press granulate a wash into cloudy mottles and break dry-brush up hard. Hot-press and smooth stay even. Linen shows its crosshatch weave. Thick paint buries the tooth on any of them."></select></div>
       <div class="row"><label title="One-click layer styles and physical presets — the menu shows the layer's CURRENT persistent choice">Style</label><select id="lStyle" style="flex:1" title="One-click layer styles: builds a live graph chain (Layer → Layer style → Layer out) into a new layer just below this one. Repaint the source and the style follows on the next graph push."><option value="">Style…</option><optgroup label="Styles"><option value="shadow">＋ Drop shadow</option><option value="glow">＋ Outer glow</option></optgroup><optgroup label="Physical slab"><option value="vol_water">▦ Water slab</option><option value="vol_glass">▦ Tinted glass</option><option value="vol_fog">▦ Fog / murk</option><option value="vol_puff">▦ Cloud / puff</option><option value="vol_soak">▦ Absorbent paper</option><option value="vol_air">▦ Air gap (spacer)</option><option value="vol_off">▦ Flat again</option></optgroup><optgroup label="Living media"><option value="vol_ink">≈ Ink-in-water dish</option><option value="vol_smoke">≈ Smoke chamber</option><option value="vol_fire">≈ Fire</option><option value="vol_stir">≈ Stir / advance medium</option></optgroup><optgroup label="Pose &amp; print"><option value="vol_tilt">⟂ Tilt slab (+10°)</option><option value="vol_lower">⟂ Lower slab (−4)</option><option value="vol_raise">⟂ Raise slab (+4)</option><option value="vol_domeup">◠ Dome the slab (+8)</option><option value="vol_dish">◡ Dish the slab (−8)</option><option value="vol_print">⎙ Contact-print onto layer below</option><option value="vol_run">⟱ Run wet paint (gravity)</option></optgroup><optgroup label="Optics &amp; glow"><option value="vol_glow">✨ Emit brush colour (+0.6)</option><option value="vol_unglow">✨ Emission off</option><option value="vol_reflect">🪞 Water reflection (+0.4)</option><option value="vol_disp">◈ Dispersion fringes (+0.3)</option><option value="vol_optoff">◌ Optics off</option></optgroup></select></div>
       <div class="row"><label>Opacity</label><input type="range" id="lOp" min="0" max="100" value="100" title="Layer opacity"><span class="val" id="lOpV">1.0</span><span id="lOpKeySlot"></span></div>
       <div class="row"><label title="Every layer is a real sheet — 1 canvas unit = 0.1 mm; paper is the 0.10 mm default and nothing may be thinner than 0.01 mm" title="Physical thickness of this sheet — minimum 0.01 mm, default 0.10 mm; deep slabs disperse media further per frame">Thickness</label><input type="number" id="lThickMM" min="0.01" step="0.05" value="0.10" style="width:62px" title="Sheet thickness in millimetres (min 0.01, paper = 0.10)"><span class="mu" title="millimetres">mm</span><span id="lThickKeySlot"></span>
@@ -728,7 +734,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
       <div class="row" id="rowFieldSrc"><label title="Herd this layer's LIVING MEDIA with existing content: the active selection, a mask, or a stroke's path.">Herd by</label><select id="lFieldSrc" style="flex:1"><option value="">none</option><option value="sel">selection</option></select></div>
       <div class="row" id="rowFieldMode"><label title="attract pulls the medium toward the field, repel pushes away, flow runs it along the contours, contain fences it inside.">Mode</label><select id="lFieldMode" style="flex:1"><option value="attract">attract</option><option value="repel">repel</option><option value="flow">flow</option><option value="contain">contain</option></select></div>
       <div class="row" id="rowFieldStr"><label title="How hard the herding field pushes this layer's medium. 0 is off.">Herd str</label><input type="range" id="lFieldStr" min="0" max="600" value="0"><span class="val" id="lFieldStrV">0</span></div>
-      <div class="row" id="rowRelief"><label title="How much BODY this layer shows the lights: 1 = full physical thickness (embossed edges, cast shadows), 0 = optically flat — colour only. Turn it down when a soft wash or flat element grows a strange rim.">Relief</label><input type="range" id="lRelief" min="0" max="100" value="100"><span class="val" id="lReliefV">1.0</span></div>
+      <div class="row" id="rowRelief"><label title="How much BODY this layer shows the lights: 1 = full physical thickness (embossed edges, cast shadows), 0 = optically flat — colour only. Turn it down when a soft wash or flat element grows a strange rim.">Relief</label><input type="range" id="lRelief" min="0" max="100" value="100"><span class="val" id="lReliefV">1.0</span><select id="lGrav" style="flex:0 0 auto;margin-left:6px;font-size:10px" title="Which way is DOWN for this surface's wet paint. An easel runs it down the screen. A canvas lying FLAT on a table has no in-plane gravity at all, so a puddle levels and spreads outward instead of running. A layer standing on a wall runs down that wall."><option value="1,90">easel</option><option value="0,90">flat</option><option value="1,270">up</option><option value="1,180">left</option><option value="1,0">right</option></select></div>
       <div class="row"><label title="Waterline mirror: reflects what stands above the surface">Reflect</label><input type="range" id="lRefl" min="0" max="100" value="0" title="Reflection strength"><span class="val" id="lReflV">.00</span>
         <label class="mu" style="flex:0 0 auto" title="Per-channel refraction: rainbow fringes at edges">◈</label><input type="range" id="lDisp" min="0" max="100" value="0" style="width:52px" title="Dispersion fringes"><span class="val" id="lDispV">.00</span></div>
       <div class="subh">Mask</div>
@@ -807,7 +813,8 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
     
     <div class="sect" data-tab="brush" id="brushSect">
       <h3 class="dup">Brush</h3>
-      <div class="row"><label>Color</label><input type="color" id="bColor" value="#2b7bff"></div>
+      <div class="row"><label>Color</label><input type="color" id="bColor" value="#2b7bff"><button id="bSqueeze" style="flex:0 0 auto;margin-left:6px;padding:0 5px;font-size:10px" title="Squeeze your swatch colours out as real mounds of paint, on their own surface beside the picture. They are not a picker, they are PAINT: drag across one to load your brush with it, drag one colour into another to mix them, and the mounds get dirty and go down as you take paint. The palette sits on its own surface, so it never appears in your picture or an export.">palette</button></div>
+      <div class="row" id="palDockRow" style="display:none;padding:0;flex-direction:column;gap:2px"><div style="display:flex;gap:6px;align-items:center;width:100%"><span id="palHint" style="font-size:10px;opacity:.75;flex:1 1 auto">palette — drag across a colour to load the brush</span><button id="palMix" style="font-size:10px;padding:0 5px" title="Mixing mode. Instead of loading the brush, a drag here MIXES the paint on the palette - drag one colour into another and they blend, exactly as they would on the canvas. Turn it off to go back to dipping.">mix here</button><button id="palClear" style="font-size:10px;padding:0 5px" title="Scrape the palette clean. Undoable - Ctrl+Z brings the paint back.">scrape</button></div><canvas id="palDock" title="Your palette. Drag across a mound to load the brush from it, and drag from one into another to mix - exactly as on the canvas, because it IS paint. It is drawn here rather than on the picture, so it never appears in an export." style="width:100%;height:76px;border-radius:5px;cursor:crosshair;display:block"></canvas></div>
       <div id="swatches" title="Colours you have used or picked — click to reuse, Alt-click to remove"
            style="display:flex;flex-wrap:wrap;gap:3px;margin:2px 0 4px"></div>
       <div id="brushGallery" style="display:flex;flex-wrap:wrap;gap:4px;margin:4px 0"></div>
@@ -821,14 +828,14 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
       <div class="row"><label>Size</label><input type="range" id="bSize" title="Brush size (px)" min="1" max="400" value="14"><span class="val" id="bSizeV" title="Click to switch between pixels and millimetres" style="cursor:pointer">14</span></div>
       <div class="row"><label>Opacity</label><input type="range" id="bOp" title="Brush opacity" min="1" max="100" value="100"><span class="val" id="bOpV">1.0</span></div>
       <div class="row"><label>Hardness</label><input type="range" id="bHard" title="Edge hardness — soft airbrush to crisp marker" min="0" max="100" value="70"><span class="val" id="bHardV">.70</span></div>
-      <div class="row"><label>Media</label><select id="bMedia" title="Give the paint a physical body: strokes build up thickness on the canvas, catch the light like real impasto, and gravity makes heavy loads sag. Oil holds tall glossy ridges, acrylic holds its shape matte, watercolor barely holds and runs downward, carrying pigment.">
-        <option value="">(none)</option><option value="oil">Oil</option>
-        <option value="acrylic">Acrylic</option><option value="water">Watercolor</option>
-      </select></div>
-      <div class="row" id="bLoadRow" style="display:none"><label>Load</label><input type="range" id="bLoad" min="10" max="150" value="60" title="How much paint is on the brush. Heavier loads build thicker ridges — and past what the medium can hold, gravity takes the excess downhill."><span class="val" id="bLoadV">.60</span></div>
-      <div class="row"><label>Smoothing</label><input type="range" id="bSmooth" title="Stroke smoothing: steadies shaky lines as you draw" min="0" max="95" value="0" style="min-width:0"><span class="val" id="bSmoothV">.00</span><label style="margin-left:6px;font-size:11px;white-space:nowrap" title="Inference — stroke starts snap to nearby stroke endpoints, and direction locks to VP rays, verticals, or horizontals">◎<input type="checkbox" id="bInfer" title="Inference assist: snaps stroke starts to nearby stroke ends and straightens toward vanishing points" style="vertical-align:middle"></label></div><div class="row"><label title="Ramp the stroke's width in at the start and out at the end — brush-pen feel; recorded into the stroke, so it replays and the joint tools still work on top">Taper</label><input type="range" id="bTaper" min="0" max="50" value="0" title="Fraction of the stroke that ramps at each end (0 = uniform width)"><span class="val" id="bTaperV">.00</span><label style="margin-left:4px;font-size:11px;white-space:nowrap" title="Shape assist: after a freehand stroke, offer to replace it with a clean circle, rectangle or line. Only offers when two independent recognisers agree — it stays quiet rather than guess. Press S to accept.">⬡<input type="checkbox" id="bShapeSnap" title="Shape assist: offer to tidy a freehand circle, rectangle or line into a clean one. Press S to accept the offer; it stays silent unless it is sure." style="vertical-align:middle"></label></div><div class="row" id="eModeRow" style="display:none"><label title="What the eraser removes">Eraser</label><select id="eMode" title="Eraser mode — pixels (classic), whole strokes, the topmost stroke only, paint-undo (restore the area to its pre-stroke state), or depth (carve the impasto body first). Shift+E cycles."><option value="pixel">▭ Pixels (classic)</option><option value="erase_strokes">✂ Whole strokes</option><option value="erase_top">≣ Topmost stroke (peel)</option><option value="erase_undo">⤺ Paint undo (history brush)</option><option value="erase_depth">⛏ Depth (carve impasto)</option></select></div>
-      <div class="row"><label>Rail</label><select id="bRail" title="Constrain freehand strokes to slide along this spline"></select><label class="inl" title="Stream strokes to the server while dragging (needs a fast machine). Off: a lightweight preview is drawn and the stroke applies on release.">Live</label><input type="checkbox" id="bLive" title="Send the stroke to the engine WHILE dragging (off = only on release)"><label class="inl" title="Symmetry — every stroke paints twice, mirrored across the canvas centre. Both copies are real strokes: select, nudge, and edit them independently.">⇋</label><select id="bMirror"><option value="">off</option><option value="v">↔</option><option value="h">↕</option><option value="3">3×</option><option value="6">6×</option><option value="8">8×</option></select></div>
-      <div class="row"><label>Selection</label><select id="bSel"></select>
+      <div class="row"><label title="What is ON the brush: an impasto medium (oil, acrylic, watercolor) or a MATERIAL — per-pixel stuff like gold, chrome or chalk, lit by the canvas. One body per stroke, so this is one choice.">Media</label><select id="bMedia" title="Give the paint a physical body. Impasto media build thickness that catches light and sags under gravity. MATERIALS lay stuff: metals gleam in the brush colour with dark shadow flanks (the brush colour is the albedo — gold gleams in YOUR gold), glossy dielectrics catch white highlights, chalk stays dead matte. Both build a paint body.">
+        <option value="">(none)</option><optgroup label="Set up a studio"><option value="setup:oil">oil painting…</option><option value="setup:water">watercolour…</option><option value="setup:ink">ink drawing…</option></optgroup><optgroup label="Impasto media"><option value="oil">Oil</option>
+        <option value="acrylic">Acrylic</option><option value="water">Watercolor</option></optgroup>
+      </select><button id="bMatCol" title="Set the brush colour to this material's classic colour (gold paints gold) — any colour works; the brush colour is the albedo" style="display:none;flex:0 0 22px;width:22px;height:20px;border:1px solid var(--line,#555);border-radius:4px;padding:0;cursor:pointer"></button></div>
+      <div class="row" id="bLoadRow" style="display:none"><label title="How much paint is on the brush for each stroke. Heavier loads build thicker ridges - and past what the medium can hold, gravity takes the excess downhill.">Load</label><input type="range" id="bLoad" min="10" max="150" value="60" title="How much paint the brush carries into each stroke."><span class="val" id="bLoadV">.60</span><label style="flex:0 0 auto;margin-left:8px" title="Wet-on-wet. At 0 the brush lays pure colour. Above 0 it PICKS UP the wet paint it crosses and carries it forward, so a stroke changes colour from the crossing onward - the way real paint mixes on the canvas rather than in a picker.">Mix</label><input type="range" id="bMix" min="0" max="100" value="0" style="flex:1 1 40px" title="How readily the brush lifts wet paint it crosses."><span class="val" id="bMixV">0</span></div><div class="row" id="bBrushModeRow" style="display:none"><label title="How the brush behaves as a physical object.">Brush</label><button id="bReal" style="flex:1 1 auto;font-size:10px" title="Turn the brush into a real one that RUNS OUT of paint. While it is on, the meter beside it shows how much is left; it empties as you work and eventually lays nothing. Reload by dragging across a colour in the palette strip below, or click the meter to fill it from the current colour. Off means an endless brush.">runs out</button><button id="bCharge" style="flex:0 0 62px;font-size:10px" title="Paint left on the brush. Click to fill it right up from the current colour." disabled>paint &#8734;</button><button id="bStrat" style="flex:1 1 auto;font-size:10px" title="Let paint build up past a layer's limit. A layer holds a finite amount; past that the surface stops getting thicker and a worked passage flattens to a plateau. With this on, the excess starts a new layer and the build-up keeps going - the way heavy impasto is built up in campaigns.">build up</button></div>
+      <div class="row"><label>Smoothing</label><input type="range" id="bSmooth" title="Stroke smoothing: steadies shaky lines as you draw" min="0" max="95" value="0" style="min-width:0"><span class="val" id="bSmoothV">.00</span><label style="margin-left:6px;font-size:11px;white-space:nowrap" title="Inference — stroke starts snap to nearby stroke endpoints, and direction locks to VP rays, verticals, or horizontals">snap <input type="checkbox" id="bInfer" title="Inference assist: snaps stroke starts to nearby stroke ends and straightens toward vanishing points" style="vertical-align:middle"></label></div><div class="row"><label title="Ramp the stroke's width in at the start and out at the end — brush-pen feel; recorded into the stroke, so it replays and the joint tools still work on top">Taper</label><input type="range" id="bTaper" min="0" max="50" value="0" title="Fraction of the stroke that ramps at each end (0 = uniform width)"><span class="val" id="bTaperV">.00</span><label style="margin-left:4px;font-size:11px;white-space:nowrap" title="Shape assist: after a freehand stroke, offer to replace it with a clean circle, rectangle or line. Only offers when two independent recognisers agree — it stays quiet rather than guess. Press S to accept.">shapes <input type="checkbox" id="bShapeSnap" title="Shape assist: offer to tidy a freehand circle, rectangle or line into a clean one. Press S to accept the offer; it stays silent unless it is sure." style="vertical-align:middle"></label></div><div class="row" id="eModeRow" style="display:none"><label title="What the eraser removes">Eraser</label><select id="eMode" title="Eraser mode — pixels (classic), whole strokes, the topmost stroke only, paint-undo (restore the area to its pre-stroke state), or depth (carve the impasto body first). Shift+E cycles."><option value="pixel">▭ Pixels (classic)</option><option value="erase_strokes">✂ Whole strokes</option><option value="erase_top">≣ Topmost stroke (peel)</option><option value="erase_undo">⤺ Paint undo (history brush)</option><option value="erase_depth">⛏ Depth (carve impasto)</option></select></div>
+      <div class="row"><label>Rail</label><select id="bRail" title="Constrain freehand strokes to slide along this spline"></select><label class="inl" title="Stream strokes to the server while dragging (needs a fast machine). Off: a lightweight preview is drawn and the stroke applies on release.">Live</label><input type="checkbox" id="bLive" title="Send the stroke to the engine WHILE dragging (off = only on release)"><label class="inl" title="Symmetry — every stroke paints twice, mirrored across the canvas centre. Both copies are real strokes: select, nudge, and edit them independently.">mirror</label><select id="bMirror" title="Mirror every stroke as you paint. Left-right and up-down mirror across the canvas centre; 'across' mirrors left-to-right and 'down' mirrors top-to-bottom; the N-way options repeat the stroke around the centre like a kaleidoscope. Every copy is a real stroke you can select and edit."><option value="">off</option><option value="v">across</option><option value="h">down</option><option value="3">3-way</option><option value="6">6-way</option><option value="8">8-way</option></select></div>
+      <div class="row"><label>Selection</label><select id="bSel" title="Paint only inside a selection, or leave it unset to paint anywhere on the layer. Selections are made with the marquee, wand and lasso tools."><option value="">anywhere</option></select>
         <label style="flex:0 0 auto;display:flex;gap:4px;align-items:center;font-size:11px">
           <input type="checkbox" id="bSelInv" title="Paint OUTSIDE the active selection instead of inside">inv</label></div>
     </div>
@@ -1103,6 +1110,113 @@ document.addEventListener('keydown',e=>{
   };
 });
 $('bColor').addEventListener('change',e=>rememberColor(e.target.value));
+// A palette of REAL PAINT, made from the colours you have actually used.
+// `recentCols` is the same list the swatch strip draws, so what you squeeze
+// out is what you see -- no second source of truth to drift.
+// THE DOCK. The palette is excluded from the canvas view and from exports,
+// so this strip is where it is seen and used. A drag here is a real stroke on
+// the palette layer at its real document coordinates -- the same paint, the
+// same physics, the same brush reservoir -- so dipping and mixing behave
+// identically to doing it on the canvas.
+let palBox=null, palMixing=false;
+function syncPalMode(){
+  const b=$('palMix'); if(!b)return;
+  b.style.opacity=palMixing?'1':'0.5';
+  $('palHint').textContent=palMixing
+    ? 'palette - drag one colour into another to mix them'
+    : 'palette - drag to load the brush, shift-drag to mix';
+}
+async function refreshDock(){
+  const row=$('palDockRow'), cv=$('palDock');
+  try{
+    const r=await fetch('/api/palette.png?t='+Date.now());
+    if(!r.ok){
+      // EMPTY STATE, always shown. Hiding the strip until a palette existed
+      // meant nobody discovered the palette existed: a reviewer looked for it
+      // and reported they could not find it anywhere. An empty shelf that
+      // says what it is for is how you learn the feature is there.
+      // Hidden when empty: an always-present shelf costs panel height and
+      // the Brush half has a no-scroll budget it was already at. Discovery
+      // happens in the first-run tip and in the Media setups instead, both
+      // of which cost nothing.
+      palBox=null; cv.style.display='none';
+      const wantsPaint=!!$('bMedia').value;
+      row.style.display=wantsPaint?'flex':'none';
+      $('palMix').style.display='none'; $('palClear').style.display='none';
+      if(wantsPaint)$('palHint').textContent=
+        'palette - press "palette" above to squeeze out paint you can dip into';
+      return;
+    }
+    $('palMix').style.display=''; $('palClear').style.display='';
+    cv.style.display='block';
+    palBox=(r.headers.get('X-Palette-Box')||'').split(',').map(Number);
+    const b=await r.blob(), im=new Image();
+    im.onload=()=>{ cv.width=im.width; cv.height=im.height;
+      // follow the image's proportions rather than a fixed height: a
+      // canvas cannot letterbox, it STRETCHES, so a fixed 76px strip
+      // rendered round mounds as ovals (measured 33% distortion)
+      cv.style.height=Math.round(Math.max(46,Math.min(120,
+        (cv.clientWidth||330)*im.height/im.width)))+'px';
+      cv.getContext('2d').drawImage(im,0,0); row.style.display='flex'; syncPalMode(); };
+    im.src=URL.createObjectURL(b);
+  }catch(e){ row.style.display='none'; palBox=null; }
+}
+function dockToDoc(e){
+  const cv=$('palDock'), r=cv.getBoundingClientRect();
+  if(!palBox||palBox.length!==4)return null;
+  const fx=(e.clientX-r.left)/r.width, fy=(e.clientY-r.top)/r.height;
+  return [palBox[0]+fx*(palBox[2]-palBox[0]), palBox[1]+fy*(palBox[3]-palBox[1])];
+}
+(function(){
+  const cv=$('palDock'); let path=null, dragShift=false;
+  cv.addEventListener('pointerdown',e=>{ const p=dockToDoc(e); if(!p)return;
+    path=[p]; dragShift=e.shiftKey; cv.setPointerCapture(e.pointerId); e.preventDefault(); });
+  cv.addEventListener('pointermove',e=>{ if(!path)return;
+    const p=dockToDoc(e); if(p)path.push(p); });
+  cv.addEventListener('pointerup',async e=>{
+    if(!path||path.length<2){ path=null; return; }
+    const pts=path.slice(); path=null;
+    // DIP or MIX. Both are ordinary painting on the palette surface, which is
+    // why mixing there behaves exactly as it does on the canvas.
+    // Shift mixes, without switching mode. A modal palette means remembering
+    // which state it is in before every drag; a modifier means you never do.
+    const mixing = palMixing || e.shiftKey || dragShift;
+    const body=mixing
+      ? {points:pts, mode:'blend', radius:+$('bSize').value*0.9, opacity:0.7}
+      : {points:pts, color:hex2rgb($('bColor').value),
+         radius:+$('bSize').value*0.6, media:(brushBody().media||'oil'),
+         load:1.2, real_brush:true, mix:1.0};
+    const r=await api('/api/palette/paint',{...J,body:JSON.stringify(body)});
+    if(r&&r.error)return;
+    // A DIP MUST CHANGE THE COLOUR YOU PAINT WITH. Painting always sends the
+    // colour swatch, so with "runs out" off a dip did nothing at all -- the
+    // user drags through red, paints, and gets the old colour with no hint
+    // why. Putting the dipped colour in the swatch makes the dip work in
+    // both modes AND shows what is on the brush, which nothing did before.
+    if(!mixing && r && r.brush_state && r.brush_state.color){
+      const hex='#'+r.brush_state.color.map(v=>
+        Math.round(Math.max(0,Math.min(1,v))*255).toString(16).padStart(2,'0')).join('');
+      $('bColor').value=hex; if($('txColor'))$('txColor').value=hex;
+      rememberColor(hex); setStatus('brush loaded '+hex.toUpperCase());
+    }
+    await refresh(); refreshDock();
+  });
+})();
+$('palMix').onclick=()=>{ palMixing=!palMixing; syncPalMode();
+  toast(palMixing?'Mixing on the palette - drag one colour into another'
+                 :'Dipping - drag across a colour to load the brush'); };
+$('palClear').onclick=async()=>{
+  const r=await api('/api/palette/clear',{...J,body:'{}'});
+  if(r&&r.error)return; palBox=null; $('palDockRow').style.display='none';
+  toast('Palette scraped clean - Ctrl+Z brings it back'); };
+$('bSqueeze').onclick=async()=>{
+  const hexes=(recentCols.length?recentCols:[$('bColor').value]).slice(0,8);
+  const r=await api('/api/palette',{...J,body:JSON.stringify(
+    {colors:hexes.map(hex2rgb), media:(brushBody().media||'oil')})});
+  if(r&&r.error){toast(r.error);return;}
+  await refresh(); drawComposite(); refreshDock();
+  toast('Palette squeezed out into the dock - dip a brush in it, and hide the layer when you want it out of the way');
+};
 function ssOne(){
   if(ssStrokes.length!==1){toast('select exactly one stroke for rig/animate');return null;}
   return ssStrokes[0].id;
@@ -1182,7 +1296,124 @@ $('firstRunTour').onclick=()=>{ dismissFirstRun(); toggleShortcuts(); };
 $('selBadgeKeep').onclick=()=>$('selKeep').click();
 $('selBadgeClear').onclick=()=>$('selClear').click();
 $('ssPoints').onchange=()=>{ ptSel=[]; repaintCanvas(); };
-$('bMedia').onchange=e=>{ $('bLoadRow').style.display=e.target.value?'flex':'none'; };
+// ONE select carries both impasto media and materials -- they are mutually
+// exclusive bodies for the brush, and a single dropdown is the honest UI for
+// a single choice (two dropdowns clearing each other measured 24px taller
+// and broke the strict no-scroll contract for the Brush half at 1440x900).
+// Material values wear a 'mat:' prefix so a future name collision between a
+// media and a material cannot corrupt the stroke payload.
+function brushBody(){ const v=$('bMedia').value;
+  return v.startsWith('mat:')?{material:v.slice(4)}:{media:v||undefined}; }
+function matByName(n){ return (state.materials||[]).find(m=>m.name===n); }
+function syncMatChip(){
+  const m=matByName(brushBody().material||''), b=$('bMatCol');
+  if(m&&m.color){ const hex='#'+m.color.map(c=>Math.round(c*255).toString(16).padStart(2,'0')).join('');
+    b.style.display=''; b.style.background=hex; b.setAttribute('data-hex',hex); }
+  else b.style.display='none';
+}
+// STUDIO SETUPS. Painting properly meant finding five separate switches --
+// a medium, real brush, the paper, a palette to dip in, sometimes strata.
+// They are offered here because this menu is where the intent forms: someone
+// opening it to try oil is exactly the person who wants the rest of it.
+const STUDIOS={
+  oil:  {media:'oil',   paper:'cold_press', real:true,  strata:false, mix:35,
+         cols:['#d11a0f','#f8f5ee','#f0c00f','#16278f','#0f0c0c','#3b7526'],
+         says:'Oil ready. Drag across a colour in the palette strip below to load the brush, then paint.'},
+  water:{media:'water', paper:'rough',      real:false, strata:false, mix:70,
+         cols:['#1d4fb0','#b3311f','#e0a806','#2d6b34','#3a2c22'],
+         says:'Watercolour ready on rough paper. Paint wet into wet - washes spread and darken at their edges.'},
+  ink:  {media:'',      paper:'hot_press',  real:false, strata:false, mix:0,
+         cols:['#111114','#6a6a72','#b8b8bf'],
+         says:'Ink ready on smooth paper. Crisp lines - size and pressure do the work.'}};
+async function applyStudio(k){
+  const st=STUDIOS[k]; if(!st)return;
+  $('bMedia').value=st.media;
+  $('bLoadRow').style.display=st.media?'flex':'none';
+  $('bBrushModeRow').style.display=st.media?'flex':'none';
+  $('bMix').value=st.mix; $('bMixV').textContent=st.mix;
+  if(realBrush!==st.real)$('bReal').click();
+  const p=await api('/api/paper',{...J,body:JSON.stringify({paper:st.paper})});
+  if(p&&!p.error&&$('dPaper'))$('dPaper').value=st.paper;
+  // deliberately NOT touching strata: turning an advanced feature on
+  // silently is what bred the stray 'Palette ~2..~6' layers, and it is not
+  // something a first-time painter asked for
+  st.cols.forEach(h=>rememberColor(h));
+  const r=await api('/api/palette',{...J,body:JSON.stringify(
+    {colors:st.cols.map(hex2rgb), media:st.media||'oil'})});
+  await refresh(); drawComposite(); refreshDock(); syncMatChip();
+  toast(st.says);
+}
+$('bMedia').onchange=e=>{
+  const v=e.target.value;
+  if(v.startsWith('setup:')){ applyStudio(v.slice(6)); return; }
+  $('bLoadRow').style.display=v?'flex':'none';
+  $('bBrushModeRow').style.display=v?'flex':'none'; syncMatChip(); refreshDock(); };
+$('bMix').addEventListener('input',e=>{ $('bMixV').textContent=e.target.value; });
+// what the blade does; the knife tool sends this alongside mode:'knife'
+let knifeMode='smooth';
+function syncKnife(){ const b=$('tKnife'); if(!b)return;
+  b.textContent={smooth:'\u2015',push:'\u203a',scrape:'\u2044',spread:'\u2248'}[knifeMode]||'/';
+  b.setAttribute('data-blade',knifeMode); }
+function cycleKnife(){ const m=['smooth','push','scrape','spread'];
+  knifeMode=m[(m.indexOf(knifeMode)+1)%m.length]; syncKnife();
+  toast('Knife: '+knifeMode+' \u2014 '+({smooth:'level the surface, and cure stepping between layers',
+    push:'plough a ridge ahead of the blade',scrape:'take the tops off',
+    spread:'drag it into a thin film'})[knifeMode]); }
+$('tKnife').addEventListener('contextmenu',e=>{ e.preventDefault(); cycleKnife(); });
+// clicking the tool when it is ALREADY active cycles the blade, so the
+// mode is reachable without knowing to right-click
+$('tKnife').addEventListener('click',()=>{ if(tool==='knife') cycleKnife(); else syncKnife(); });
+syncKnife();
+$('bStrat').onclick=async()=>{
+  const on=!(state.auto_stratum);
+  const r=await api('/api/stratum',{...J,body:JSON.stringify({on})});
+  if(r&&r.error){toast(r.error);return;}
+  state.auto_stratum=r.auto_stratum; $('bStrat').style.opacity=r.auto_stratum?'1':'0.45';
+  toast(r.auto_stratum
+    ?'Building up: when a layer fills with paint, the extra starts a new one below it in the list, named "build-up 2", "build-up 3" and so on'
+    :'Paint now stops at the layer limit');
+};
+// REAL BRUSH MODE: the brush is a physical object holding a finite amount of
+// paint. The meter is the honest readout -- if it says empty, strokes lay
+// nothing, and you go find a thick passage to scrape or dip in the palette.
+let realBrush=false;
+function syncCharge(){
+  const b=$('bCharge'), on=realBrush;
+  b.disabled=!on; $('bReal').style.opacity=on?'1':'0.45';
+  const c=(state.brush_state&&state.brush_state.charge);
+  noteBrushCharge(c);
+  // say what it IS, not just a number: "paint 62%" reads as something that
+  // can run out, where a bare "62%" reads as nothing in particular
+  b.style.minWidth='58px';
+  b.textContent=on?('paint '+(c==null?'?':Math.round(c*100)+'%')):'paint ∞';
+  b.style.color=(on&&c!=null&&c<0.08)?'var(--warn,#e88)':'';
+}
+$('bReal').onclick=()=>{ realBrush=!realBrush; syncCharge();
+  toast(realBrush?'Real brush: paint runs out — scrape a thick area or dip to refill'
+                 :'Real brush off'); };
+// A stroke that lays nothing is the most confusing thing the app can do, so
+// say why once per dry spell rather than letting the user keep painting air.
+let _dryWarned=false;
+function noteBrushCharge(c){
+  if(!realBrush){_dryWarned=false;return;}
+  if(c!=null&&c<0.02&&!_dryWarned){ _dryWarned=true;
+    toast('the brush is out of paint - drag it through a thick area to reload, or click the charge meter to dip'); }
+  if(c!=null&&c>0.15)_dryWarned=false;
+}
+$('bCharge').onclick=async()=>{
+  const r=await api('/api/brush_load',{...J,body:JSON.stringify(
+    {color:hex2rgb($('bColor').value),amount:1.0})});
+  if(r&&r.brush_state){ state.brush_state=r.brush_state; syncCharge(); toast('Brush loaded'); }
+};
+function syncMaterialMenu(){
+  const sl=$('bMedia');
+  if(sl.querySelector('optgroup[label="Materials"]')||!(state.materials||[]).length)return;
+  const g=document.createElement('optgroup'); g.setAttribute('label','Materials');
+  state.materials.forEach(m=>{ const o=new Option(m.name.replace('_',' '),'mat:'+m.name); g.appendChild(o); });
+  sl.appendChild(g);
+}
+$('bMatCol').onclick=()=>{ const hex=$('bMatCol').getAttribute('data-hex'); if(!hex)return;
+  $('bColor').value=hex; $('bColor').dispatchEvent(new Event('change')); };
 $('viewMode').onchange=async e=>{
   const r=await api('/api/view3d',{...J,body:JSON.stringify({mode:e.target.value})});
   if(r&&r.error){toast(r.error);return;}
@@ -1512,6 +1743,11 @@ function refreshFieldSrcOptions(){
   sel_.innerHTML=opts.join(''); sel_.value=cur;
 }
 $('lRelief').oninput=e=>{ $('lReliefV').textContent=(e.target.value/100).toFixed(1); lProp({relief:e.target.value/100}); };
+// One control, not two sliders: nobody reasons about their canvas in
+// gravity degrees, and the two extra sliders broke the Layer panel's
+// no-scroll budget. The named surfaces are the real vocabulary.
+$('lGrav').onchange=e=>{ const [g,a]=e.target.value.split(',').map(Number);
+  lProp({gravity:g, gravity_angle:a}); };
 $('lIor').oninput=e=>{$('lIorV').textContent=(e.target.value/100).toFixed(2); lProp({vol_ior:e.target.value/100});};
 $('lDen').oninput=e=>{$('lDenV').textContent=(e.target.value/100).toFixed(2).slice(1); lProp({vol_density:e.target.value/100});};
 $('lSoak').oninput=e=>{$('lSoakV').textContent=(e.target.value/100).toFixed(2).slice(1); lProp({absorbency:e.target.value/100});};
@@ -2457,6 +2693,14 @@ async function refresh(){
   $('obsBtn').style.display=caps.obs===false?'none':'';
   state._bseq=Date.now(); _syncCapButtons(); drawLayers(); drawGroups(); drawMasks(); drawSelections(); drawBrushes(); drawSplinesPanel(); drawActiveSelCap(); fillTransformTargets(); fitCanvas(); drawComposite(); drawOutput(); syncBakeTargets(); syncNodePaintTool();
   const bl=$('lBlend'); if(!bl.options.length) state.blend_modes.forEach(m=>bl.add(new Option(m,m)));
+  { const pp=$('dPaper');
+    if(!pp.options.length&&(state.papers||[]).length)
+      state.papers.forEach(m=>pp.add(new Option(m.replace('_',' '),m)));
+    if(state.paper)pp.value=state.paper; }
+  syncMaterialMenu();
+  syncCharge();
+  if(state.palette_ready&&!palBox)refreshDock();
+  if($('bStrat'))$('bStrat').style.opacity=state.auto_stratum?'1':'0.45';
   const l=state.layers.find(l=>l.id===sel);
   if(l){bl.value=l.blend;$('lOp').value=l.opacity*100;$('lOpV').textContent=l.opacity.toFixed(1);}
   buildAddMenu();
@@ -2501,7 +2745,10 @@ function dropLayerOn(srcId,dstId){
 }
 function drawLayers(){
   const box=$('layers');
-  const want=[...state.layers].reverse();
+  // The palette is DOCKED, not part of the picture, so it has no business
+  // in the layer list -- it only read as junk named "Palette" that could
+  // not be interpreted.
+  const want=[...state.layers].reverse();   // the palette is its own surface now
   // rebuild when layers OR the tree structure (groups, clip runs) change;
   // otherwise swap thumb srcs in place
   const groupSig=(state.groups||[]).map(g=>g.id+':'+g.layers.join('.')).join('|');
@@ -2699,6 +2946,9 @@ function drawLayers(){
       setv('lEmit', Math.round((l.emissive||0)*100), (l.emissive||0).toFixed(1));
       setv('lRefl', Math.round((l.reflect||0)*100), (l.reflect||0).toFixed(2).slice(1));
       setv('lRelief', Math.round((l.relief!==undefined?l.relief:1)*100), (l.relief!==undefined?l.relief:1).toFixed(1));
+      { const g=(l.gravity===undefined||l.gravity===null)?1:l.gravity;
+        const a=(l.gravity_angle===undefined||l.gravity_angle===null)?90:l.gravity_angle;
+        $('lGrav').value=(g<0.01?'0,90':('1,'+Math.round(a))); }
       $('lOptical').checked=!!l.optical;
       const isMedia=['inkwater','smoke','fire'].includes(l.vol_kind);
       $('rowMediaRate').style.display=isMedia?'':'none';
@@ -3499,7 +3749,11 @@ function strokeBody(points,record){
     radius:+$('bSize').value,
     opacity:tool==='fx'?0:+$('bOp').value/100,   // FX: record the path, no ink
     hardness:+$('bHard').value/100,
-    media:((tool==='brush'||tool==='erase')&&$('bMedia').value)||undefined,
+    ...(tool==='brush'?brushBody():
+        tool==='erase'?{media:brushBody().media}:{}),
+    knife:(tool==='knife'&&knifeMode)||undefined,
+    mix:(tool==='brush'&&+$('bMix').value/100)||undefined,
+    real_brush:(tool==='brush'&&realBrush)||undefined,
     load:+$('bLoad').value/100,
     erase:tool==='erase',
     target_mask:(paintTarget==='mask'
@@ -3507,7 +3761,7 @@ function strokeBody(points,record){
     stroke_taper:(tool==='brush'?+$('bTaper').value/100:0)||undefined,
     selection:$('bSel').value||undefined,sel_invert:$('bSelInv').checked,
     brush:curBrush||undefined,
-    mode:(tool==='erase'&&$('eMode').value!=='pixel'?$('eMode').value:tool==='smudge'?'smudge':tool==='clone'?'clone':tool==='heal'?'heal':tool==='nodepaint'?'node':'brush'),
+    mode:(tool==='erase'&&$('eMode').value!=='pixel'?$('eMode').value:tool==='knife'?'knife':tool==='blend'?'blend':tool==='smudge'?'smudge':tool==='clone'?'clone':tool==='heal'?'heal':tool==='nodepaint'?'node':'brush'),
     source:tool==='clone'?{offset:cloneOffset||[0,0]}:undefined,
     node:tool==='nodepaint'?nodePaintSource():undefined,
     patch_ok:true,
@@ -3561,7 +3815,7 @@ async function flushStroke(final){
   // brush/erase are previewed exactly now, so skip the mid-stroke composite
   // round trip -- it refetched and decoded a full PNG every 140ms, the main
   // source of "slow" on a large canvas. smudge/clone keep it: no local preview.
-  if(final||tool==='smudge'||tool==='clone'||tool==='heal')drawComposite();
+  if(final||tool==='knife'||tool==='blend'||tool==='smudge'||tool==='clone'||tool==='heal')drawComposite();
 }
 const SELTOOLS={rect:1,ellipse:1,wand:1,lum:1,obj:1};
 async function runSelect(tool,params){
@@ -3582,11 +3836,22 @@ $('canvasPane').addEventListener('wheel',e=>{
   setZoom(e.deltaY<0?1.12:1/1.12, e.clientX-r.left, e.clientY-r.top);
 },{passive:false});
 let panDrag=null;
+// STYLUS PRESSURE. The engine has always had a per-point width channel; the
+// UI simply never fed it, so every stroke arrived at a flat 1.0. Only a pen
+// reports a meaningful e.pressure -- a mouse reports 0.5 (or 0 while
+// hovering), so treating it as pressure would make every mouse stroke render
+// at half weight. Mice therefore always paint at full pressure, and pens get
+// a gentle curve so light contact stays genuinely light.
+function penPressure(e){
+  if(!e||e.pointerType!=='pen')return 1.0;
+  const raw=(typeof e.pressure==='number'&&e.pressure>0)?e.pressure:0.5;
+  return Math.max(0.08, Math.min(1.5, 0.12+1.25*Math.pow(raw,1.35)));
+}
 $('canvasPane').addEventListener('pointerdown',e=>{
   if(e.button===1||spaceHeld){ panDrag={x:e.clientX,y:e.clientY,px:panX,py:panY};
     $('canvasPane').setPointerCapture(e.pointerId); e.preventDefault(); }
 });
-const RINGTOOLS={brush:1,erase:1,smudge:1,clone:1,nudge:1,nodepaint:1,fx:1};
+const RINGTOOLS={brush:1,erase:1,knife:1,blend:1,smudge:1,clone:1,nudge:1,nodepaint:1,fx:1};
 function updateBrushRing(e){
   const ring=$('brushRing'), core=$('brushRingCore');
   if(!RINGTOOLS[tool]||spaceHeld||panDrag){ ring.style.display=core.style.display='none'; return; }
@@ -3715,6 +3980,7 @@ vc.addEventListener('pointerdown',e=>{
     });
     if(best){_p0=[best[0],best[1]]; inferSnapPt=best;}
   }
+  if(_p0.length<3)_p0=[_p0[0],_p0[1],penPressure(e)];
   stroke=[_p0];
   sent=0; strokeFirst=true; strokeOrigin=stroke[0]; strokeError=null;
   if(tool==='brush'||tool==='erase')beginStrokeMask();
@@ -3779,14 +4045,14 @@ vc.addEventListener('pointermove',e=>{
     marquee.x1=x; marquee.y1=y; repaintCanvas(); drawMarquee(); return;
   }
   if(!stroke)return;
-  let p=canvasXY(e);
+  let p=canvasXY(e); p=[p[0],p[1],penPressure(e)];
   const railSp=$('bRail').value&&splineById($('bRail').value);
   if(railSp&&(tool==='brush'||tool==='erase'||tool==='smudge'||tool==='clone'))
     p=nearestOnSpline(railSp,p);                        // ride the rail
   const sm=+$('bSmooth').value/100;                     // lazy brush: EMA toward the pointer
   if(sm>0){
-    smoothPt=smoothPt?[smoothPt[0]+(p[0]-smoothPt[0])*(1-sm), smoothPt[1]+(p[1]-smoothPt[1])*(1-sm)]:p;
-    p=smoothPt;
+    smoothPt=smoothPt?[smoothPt[0]+(p[0]-smoothPt[0])*(1-sm), smoothPt[1]+(p[1]-smoothPt[1])*(1-sm)]:[p[0],p[1]];
+    p=[smoothPt[0],smoothPt[1],p[2]];   // smoothing must not drop pressure
   }
   const _inferOn=$('bInfer')&&$('bInfer').checked;
   if(((PERSP.enabled&&PERSP.snap&&(PERSP.vps||[]).length)||_inferOn)&&stroke.length>=1
@@ -4482,7 +4748,31 @@ function previewDot(e){
   stampMask(x,y); paintStrokePreview();
 }
 function hex2rgb(h){return [1,3,5].map(i=>parseInt(h.slice(i,i+2),16)/255);}
-const TOOLBTN={fx:'tFxBrush',nodepaint:'tNodePaint',strokesel:'tStrokeSel',nudge:'tNudge',pick:'tPick',brush:'tBrush',erase:'tErase',smudge:'tSmudge',clone:'tClone',heal:'tHeal',stamp:'tStamp',rect:'tRect',ellipse:'tEllipse',wand:'tWand',lum:'tLum',obj:'tObj',spline:'tSpline',transform:'tTransform',fill:'tFill',text:'tText'};
+// Stroke groups: a blended passage is many marks that mean one thing.
+async function groupSelectedStrokes(){
+  if(!ssStrokes.length){toast('Select strokes first');return;}
+  const r=await api('/api/stroke_group',{...J,body:JSON.stringify(
+    {action:'create',strokes:ssStrokes.slice()})});
+  if(r&&r.error){toast(r.error);return;}
+  if(r&&r.group){ssStrokes=[r.group];await refresh();toast('Grouped');}
+}
+async function ungroupSelectedStrokes(){
+  const g=(state.stroke_groups||[]).find(x=>ssStrokes.includes(x.id));
+  if(!g){toast('No group selected');return;}
+  const r=await api('/api/stroke_group',{...J,body:JSON.stringify(
+    {action:'dissolve',group:g.id})});
+  if(r&&r.error){toast(r.error);return;}
+  if(r&&r.strokes){ssStrokes=r.strokes.slice();await refresh();toast('Ungrouped');}
+}
+$('ssGroup').onclick=groupSelectedStrokes;
+document.addEventListener('keydown',e=>{
+  if(!(e.ctrlKey||e.metaKey)||String(e.key).toLowerCase()!=='g')return;
+  if(tool!=='strokesel')return;
+  e.preventDefault();
+  (e.shiftKey?ungroupSelectedStrokes:groupSelectedStrokes)();
+});
+$('ssUngroup').onclick=ungroupSelectedStrokes;
+const TOOLBTN={fx:'tFxBrush',nodepaint:'tNodePaint',strokesel:'tStrokeSel',nudge:'tNudge',pick:'tPick',brush:'tBrush',erase:'tErase',knife:'tKnife',blend:'tBlend',smudge:'tSmudge',clone:'tClone',heal:'tHeal',stamp:'tStamp',rect:'tRect',ellipse:'tEllipse',wand:'tWand',lum:'tLum',obj:'tObj',spline:'tSpline',transform:'tTransform',fill:'tFill',text:'tText'};
 const TOOLTIPS={fx:'FX brush — F · the stroke grows an effect instead of pigment · pick a preset in the Tool tab · retune in the node graph',nodepaint:'Node paint — J · strokes reveal the Paint out node\'s image · pick the source node in the Tool tab',strokesel:'Select strokes — K · click a stroke, then grow the set forward/back through paint order',nudge:'Nudge — N · drags the stroke PATHS, not the pixels: refine sketch lines without smudge swirl',pick:'Eyedropper — I · click to pick a colour · Alt-click while brushing does the same',brush:'Brush — B',erase:'Eraser — E',smudge:'Smudge — S',clone:'Clone — C · Alt-click sets source',heal:'Heal — H · paint over a blemish; it repairs from the surroundings',stamp:'Stamp — U · press the selected sticker on · capture new ones from a layer or selection in the Tool tab',
   rect:'Rectangle select · Shift = square',ellipse:'Ellipse select · Shift = circle',wand:'Select by color',
   lum:'Select by brightness',obj:'Select object',spline:'Spline — P · click adds points · Esc finishes',
@@ -5400,7 +5690,7 @@ async function doText(x,y){
   setStatus('✓ '+r.glyphs+' glyphs'+(body.spline?' along the path':''));
   refresh(); refreshNodePreviews();
 }
-const SHORTCUTS=[['Shift+P','perspective guides on/off'],['S','Accept a shape-assist offer (tidy the stroke)'],['Shift+Space','Play / pause the timeline'],[', / .','Step one frame back / forward'],['Home / End','Jump to the first / last frame'],["B / E", "Brush / Eraser"], ["S / C", "Smudge / Clone"], ["M / W", "Marquee / Magic wand"], ["N", "Nudge — move strokes, not pixels"], ["K", "Select strokes (Shift-click adds)"], ["I", "Eyedropper (Alt-click while brushing)"], ["Swatch strip", "Click a recent colour to reuse · Alt-click to remove"], ["Del / Backspace", "Clear the selection (whole layer if none)"], ["Ctrl+click thumb", "Load layer alpha as selection"], ["Alt+click eye", "Solo a layer (again restores)"], ["Drag a layer row", "Reorder layers"], ["M (nodes)", "Bypass / re-enable a node"], ["Shift-drag (nodes)", "Box-select nodes"], ["Ctrl+C / V (nodes)", "Copy / paste nodes with their links"], ["Drop a wire on empty space", "Search for a node and auto-connect it"], ["Drop a node on a wire", "Insert it into that link"], ["Ctrl-drag (nodes)", "Slice through wires to cut them"], ["Ctrl+drag (nodes)", "Slash across wires to cut them"], ["Ctrl+Shift+N", "New layer"], ["Ctrl+1", "Zoom 100%"], ["V", "Transform tool"], ["G", "Fill (bucket)"], ["T", "Text tool"], ["P", "Spline pen"], ["Ctrl+C / X / V", "Copy / Cut / Paste selection"], ["Ctrl+J", "Duplicate layer"], ["Ctrl+D", "Deselect · duplicate node (in Nodes)"], ["Ctrl+Z / Shift+Z / Y", "Undo / Redo"], ["Ctrl+S", "Save workspace"], ["Ctrl+O", "Open image"], ["Ctrl+Shift+E", "Merge visible"], ["Esc", "Reset transform → finish spline → deselect"], ["Enter", "Apply transform"], ["[ / ]", "Brush smaller / larger"], ["+ / − / 0", "Zoom in / out / fit"], ["Ctrl+0", "Fit on screen"], ["Stroke panel", "width slider: swells selected joints, or tapers the whole stroke"], ["Strokes selected", "V transform · Ctrl+C/X/V copy/cut/paste · Del delete · panel: duplicate, to layer, smooth"], ["File ▸ Export at size…", "Render at any resolution, not just canvas size"], ["File ▸ Export frame sequence…", "The animation as numbered PNGs — media simulated on the same timeline playback uses, plus an ffmpeg line"], ["F", "Frame nodes (in Nodes)"], ["Del", "Delete node (in Nodes)"], ["?", "This overlay"], ["Drag & drop", "Images → layers · .lews → workspace · .obj/.glb → 3D models"], ["F", "FX brush — strokes grow effects (grass, drips, embers)"], ["Brush ▸ Media", "Impasto — oil/acrylic/watercolor build real thickness; gravity makes heavy loads run"], ["Brush ▸ ⇋", "Symmetry — strokes paint a mirrored twin (its own editable stroke)"], ["Layer row 🔒 / ◒", "Alpha lock · clipping mask (clips to the layer below)"], ["Editors chip", "Who's here — tabs count as one person; the host can kick"]];
+const SHORTCUTS=[['Shift+P','perspective guides on/off'],['S','Accept a shape-assist offer (tidy the stroke)'],['Shift+Space','Play / pause the timeline'],[', / .','Step one frame back / forward'],['Home / End','Jump to the first / last frame'],["B / E", "Brush / Eraser"], ["S / C", "Smudge / Clone"], ["M / W", "Marquee / Magic wand"], ["N", "Nudge — move strokes, not pixels"], ["K", "Select strokes (Shift-click adds)"], ["I", "Eyedropper (Alt-click while brushing)"], ["Swatch strip", "Click a recent colour to reuse · Alt-click to remove"], ["Del / Backspace", "Clear the selection (whole layer if none)"], ["Ctrl+click thumb", "Load layer alpha as selection"], ["Alt+click eye", "Solo a layer (again restores)"], ["Drag a layer row", "Reorder layers"], ["M (nodes)", "Bypass / re-enable a node"], ["Shift-drag (nodes)", "Box-select nodes"], ["Ctrl+C / V (nodes)", "Copy / paste nodes with their links"], ["Drop a wire on empty space", "Search for a node and auto-connect it"], ["Drop a node on a wire", "Insert it into that link"], ["Ctrl-drag (nodes)", "Slice through wires to cut them"], ["Ctrl+drag (nodes)", "Slash across wires to cut them"], ["Ctrl+Shift+N", "New layer"], ["Ctrl+1", "Zoom 100%"], ["V", "Transform tool"], ["G", "Fill (bucket)"], ["T", "Text tool"], ["P", "Spline pen"], ["Ctrl+C / X / V", "Copy / Cut / Paste selection"], ["Ctrl+J", "Duplicate layer"], ["Ctrl+D", "Deselect · duplicate node (in Nodes)"], ["Ctrl+Z / Shift+Z / Y", "Undo / Redo"], ["Ctrl+S", "Save workspace"], ["Ctrl+O", "Open image"], ["Ctrl+Shift+E", "Merge visible"], ["Esc", "Reset transform → finish spline → deselect"], ["Enter", "Apply transform"], ["[ / ]", "Brush smaller / larger"], ["+ / − / 0", "Zoom in / out / fit"], ["Ctrl+0", "Fit on screen"], ["Stroke panel", "width slider: swells selected joints, or tapers the whole stroke"], ["Strokes selected", "V transform · Ctrl+C/X/V copy/cut/paste · Del delete · panel: duplicate, to layer, smooth"], ["File ▸ Export at size…", "Render at any resolution, not just canvas size"], ["File ▸ Export frame sequence…", "The animation as numbered PNGs — media simulated on the same timeline playback uses, plus an ffmpeg line"], ["F", "Frame nodes (in Nodes)"], ["Del", "Delete node (in Nodes)"], ["?", "This overlay"], ["Drag & drop", "Images → layers · .lews → workspace · .obj/.glb → 3D models"], ["F", "FX brush — strokes grow effects (grass, drips, embers)"], ["Brush ▸ Media", "Impasto media build real thickness (gravity runs heavy loads) — or pick a MATERIAL (gold, chrome, chalk…): per-pixel stuff lit by the canvas, gleaming in your brush colour"], ["Q", "Palette knife \u2014 shapes the paint already there, across every layer the body spans · click the tool again (or right-click) to cycle the blade: smooth / push / scrape / spread"], ["Y", "Blender \u2014 a clean brush that works the WET paint already on the canvas; unlike Smudge it records as a stroke, so nothing loses its stroke editing"], ["Colour ▸ palette", "Squeeze your swatch colours out as real mounds of paint \u2014 dip a brush in one, drag it through another to mix"], ["Brush ▸ \ud83d\udd8c", "Real brush \u2014 the brush holds a finite amount of paint; drag a dry one through a thick pile to reload, or click the charge meter to dip in the palette"], ["Brush ▸ \u2261", "Build past a layer\u2019s limit \u2014 the excess starts a new layer instead of flattening to a plateau"], ["Brush ▸ Mix", "Wet-on-wet \u2014 the brush picks up paint it crosses and carries it forward"], ["Layer ▸ Paper", "The stock everything sits on: rough and cold-press granulate a wash and break dry-brush up hard; hot-press and smooth stay even"], ["Layer ▸ Grav", "Which way is down for this surface\u2019s wet paint \u2014 easel, flat on a table (paint levels instead of running), or a wall"], ["Brush ▸ ⇋", "Symmetry — strokes paint a mirrored twin (its own editable stroke)"], ["Layer row 🔒 / ◒", "Alpha lock · clipping mask (clips to the layer below)"], ["Editors chip", "Who's here — tabs count as one person; the host can kick"]];
 function toggleShortcuts(){
   const b=$('shortcutsBack');
   if(b.style.display==='none'){
@@ -5704,6 +5994,11 @@ $('addLayer').onclick=async e=>{const body={action:'add'};
   refresh();};
 $('delLayer').onclick=async()=>{await api('/api/layer',{...J,body:JSON.stringify({action:'remove',id:sel})});sel=null;refresh();};
 $('lBlend').onchange=e=>api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:sel,blend:e.target.value})}).then(refresh);
+$('dPaper').onchange=async e=>{
+  const r=await api('/api/paper',{...J,body:JSON.stringify({paper:e.target.value})});
+  if(r&&r.error){toast(r.error);return;}
+  await refresh(); drawComposite(); toast('Paper: '+e.target.value.replace('_',' '));
+};
 $('lOp').oninput=e=>{$('lOpV').textContent=(e.target.value/100).toFixed(1);};
 $('lOp').onchange=e=>api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:sel,opacity:e.target.value/100})}).then(refresh);
 $('bFollow').onchange=e=>{ if(curBrush)api('/api/brush',{...J,body:JSON.stringify({action:'edit',id:curBrush,follow:e.target.checked})}); };
@@ -5825,7 +6120,7 @@ document.addEventListener('keydown',e=>{
   // block, in one place, instead of two scattered runs.
   if(mode!=='nodes'){
     const TOOLKEY={v:'transform',g:'fill',t:'text',b:'brush',e:'erase',h:'heal',u:'stamp',
-                   s:'smudge',c:'clone',p:'spline',
+                   s:'smudge',y:'blend',q:'knife',c:'clone',p:'spline',
                    i:'pick',      // Photoshop: eyedropper
                    n:'nudge',     // paths, not pixels
                    k:'strokesel', // pick whole strokes
@@ -7108,7 +7403,14 @@ $('svgExportBtn').onclick=async()=>{
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
   toast('lestudio.svg downloaded','info');
 };
-api('/api/status').then(s=>{$('accelChip').textContent=(s.gpu?'GPU':'CPU')+(s.jit?' · JIT':'');
+api('/api/status').then(s=>{
+  // Say what is accelerated, not just that a GPU EXISTS. Painting is CPU
+  // whatever hardware is present, so a bare 'GPU' chip told a painter their
+  // brush was accelerated when it was not.
+  $('accelChip').textContent='paint: CPU'+(s.gpu?' · sim: GPU':'')+(s.jit?' · JIT':'');
+  $('accelChip').title=(s.subsystems
+    ? Object.entries(s.subsystems).map(([k,v])=>k+': '+v.device.toUpperCase()+' - '+v.note).join('\n')
+    : 'engine acceleration');
   // leCore 0.2.7 reports WHY each GPU path is unavailable, with the install
   // line, and whether offloading would actually pay on this machine. Better
   // information than we can produce ourselves, so prefer it when present.

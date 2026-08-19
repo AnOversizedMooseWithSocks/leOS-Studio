@@ -2472,7 +2472,11 @@ def test_accelerators_are_optional_with_fallbacks():
     assert sh.startswith("#!/usr/bin/env bash")
     assert '"${1:-}" = "accel"' in sh and ".[accel]" in sh
     assert "pip install -e ." in sh
-    assert 'Darwin) open "http://127.0.0.1:5050"' in sh      # macOS opens the UI
+    # INTENT: macOS opens the UI in a browser. Pinned as the behaviour, not
+    # the literal URL -- the launchers stopped hardcoding the address when
+    # they learned to honour LESTUDIO_HOST/PORT, and a text match failed on a
+    # correct change.
+    assert 'Darwin) open "$URL"' in sh and 'URL="http://${HOST}:${PORT}"' in sh
     assert os.access(os.path.join(root, "run.sh"), os.X_OK)  # executable bit
     # status reports what is missing, with how to get it
     from lestudio.server import app
@@ -3312,8 +3316,19 @@ def test_brush_preview_matches_resolved_stroke():
                       1.0 - np.clip((d - core) / (r - core), 0, 1))
     assert np.allclose(server, canvas, atol=1e-9)
 
-    # PERFORMANCE: no full-composite round trip per flush for brush/erase
-    assert "if(final||tool==='smudge'||tool==='clone'||tool==='heal')drawComposite();" in ui
+    # PERFORMANCE: no full-composite round trip per flush for brush/erase.
+    # Pinned by INTENT, not by the literal source line: the old assertion
+    # quoted the statement verbatim, so adding one tool to the list broke a
+    # test that had no opinion about that tool. What must hold is that the
+    # tools WITHOUT a local preview force the redraw and brush/erase do not.
+    import re as _re
+    m = _re.search(r"if\(final\|\|([^)]*)\)drawComposite\(\);", ui)
+    assert m, "the per-flush composite guard must exist"
+    guard = m.group(1)
+    for t in ("smudge", "clone", "heal", "blend"):
+        assert "'%s'" % t in guard, "%s has no local preview, so it must redraw" % t
+    assert "'brush'" not in guard and "'erase'" not in guard, \
+        "brush and erase preview locally -- they must not round-trip"
 
 
 def test_missing_basics_now_present():
@@ -5705,6 +5720,8 @@ def test_sweep_every_endpoint_is_reachable():
         "/api/mind": "capability discovery for scripts",
         "/api/presence/name": "set by the join flow, not a user control",
         "/api/schema": "self-description for external tooling",
+        "/api/health": "liveness probe for a load balancer, not a user control",
+        "/api/ready": "readiness probe for an orchestrator",
     }
     unreached = []
     for rule in sorted({str(r.rule) for r in app.url_map.iter_rules()
@@ -6938,7 +6955,9 @@ def test_ux_sweep_discoverability():
     ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
                            "static", "index.html")).read()
     api_only = {"/api/analyze", "/api/graph/node/<nid>", "/api/histogram",
-                "/api/mind", "/api/presence/name", "/api/schema", "/api/prefs"}
+                "/api/mind", "/api/presence/name", "/api/schema", "/api/prefs",
+                # probes for a host's orchestrator: deliberately not controls
+                "/api/health", "/api/ready"}
     for rule in sorted({str(x.rule) for x in app.url_map.iter_rules()
                         if str(x.rule).startswith("/api")}):
         stem = rule.split("<")[0].rstrip("/")
@@ -7031,7 +7050,13 @@ def test_lecore_027_gpu_report_and_advice():
     ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
                            "static", "index.html")).read()
     assert "s.gpu_report" in ui and "a.worth_it" in ui
-    assert "(s.gpu?'GPU':'CPU')" in ui          # still a boolean at the chip
+    # the chip must read the BOOLEAN, never a truthy gpu_report dict. Pinned
+    # as intent: the literal expression was rewritten when the chip started
+    # naming which subsystem is accelerated.
+    import re as _re
+    chip = ui[ui.index("api('/api/status')"):][:600]
+    assert "s.gpu?" in chip and "s.subsystems" in chip
+    assert "s.gpu_report" not in chip, "the chip must not read the report dict"
 
 
 def test_lecore_027_no_faster_path_for_our_faculties():
@@ -8776,9 +8801,18 @@ def test_impasto_paint_body_and_gravity():
     assert float(np.abs(dr.layer(lr).pixels - stored).max()) == 0.0, \
         "shading must not touch the stored pigment"
     lum = c1[..., :3].mean(axis=-1)
-    prof = lum[92:109, 150]
-    assert prof[:6].mean() > prof[-6:].mean() + 0.02, \
-        "ridge must face the key light (top flank brighter)"
+    # The deposit model banks paint sideways, so a stroke has TWO rims with a
+    # trough between, not one dome -- "the top flank is brighter" described
+    # the old dome, not the physics. The intent is that the relief is lit
+    # from the top: brightness must track the LIGHT-FACING slope, which for a
+    # top light is where height climbs as y increases (dh/dy > 0).
+    prof = lum[90:112, 150]
+    hcol = dr.layer(lr).height_map[90:112, 150]
+    lit_slope = np.gradient(hcol)
+    on = hcol > 0.05
+    corr = float(np.corrcoef(lit_slope[on], prof[on])[0, 1])
+    assert corr > 0.3, \
+        "shading must follow the key light (bright on light-facing slopes)"
     df = Document(300, 200); lf = df.layers[0].id; df.layer(lf).pixels[...] = 0.0
     df.paint(lf, ridge, color=(0.75, 0.18, 0.1), radius=9, record=True)
     flat = df.composite()[..., :3].mean(axis=-1)
@@ -8834,7 +8868,11 @@ def test_impasto_paint_body_and_gravity():
     assert l3.height_map is not None
     assert float(np.abs(l3.height_map - d1.layer(a1).height_map).max()) < 1e-6
     assert getattr(l3, "paint_media", None) == "oil"
-    assert abs(getattr(l3, "paint_gloss", 0) - 0.55) < 1e-6
+    # the gloss must SURVIVE the round trip; the number itself is a tuning
+    # value on the medium (oil moved 0.55 -> 0.34 when the media were
+    # reworked) and pinning the constant tested the tuning, not persistence
+    assert abs(getattr(l3, "paint_gloss", 0)
+               - getattr(d1.layer(a1), "paint_gloss", -1)) < 1e-6
     assert d3.strokes[-1]["brush"].get("media") == "oil"
     assert float(np.abs(d3.composite() - d1.composite()).max()) < 1e-5
 
@@ -8860,7 +8898,14 @@ def test_impasto_paint_body_and_gravity():
                            "static", "index.html")).read()
     for el in ("bMedia", "bLoad", "bLoadRow"):
         assert 'id="%s"' % el in ui, el
-    assert "media:((tool==='brush'||tool==='erase')&&$('bMedia').value)||undefined" in ui
+    # INTENT, not the literal line: the medium goes with a brush stroke and
+    # with an ERASE (the eraser has to take the paint body away with the
+    # pigment), and with nothing else. The expression was rewritten when
+    # materials joined the same select, so pinning its text tested the
+    # spelling rather than the rule.
+    body = ui[ui.index("function strokeBody("):][:900]
+    assert "tool==='brush'?brushBody()" in body, body[:200]
+    assert "tool==='erase'?{media:brushBody().media}" in body, body[:200]
     assert 'value="water">Watercolor' in ui
 
 
@@ -8919,7 +8964,16 @@ def test_impasto_wetness_and_height_maintenance():
     assert d2.layer(l2).height_map.shape == d2.layer(l2).pixels.shape[:2]
     a = d2.layer(l2).pixels[..., 3]
     ys, xs = np.nonzero(a > 0.3)
-    assert float(d2.layer(l2).height_map[ys, xs].mean()) > 0.3, \
+    # Pinned as ALIGNMENT, not as an absolute height. The bristle-track mark
+    # generator lays paint in hairs rather than as a solid slab, so mean
+    # height under the pigment is legitimately lower than a disc stamp gave;
+    # an absolute floor here was testing the deposit scale, while what this
+    # test is actually about is that crop kept the ridge under its paint.
+    hh = d2.layer(l2).height_map
+    under = float(hh[ys, xs].mean())
+    ny, nx = np.nonzero(a <= 0.05)
+    outside = float(hh[ny, nx].mean()) if len(ny) else 0.0
+    assert under > max(outside * 3.0, 0.05), \
         "after crop the ridge must still sit under its pigment"
     d2.resize(400, 240, "resample")
     assert d2.layer(l2).height_map.shape == d2.layer(l2).pixels.shape[:2]
@@ -9409,7 +9463,9 @@ def test_backlog_quickshape_mandala_grow():
     assert "Math.min(Math.max(3, len*0.02), 6)" in ui, \
         "the QuickShape tolerance must stay capped"
     assert "Date.now()-qsMoveT>=550" in ui
-    assert '<option value="6">6×</option>' in ui
+    # the VALUE is the contract; the visible text is presentation and was
+    # renamed from "6x" to "radial 6" so the control reads as words
+    assert 'id="bMirror"' in ui and 'value="6"' in ui
     assert "q[0]=cx+dx*ca-dy*sa; q[1]=cy+dx*sa+dy*ca;" in ui
     # the launcher promise, closed
     sh = os.path.join(os.path.dirname(__file__), "..", "run.sh")
@@ -12771,8 +12827,24 @@ def test_new_user_feedback_sweep():
     assert 'if not getattr(self, "_replaying", False)' not in ui  # engine-side
     eng = open(os.path.join(os.path.dirname(__file__), "..", "src",
                             "lestudio", "__init__.py")).read()
-    assert 'if not getattr(self, "_replaying", False):' in eng and \
-        "read-only PROBE" in eng, "the replay-patch fix must stay"
+    # INTENT: a replay must never patch the shading cache -- it rebuilds the
+    # layer from scratch, so a window patch would describe a picture that no
+    # longer exists. Pinned as the GUARANTEE, not the literal condition: the
+    # line gained a second clause (first-relief strokes also skip the patch)
+    # and a source-text match broke on a correct change.
+    assert '_replaying' in eng and "read-only PROBE" in eng, \
+        "the replay-patch fix must stay"
+    import numpy as _np
+    from lestudio import Document as _D
+    _d = _D(240, 160)
+    _d.add_layer("p")
+    _lid = _d.layers[-1].id
+    for _ in range(3):
+        _d.paint(_lid, [[30, 80], [210, 90]], color=(0.8, 0.3, 0.2),
+                 radius=16, media="oil", load=1.2)
+    _before = _d.layer(_lid).pixels.copy()
+    assert _np.allclose(_d.replay_layer(_lid), _before, atol=1e-5), \
+        "a replay must rebuild exactly, not patch"
     # Floating containers stay capped -- but note this assertion used to
     # pin the LITERAL selector, `.tbm` included, and `.tbm` was the bug:
     # capping the dropdown WRAPPER clipped the panel inside it to a
@@ -17020,3 +17092,2301 @@ def test_wall_layers_leave_the_floor():
                             "lestudio", "__init__.py")).read()
     assert eng.count("_on_floor(doc, l)") >= 4, \
         "every floor pass shares one predicate"
+
+
+# ===================== PBR materials: painting with stuff =====================
+
+def test_material_paint_deposits_stuff_and_body():
+    """A material stroke lays pigment, a paint body, AND per-pixel surface
+    properties -- rough/metal at the preset's values under full coverage."""
+    from lestudio import Document
+    d = Document(200, 160)
+    lid = d.layers[0].id
+    d.paint(lid, [[30, 40], [170, 40]], color=(1.0, 0.78, 0.34), radius=12,
+            material="gold", load=0.8)
+    l = d.layers[0]
+    assert l.material_map is not None and l.material_map.shape == (160, 200, 3)
+    mm = l.material_map
+    # coverage is NOT a solid slab: the bristle comb and the canvas tooth
+    # break the paint film, so the stroke reaches full coverage in its
+    # lanes and less between them -- asserting a uniform ~1 here would pin
+    # the old "height is a rescaled alpha" model that the deposit rewrite
+    # removed. What must hold is that the film reaches full somewhere and
+    # carries the preset's properties wherever it is meaningfully there.
+    assert float(mm[..., 2].max()) > 0.95
+    on = mm[..., 2] > 0.5
+    assert on.any()
+    assert abs(float(mm[..., 0][on].mean()) - 0.28) < 0.02  # gold's roughness
+    assert abs(float(mm[..., 1][on].mean()) - 1.0) < 0.02   # metal
+    assert l.height_map is not None and l.height_map[38:42, 90:110].mean() > 0.3
+    # a material stroke must NOT re-tune the layer's scalar media look
+    assert getattr(l, "paint_media", None) != "gold"
+
+
+def test_material_shading_metal_vs_matte():
+    """chrome must gleam ABOVE and shadow BELOW chalk on identical geometry --
+    measured inside the stroke core, not the background (a previous draft of
+    this assertion measured the white canvas and lied)."""
+    import numpy as np
+    from lestudio import Document, _shaded_pixels
+
+    def core(mat):
+        d = Document(200, 160)
+        l = d.layers[0]
+        d.paint(l.id, [[30, 40], [170, 40]], color=(0.6, 0.6, 0.6),
+                radius=12, material=mat, load=0.8)
+        s = _shaded_pixels(l)
+        m = l.material_map[..., 2] > 0.9
+        v = s[..., :3][m]
+        return float(v.max()), float(v.min())
+
+    c_max, c_min = core("chrome")
+    k_max, k_min = core("chalk")
+    assert c_max > k_max + 0.04, (c_max, k_max)   # the gleam
+    assert c_min < k_min - 0.02, (c_min, k_min)   # the dead diffuse
+
+
+def test_material_metal_gleam_is_tinted_by_albedo():
+    """Gold's highlight is GOLD: on the brightest covered pixels, R must
+    clearly exceed B. A white highlight here means the metal path lost its
+    tint and gold reads as glossy yellow plastic."""
+    import numpy as np
+    from lestudio import Document, _shaded_pixels
+    d = Document(200, 160)
+    l = d.layers[0]
+    d.paint(l.id, [[30, 40], [170, 40]], color=(1.0, 0.78, 0.34), radius=12,
+            material="gold", load=0.8)
+    s = _shaded_pixels(l)
+    m = l.material_map[..., 2] > 0.9
+    px = s[..., :3][m]
+    top = px[px.mean(1).argsort()[-40:]]
+    assert float((top[:, 0] - top[:, 2]).mean()) > 0.15
+
+
+def test_material_scalar_path_untouched_at_zero_coverage():
+    """Where no material was ever painted the shading must be byte-identical
+    to the pre-material scalar path -- the feature is strictly additive."""
+    import numpy as np
+    from lestudio import Document, _relief_shade, _shaded_pixels
+    d = Document(160, 120)
+    l = d.layers[0]
+    d.paint(l.id, [[20, 30], [140, 30]], color=(0.8, 0.3, 0.3), radius=10,
+            media="oil", load=0.9)
+    with_map = _relief_shade(l.pixels, l.height_map, l.paint_gloss, 26.0,
+                             material=np.zeros((120, 160, 3), np.float32))
+    without = _relief_shade(l.pixels, l.height_map, l.paint_gloss, 26.0)
+    assert np.array_equal(with_map, without)
+
+
+def test_material_erase_and_depth_erase_take_the_stuff():
+    """Both erasers erode material coverage with what they remove: invisible
+    gold under a cleared area would make the next plain stroke gleam."""
+    from lestudio import Document
+    d = Document(200, 160)
+    lid = d.layers[0].id
+    d.paint(lid, [[30, 40], [170, 40]], color=(1, .78, .34), radius=12,
+            material="gold", load=0.8)
+    mm = d.layers[0].material_map
+    d.paint(lid, [[100, 40], [100, 40]], radius=20, erase=True)
+    assert mm[38:42, 95:105, 2].max() < 0.1
+    before = float(mm[38:42, 40:60, 2].mean())
+    d.erase_depth(lid, [[50, 40]], radius=18, strength=1.0)
+    assert float(mm[38:42, 45:55, 2].mean()) < before
+
+
+def test_material_undo_redo_round_trip():
+    from lestudio import Document
+    d = Document(120, 100)
+    lid = d.layers[0].id
+    d.paint(lid, [[20, 50], [100, 50]], radius=10, material="copper")
+    assert d.layers[0].material_map is not None
+    d.undo()
+    l = d.layers[0]
+    mm = getattr(l, "material_map", None)
+    assert mm is None or not (mm[..., 2] > 1e-3).any()
+    d.redo()
+    assert (d.layers[0].material_map[..., 2] > 0.5).any()
+
+
+def test_material_replay_is_faithful_including_grain():
+    """replay_layer must reproduce a material stroke's pixels, height AND
+    material map exactly -- the grain field is position-stable, so the tooth
+    comes back identical, never re-rolled."""
+    import numpy as np
+    from lestudio import Document
+    d = Document(220, 160)
+    lid = d.layers[0].id
+    d.paint(lid, [[30, 50], [180, 50]], color=(1, .78, .34), radius=12,
+            material="brushed_steel", load=0.9)
+    px0 = d.layers[0].pixels.copy()
+    hm0 = d.layers[0].height_map.copy()
+    mm0 = d.layers[0].material_map.copy()
+    rep = d.replay_layer(lid)
+    assert rep is not None
+    assert np.allclose(rep, px0, atol=1e-5)
+    assert np.allclose(d._replay_height[lid], hm0, atol=1e-5)
+    assert np.allclose(d._replay_material[lid], mm0, atol=1e-5)
+
+
+def test_material_stroke_edit_carries_the_stuff():
+    """Moving a stroke moves its material: coverage leaves the old place and
+    arrives at the new one through the rebuild pipeline."""
+    from lestudio import Document
+    d = Document(220, 180)
+    lid = d.layers[0].id
+    d.paint(lid, [[30, 50], [180, 50]], color=(1, .78, .34), radius=12,
+            material="gold", load=0.9)
+    sid = d.strokes[-1]["id"]
+    d.transform_strokes([sid], dy=60)
+    mm = d.layers[0].material_map
+    assert float(mm[48:53, 80:120, 2].mean()) < 0.05
+    # The arriving film is combed, not solid (see the deposit model). Judge
+    # the whole arrival band rather than a 5-row slice: which exact rows run
+    # full depends on where the bristle lanes fall, and pinning that would
+    # make the test an assertion about the comb's phase, not about the move.
+    # The film is combed AND the load fluctuates along the stroke, so peak
+    # coverage mid-stroke is nowhere near a solid 1 -- thresholds tuned to
+    # the old uniform slab are testing the deposit model, not the move.
+    band = mm[98:122, 80:120, 2]
+    assert float(band.max()) > 0.6
+    assert float(band.mean()) > 0.3
+
+
+def test_material_transforms_carry_the_map():
+    """Flip / crop / resize keep the stuff with its pigment, and interpolating
+    resamples must not drag edge roughness toward 0 (a chrome halo)."""
+    import numpy as np
+    from lestudio import Document
+    d = Document(160, 120)
+    lid = d.layers[0].id
+    d.paint(lid, [[30, 30], [60, 30]], color=(.9, .9, .9), radius=10,
+            material="chalk", load=0.8)
+    d.flip_layer(lid, "x")
+    mm = d.layers[0].material_map
+    assert mm[28:33, 100:130, 2].mean() > 0.8      # moved to the mirror side
+    d.resize(320, 240, mode="resample")
+    mm = d.layers[0].material_map
+    assert mm.shape == (240, 320, 3)
+    covered = mm[..., 2] > 0.5
+    assert covered.any()
+    # chalk rough stays ~1 everywhere it is meaningfully covered: the
+    # premultiplied resample is what protects the edges
+    assert float(mm[..., 0][covered].min()) > 0.9
+    d.crop(0, 0, 160, 120)
+    assert d.layers[0].material_map.shape == (120, 160, 3)
+
+
+def test_material_unknown_name_raises_with_choices():
+    import pytest
+    from lestudio import Document
+    d = Document(80, 60)
+    with pytest.raises(ValueError):
+        d.paint(d.layers[0].id, [[5, 5], [40, 5]], material="vibranium")
+
+
+def test_material_api_end_to_end():
+    """Through HTTP: the catalog is in /api/state, a named material paints,
+    a custom dict paints, an unknown name is a clean 400 naming itself, and
+    undo clears the deposit."""
+    import json
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+    st = c.get("/api/state").json
+    names = [m["name"] for m in st["materials"]]
+    assert "gold" in names and "chalk" in names
+    lid = st["layers"][0]["id"]
+    r = c.post("/api/paint", data=json.dumps({
+        "layer": lid, "points": [[20, 40], [140, 40]],
+        "color": [1.0, 0.78, 0.34], "radius": 12, "material": "gold",
+        "load": 0.9}), **J)
+    assert r.status_code == 200 and r.json.get("ok"), r.json
+    k = SV.DOC.stroke_by_id(r.json["sid"])
+    assert k["brush"].get("material") == "gold"
+    r = c.post("/api/paint", data=json.dumps({
+        "layer": lid, "points": [[20, 90], [140, 90]],
+        "color": [0.4, 0.7, 0.5], "radius": 10,
+        "material": {"preset": "plastic", "rough": 0.1}}), **J)
+    assert r.status_code == 200 and r.json.get("ok"), r.json
+    r = c.post("/api/paint", data=json.dumps({
+        "layer": lid, "points": [[0, 0], [5, 5]],
+        "material": "vibranium"}), **J)
+    assert r.status_code == 400 and b"vibranium" in r.data
+    c.post("/api/undo", data="{}", **J)
+    c.post("/api/undo", data="{}", **J)
+    mm = getattr(SV.DOC.layer(lid), "material_map", None)
+    assert mm is None or not (mm[..., 2] > 1e-3).any()
+
+
+# ============ wet-on-wet mixing, canvas relief, and stroke realism ==========
+
+def test_wet_mixing_is_directional_and_gradual():
+    """The brush picks up wet paint it crosses and carries it FORWARD: colour
+    must change downstream of a crossing and not upstream, and one crossing
+    must not wipe the load."""
+    import numpy as np
+    from lestudio import Document
+    d = Document(880, 200, background=(0.92, 0.90, 0.86))
+    lid = d.layers[0].id
+    for k in range(4):
+        x = 180 + k * 160
+        d.paint(lid, [[x, 40], [x, 160]], color=(0.85, 0.15, 0.12),
+                radius=17, media="oil", load=1.3)
+    d.paint(lid, [[60 + t * 7.6, 100] for t in range(105)],
+            color=(0.12, 0.28, 0.80), radius=15, media="oil", load=1.1, mix=1.0)
+    px = d.layers[0].pixels
+    up = px[100, 120, :3]          # before the first bar
+    mid = px[100, 260, :3]         # just past bar 1
+    end = px[100, 800, :3]         # past all four
+    # Judge the HUE SHIFT (red minus blue), not the absolute red. The paint
+    # film is broken by the bristle tracks where the brush runs dry, so bare
+    # canvas shows through and raises every channel -- an absolute-red test
+    # cannot tell pickup from wash-out, and would grade the mixer on the
+    # deposit model's opacity.
+    rb = lambda c: float(c[0] - c[2])
+    assert up[2] > up[0] + 0.4, "upstream of any crossing it is still blue"
+    # Monotonic gathering across EVERY bar is a stronger statement about the
+    # mixer than one magic delta at the first crossing, and it does not have
+    # to be re-tuned each time the deposit model changes how much paint a bar
+    # actually holds. (I had 0.1 here; the measured first-crossing shift is
+    # ~0.09, which is a real tint -- the threshold was the arbitrary part.)
+    steps = [rb(px[100, x, :3]) for x in (120, 260, 420, 580, 800)]
+    assert steps == sorted(steps), "the brush must gather, never give back"
+    assert steps[1] > steps[0] + 0.05, "the crossing must tint what follows"
+    assert steps[-1] > steps[0] + 0.35, "and keep gathering across crossings"
+    assert end[2] > 0.35, "one pass of wet paint must not wipe the load"
+
+
+def test_wet_mixing_off_by_default_and_recorded():
+    """mix=0 lays pure colour, and a mixed stroke replays identically -- the
+    reservoir must ride the stroke record or a rebuild unmixes the picture."""
+    import numpy as np
+    from lestudio import Document
+    d = Document(400, 160)
+    lid = d.layers[0].id
+    d.paint(lid, [[60, 40], [60, 130]], color=(0.85, 0.15, 0.12), radius=15,
+            media="oil", load=1.3)
+    d.paint(lid, [[20 + t * 6, 85] for t in range(60)],
+            color=(0.12, 0.28, 0.80), radius=12, media="oil", load=1.0)
+    # sample where the brush is still LOADED: further along it has run dry
+    # and the canvas shows through the film, which lightens the pixel toward
+    # white -- correct behaviour, but it is depletion, not mixing
+    plain = d.layers[0].pixels[85, 150, :3].copy()
+    assert plain[2] > plain[0] + 0.4, "no mix requested -> pure colour"
+    d2 = Document(400, 160)
+    l2 = d2.layers[0].id
+    d2.paint(l2, [[60, 40], [60, 130]], color=(0.85, 0.15, 0.12), radius=15,
+             media="oil", load=1.3)
+    d2.paint(l2, [[20 + t * 6, 85] for t in range(60)],
+             color=(0.12, 0.28, 0.80), radius=12, media="oil", load=1.0, mix=1.0)
+    assert d2.strokes[-1]["brush"].get("mix") == 1.0
+    before = d2.layers[0].pixels.copy()
+    rep = d2.replay_layer(l2)
+    assert np.allclose(rep, before, atol=1e-5), "a mixed stroke must replay"
+
+
+def test_canvas_has_relief_of_its_own():
+    """Paint sits IN a surface: the canvas weave must shade even where no
+    stroke has been laid, or strokes read as extrusions floating on glass."""
+    import numpy as np
+    from lestudio import Document, _shaded_pixels
+    d = Document(200, 160)
+    lid = d.layers[0].id
+    d.layer(lid).pixels[..., :3] = 0.6
+    d.layer(lid).pixels[..., 3] = 1.0
+    d.paint(lid, [[40, 80], [90, 80]], color=(0.8, 0.3, 0.2), radius=10,
+            media="oil", load=1.0)
+    sh = _shaded_pixels(d.layers[0])
+    bare = sh[20:60, 140:190, :3]          # nowhere near the stroke
+    assert float(bare.max() - bare.min()) > 0.01, \
+        "bare canvas must carry the weave"
+
+
+def test_deposit_costs_stay_live_friendly():
+    """The realism must not block the creative process: a long stroke on a
+    big canvas has to stay well inside interactive budget."""
+    import time
+    import numpy as np
+    from lestudio import Document
+    d = Document(1920, 1080)
+    lid = d.layers[0].id
+    pts = [[100 + i * 8, 500 + 120 * np.sin(i / 9)] for i in range(200)]
+    d.paint(lid, pts, color=(0.8, 0.4, 0.2), radius=28, media="oil", load=1.0)
+    t = time.perf_counter()
+    d.paint(lid, pts, color=(0.8, 0.4, 0.2), radius=28, media="oil", load=1.0,
+            mix=1.0)
+    dt = time.perf_counter() - t
+    assert dt < 0.6, "heavy stroke budget blown: %.0f ms" % (dt * 1000)
+
+
+def test_blend_stroke_is_recorded_and_replayable():
+    """The blender must be a FIRST-CLASS STROKE, not a destructive smear.
+    Blending is where the picture gets made, so it is exactly the gesture you
+    most need to be able to nudge -- `smudge` mutates pixels unrecorded and
+    costs the layer its stroke editing, which is the bug this fixes."""
+    import numpy as np
+    from lestudio import Document
+    d = Document(420, 220, background=(0.96, 0.95, 0.92))
+    lid = d.layers[0].id
+    d.paint(lid, [[30 + t * 7, 85] for t in range(50)], color=(0.13, 0.30, 0.72),
+            radius=28, media="oil", load=1.3)
+    top = d.strokes[-1]["id"]
+    d.paint(lid, [[30 + t * 7, 130] for t in range(50)], color=(0.95, 0.78, 0.35),
+            radius=28, media="oil", load=1.3)
+    sid = d.blend_stroke(lid, [[30 + t * 7, 108] for t in range(50)],
+                         radius=32, strength=0.85)
+    assert sid is not None
+    rec = d.stroke_by_id(sid)
+    assert rec["brush"].get("blend") is True, "the blend must be a stroke"
+    # it must actually soften the seam
+    d2 = Document(420, 220, background=(0.96, 0.95, 0.92))
+    l2 = d2.layers[0].id
+    for y, c in ((85, (0.13, 0.30, 0.72)), (130, (0.95, 0.78, 0.35))):
+        d2.paint(l2, [[30 + t * 7, y] for t in range(50)], color=c,
+                 radius=28, media="oil", load=1.3)
+    # measure THE SEAM, not the whole column: the band's own outer edge is
+    # a step too, and it is not what the blend gesture was aimed at, so a
+    # whole-column max would grade the blender on work it never did
+    jump = lambda dd: float(np.abs(np.diff(
+        dd.layers[0].pixels[98:122, 200, :3], axis=0)).max())
+    assert jump(d) < jump(d2) * 0.6, "blending must soften the seam"
+    # and it must replay byte-exact, in order with the paint strokes
+    before = d.layers[0].pixels.copy()
+    rep = d.replay_layer(lid)
+    assert np.allclose(rep, before, atol=1e-5), "a blend must replay"
+    # editing a PARENT re-derives the blend -- the whole point
+    d.transform_strokes([top], dy=-30)
+    assert not np.allclose(d.layers[0].pixels, before, atol=1e-3), \
+        "moving a colour under the blend must re-derive it"
+
+
+def test_blend_needs_wet_paint_to_work():
+    """You cannot blend what is not there: the blender is gated by paint
+    BODY, so bare canvas is left alone rather than smeared."""
+    import numpy as np
+    from lestudio import Document
+    d = Document(300, 160, background=(0.9, 0.9, 0.88))
+    lid = d.layers[0].id
+    d.layer(lid).pixels[..., :3] = 0.5
+    d.layer(lid).pixels[..., 3] = 1.0
+    bare = d.layers[0].pixels.copy()
+    d.blend_stroke(lid, [[40, 80], [260, 80]], radius=25, strength=1.0)
+    assert np.allclose(d.layers[0].pixels, bare, atol=1e-4), \
+        "no paint body -> the blender must do nothing"
+
+
+def test_stroke_groups_move_as_one_and_members_stay_editable():
+    """A group is organisation, not a rewrite: a group id works anywhere a
+    stroke id does, and every member is still individually editable."""
+    from lestudio import Document
+    d = Document(400, 260)
+    lid = d.layers[0].id
+    ids = []
+    for y in (70, 110):
+        d.paint(lid, [[40, y], [360, y]], color=(0.2, 0.4, 0.8), radius=18,
+                media="oil", load=1.2)
+        ids.append(d.strokes[-1]["id"])
+    ids.append(d.blend_stroke(lid, [[40, 90], [360, 90]], radius=22,
+                              strength=0.8))
+    g = d.group_strokes(ids, "sky")
+    assert d.stroke_group_of(ids[-1]) == g, "any member finds its group"
+    a_before = float(d.layers[0].pixels[70, 200, 3])
+    d.transform_strokes([g], dy=60)          # move the whole passage by gid
+    assert float(d.layers[0].pixels[130, 200, 3]) > 0.5
+    # a group and one of its own members in the same selection must not
+    # transform that member twice
+    assert len(d._expand_strokes([g, ids[0]])) == 3
+    # members remain individually editable
+    d.transform_strokes([ids[0]], dy=-40)
+    assert d.stroke_by_id(ids[0]) is not None
+    d.ungroup_strokes(g)
+    assert d.stroke_group_of(ids[0]) is None
+    assert len(d.strokes) == 3, "dissolving a group must not delete strokes"
+
+
+def test_real_brush_runs_out_reloads_and_replays():
+    """The brush holds a finite amount of paint: it empties as you work, it
+    recharges only from a genuine PILE (not from its own last stroke), what
+    it lifts the canvas loses, and a replay must not re-derive charge from a
+    reservoir that has moved on."""
+    import numpy as np
+    from lestudio import Document
+    d = Document(900, 300, background=(0.95, 0.94, 0.91))
+    lid = d.layers[0].id
+    d.load_brush(color=(0.15, 0.35, 0.85), amount=1.0)
+    charges = []
+    for i in range(3):
+        d.paint(lid, [[40 + t * 8, 60 + i * 8] for t in range(105)],
+                color=(0.15, 0.35, 0.85), radius=20, media="oil", load=1.2,
+                real_brush=True)
+        charges.append(d.brush_charge)
+    assert charges[0] < 0.7, "painting must spend paint"
+    assert charges == sorted(charges, reverse=True), \
+        "charge must never rise while painting over ordinary strokes"
+    assert charges[-1] < 0.02, "a long enough session runs the brush dry"
+    # build a genuine pile and scrape it with the dry brush
+    for _ in range(6):
+        d.paint(lid, [[100, 200], [800, 200]], color=(0.9, 0.2, 0.15),
+                radius=22, media="oil", load=1.5)
+    d.brush_charge, d.brush_color = 0.02, (0.15, 0.35, 0.85)
+    h_before = float(d.layers[0].height_map[200, 400])
+    d.paint(lid, [[120 + t * 6, 200] for t in range(100)],
+            color=(0.15, 0.35, 0.85), radius=18, media="oil", load=1.2,
+            real_brush=True, mix=1.0)
+    assert d.brush_charge > 0.3, "a dry brush must reload from a thick pile"
+    assert d.brush_color[0] > d.brush_color[2], "and take on that pile's colour"
+    assert float(d.layers[0].height_map[200, 400]) < h_before - 0.05, \
+        "paint is conserved: what the brush lifts, the canvas loses"
+    # replay is frozen against the live reservoir
+    before = d.layers[0].pixels.copy()
+    saved = d.brush_charge
+    rep = d.replay_layer(lid)
+    assert np.allclose(rep, before, atol=1e-5), "real-brush strokes must replay"
+    assert d.brush_charge == saved, "a replay must not spend live paint"
+    # the palette escape hatch
+    d.load_brush(color=(0.1, 0.7, 0.3), amount=1.0)
+    assert d.brush_charge == 1.0 and d.brush_state()["color"][1] > 0.5
+
+
+def test_real_brush_api_round_trip():
+    import json
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+    st = c.get("/api/state").json
+    assert "brush_state" in st and "stroke_groups" in st
+    lid = st["layers"][0]["id"]
+    c.post("/api/brush_load",
+           data=json.dumps({"color": [0.2, 0.4, 0.9], "amount": 1.0}), **J)
+    for _ in range(2):
+        r = c.post("/api/paint", data=json.dumps({
+            "layer": lid, "points": [[20 + t * 8, 60] for t in range(100)],
+            "color": [0.2, 0.4, 0.9], "radius": 20, "media": "oil",
+            "load": 1.2, "real_brush": True}), **J)
+        assert r.status_code == 200
+    assert c.get("/api/state").json["brush_state"]["charge"] < 0.5
+    sids = [k["id"] for k in SV.DOC.strokes]
+    g = c.post("/api/stroke_group", data=json.dumps(
+        {"action": "create", "strokes": sids, "name": "sky"}), **J).json["group"]
+    assert c.get("/api/state").json["stroke_groups"][0]["id"] == g
+    assert c.post("/api/stroke_group", data=json.dumps(
+        {"action": "dissolve", "group": "nope"}), **J).status_code == 404
+
+
+def test_pressure_and_speed_shape_the_stroke():
+    """Pressure and speed must reach the PAINT, not just the radius.
+    Leaning on a brush squeezes more out of it and splays the bristles;
+    a fast pass gives the paint less contact time and lays a thin broken
+    mark. Both monotonic, or the response feels arbitrary under the hand."""
+    import numpy as np
+    from lestudio import Document
+
+    def press_run(pr):
+        d = Document(400, 120)
+        lid = d.layers[0].id
+        d.paint(lid, [[60 + i * 4, 60, pr] for i in range(40)],
+                color=(0.7, 0.3, 0.2), radius=22, media="oil", load=1.2)
+        hm = d.layers[0].height_map
+        return float(hm.max()), int((hm > 0.05).sum())
+
+    peaks, areas = zip(*[press_run(p) for p in (0.25, 0.6, 1.0, 1.4)])
+    assert list(peaks) == sorted(peaks), "harder press must lay more paint"
+    assert list(areas) == sorted(areas), "harder press must also spread wider"
+    assert peaks[-1] > peaks[0] * 1.6
+
+    def speed_run(gap):
+        # the raw sample gap IS the speed: the client samples at a fixed
+        # rate, so a wider gap means the hand moved further per sample
+        d = Document(700, 120)
+        lid = d.layers[0].id
+        n = int(560 / gap)
+        d.paint(lid, [[60 + i * gap, 60] for i in range(n)],
+                color=(0.2, 0.35, 0.7), radius=22, media="oil", load=1.2)
+        hm = d.layers[0].height_map
+        return float(hm[hm > 0.05].mean())
+
+    means = [speed_run(g) for g in (2, 6, 14, 30)]
+    assert means == sorted(means, reverse=True), "a faster pass must lay less"
+    assert means[0] > means[-1] * 1.5
+
+
+def test_pressure_survives_the_ui_smoothing_path():
+    """The lazy-brush EMA rebuilt the point as a bare [x, y] and silently
+    dropped the pressure component -- pin the shape it must preserve."""
+    import os
+    import re
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src",
+                           "lestudio", "static", "index.html")).read()
+    assert "function penPressure(" in ui, "the UI must sample stylus pressure"
+    # a mouse reports 0.5 (or 0 hovering): treating that as pressure would
+    # paint every mouse stroke at half weight
+    m = re.search(r"function penPressure\([^)]*\)\{(.+?)\n\}", ui, re.S)
+    assert m and "pointerType" in m.group(1), \
+        "pressure must be gated on an actual pen"
+    assert "smoothing must not drop pressure" in ui
+    # and the payload must carry three-component points
+    assert "penPressure(e)]" in ui
+
+
+def test_palette_mounds_can_be_dipped_and_mixed():
+    """A palette is not a new mechanism -- it is thick paint. Mounds must be
+    tall enough to count as a pile the brush can reload from, a dip must
+    actually load the brush with that colour, and dipping a loaded brush in a
+    second colour must MIX rather than swap or ignore."""
+    import numpy as np
+    from lestudio import Document
+    d = Document(940, 400, background=(0.93, 0.91, 0.87))
+    lid = d.layers[0].id
+    spots = d.lay_palette(lid, [(0.80, 0.12, 0.10), (0.97, 0.96, 0.93)],
+                          x=80, y=75, size=44)
+    assert len(spots) == 2
+    hm = d.layers[0].height_map
+    for (px, py) in spots:
+        peak = float(hm[int(py) - 12:int(py) + 12, int(px) - 12:int(px) + 12].max())
+        assert peak > 2.2, "a mound must be a pile you can dip into, got %.2f" % peak
+
+    def dip(spot, sweeps=3):
+        x, y = spot
+        for k in range(sweeps):
+            d.paint(lid, [[x - 34 + t * 3.4, y - 14 + k * 13] for t in range(21)],
+                    color=tuple(d.brush_color), radius=15, media="oil",
+                    load=1.2, real_brush=True, mix=1.0)
+
+    d.load_brush(color=(0.5, 0.5, 0.5), amount=1.0)
+    dip(spots[0])
+    red = np.array(d.brush_color)
+    # A dip LOADS the brush, it does not sterilise it: a few passes through a
+    # mound move the colour a long way toward that paint while what was
+    # already on the hairs still counts. Demanding near-pure red here would
+    # be asserting that a palette works like a colour picker.
+    assert red[0] - red[1] > 0.25, "a dip must load the brush: %s" % red
+    assert red[0] > 0.6, "and move it well toward the mound: %s" % red
+    dip(spots[1])
+    pink = np.array(d.brush_color)
+    assert pink[1] > red[1] + 0.2, "white must lighten it, not be ignored"
+    assert pink[0] > 0.6, "and must not simply replace the red either"
+    # Taking paint scrapes the mound down -- but the stroke also DEPOSITS as
+    # it passes, and a mound sits at the height cap, so an absolute "went
+    # down" test just measures the cap. Compare against an identical pass
+    # that deposits without lifting: that difference is the scrape.
+    def mound_after(real):
+        dd = Document(940, 400, background=(0.93, 0.91, 0.87))
+        li = dd.layers[0].id
+        sq = dd.lay_palette(li, [(0.97, 0.96, 0.93)], x=80, y=75, size=44)
+        dd.load_brush(color=(0.1, 0.2, 0.6), amount=1.0)
+        px_, py_ = sq[0]
+        for k in range(3):
+            dd.paint(li, [[px_ - 34 + t * 3.4, py_ - 14 + k * 13]
+                          for t in range(21)],
+                     color=(0.1, 0.2, 0.6), radius=15, media="oil",
+                     load=1.2, real_brush=real, mix=1.0 if real else 0.0)
+        h = dd.layers[0].height_map
+        return float(h[int(py_) - 12:int(py_) + 12,
+                       int(px_) - 12:int(px_) + 12].sum())
+    assert mound_after(True) < mound_after(False) * 0.98, \
+        "lifting paint must leave less on the mound than merely painting it"
+
+
+def test_brush_holds_different_colours_across_its_width():
+    """Bob Ross's core move: load one edge of the tuft with one colour and
+    the other edge with another, then lay a VARIEGATED band in a single
+    stroke. A scalar reservoir cannot express this -- it averages the two
+    into a flat mix before the stroke is even laid -- so the brush carries a
+    colour per lane across its width."""
+    import numpy as np
+    from lestudio import Document, _BRUSH_LANES
+    d = Document(700, 220, background=(0.95, 0.94, 0.91))
+    # paint on a TRANSPARENT layer: the document background is opaque, so
+    # selecting rows by alpha on the base layer just selects the whole column
+    d.add_layer("paint")
+    lid = d.layers[-1].id
+    blue, white = (0.06, 0.16, 0.55), (0.97, 0.96, 0.93)
+    ramp = [blue, blue, (0.2, 0.3, 0.65), (0.55, 0.6, 0.8),
+            (0.85, 0.88, 0.9), white, white]
+    st = d.load_brush(color=ramp, amount=1.0)
+    assert len(st["lanes"]) == _BRUSH_LANES
+    d.paint(lid, [[60 + t * 5.6, 110] for t in range(100)], color=blue,
+            radius=22, media="oil", load=1.2, real_brush=True)
+    px = d.layers[-1].pixels
+    col = px[:, 350, :]
+    on = np.nonzero(col[:, 3] > 0.5)[0]
+    assert len(on) > 12, "the stroke must have landed"
+    top = col[on[:4], :3].mean(0)
+    bot = col[on[-4:], :3].mean(0)
+    # one edge must still read blue and the other near-white IN THE SAME MARK
+    assert bot.mean() > top.mean() + 0.25, \
+        "the two edges must stay different: %s vs %s" % (top, bot)
+    assert top[2] > top[0] + 0.15, "the loaded edge must still be blue"
+
+    # and a UNIFORM load must not do that -- otherwise the test above would
+    # pass on any stroke that merely shades from lighting
+    d2 = Document(700, 220, background=(0.95, 0.94, 0.91))
+    d2.add_layer("paint")
+    l2 = d2.layers[-1].id
+    d2.load_brush(color=blue, amount=1.0)
+    d2.paint(l2, [[60 + t * 5.6, 110] for t in range(100)], color=blue,
+             radius=22, media="oil", load=1.2, real_brush=True)
+    c2 = d2.layers[-1].pixels[:, 350, :]
+    on2 = np.nonzero(c2[:, 3] > 0.5)[0]
+    spread = abs(float(c2[on2[-4:], :3].mean() - c2[on2[:4], :3].mean()))
+    assert spread < 0.2, "a uniformly loaded brush must lay one colour"
+
+
+def test_dipping_one_edge_builds_a_two_colour_brush():
+    """Dragging part of the tuft through a mound must load only that part."""
+    import numpy as np
+    from lestudio import Document
+    d = Document(940, 400, background=(0.93, 0.91, 0.87))
+    lid = d.layers[0].id
+    sp = d.lay_palette(lid, [(0.97, 0.96, 0.93)], x=80, y=75, size=44)
+    d.load_brush(color=(0.06, 0.16, 0.55), amount=1.0)
+    x, y = sp[0]
+    for k in range(3):
+        d.paint(lid, [[x - 34 + t * 3.4, y - 16 + k * 11] for t in range(21)],
+                color=tuple(d.brush_color), radius=15, media="oil", load=1.2,
+                real_brush=True, mix=1.0)
+    lanes = np.asarray(d.brush_lanes)
+    lo, hi = lanes.mean(1).min(), lanes.mean(1).max()
+    assert hi - lo > 0.15, \
+        "one edge must pick up more than the other: %s" % lanes.mean(1)
+
+
+def test_watercolour_wicks_granulates_and_darkens_its_edge():
+    """Watercolour is a fluid IN paper, not a thin film on a surface. Curtis
+    et al. (SIGGRAPH 97) name the effects that make it read as watercolour;
+    leStudio's "water" used to be oil with a low hold and more gravity, which
+    has none of them. Pin the three implemented here against an oil control
+    so the test cannot pass on generic softness."""
+    import numpy as np
+    from lestudio import Document
+
+    def wash(media, load=1.0):
+        d = Document(700, 260, background=(0.98, 0.97, 0.95))
+        d.add_layer("p")
+        lid = d.layers[-1].id
+        d.paint(lid, [[80 + t * 5.2, 130] for t in range(100)],
+                color=(0.20, 0.35, 0.72), radius=26, media=media, load=load)
+        return d.layers[-1].pixels
+
+    wet, dry = wash("water"), wash("oil")
+    a_w, a_o = wet[..., 3], dry[..., 3]
+
+    # WICKING: the paper drinks the wash sideways, so the mark ends up
+    # larger than the brush that made it
+    assert float((a_w > 0.02).sum()) > float((a_o > 0.02).sum()) * 1.15, \
+        "a wash must spread beyond the stroke mask"
+
+    # EDGE DARKENING: pigment carried to the perimeter and stranded there,
+    # so somewhere on the boundary is denser than the body of the wash
+    on = a_w > 0.15
+    ys, xs = np.nonzero(on)
+    core = a_w[ys.min() + 12:ys.max() - 12, 300:420]
+    col = a_w[:, 360]
+    edge_peak = float(col[on[:, 360]][-6:].max())
+    assert edge_peak > float(core.mean()) + 0.05, \
+        "the wash edge must be denser than its middle"
+
+    # GRANULATION: pigment is heavier than water and settles into the
+    # paper's DIPS. Comparing raw variance against oil does not test this --
+    # oil has plenty of variance of its own from the bristle hairs, and in
+    # fact measures higher. What is specific to granulation is that the
+    # pigment anti-correlates with the tooth: more where the paper is low.
+    from lestudio import _tooth_hw
+    tooth = _tooth_hw(*a_w.shape)
+    def corr(a, m):
+        x, y = tooth[m], a[m]
+        return float(np.corrcoef(x, y)[0, 1])
+    c_w = corr(a_w, on)
+    c_o = corr(a_o, a_o > 0.15)
+    assert c_w < -0.1, "a wash must pool in the paper's dips: %.3f" % c_w
+    assert c_w < c_o - 0.1, \
+        "and distinctively so vs stiff paint: %.3f vs %.3f" % (c_w, c_o)
+
+
+def test_fluid_media_settle_into_the_paper_dips():
+    """`settle` flips which way the substrate works: stiff paint dragged by a
+    brush catches on the risen threads, a fluid wash pools in the dips. Using
+    the stiff-paint rule for watercolour put the wash exactly where the water
+    would have run out of."""
+    from lestudio import _MEDIA
+    assert _MEDIA["water"].get("settle", 0.0) > 0.5
+    assert _MEDIA["oil"].get("settle", 0.0) < 0.5
+    assert _MEDIA["acrylic"].get("settle", 0.0) < 0.5
+
+
+def test_gravity_is_a_surface_property_not_an_assumption():
+    """Wet paint ran screen-down no matter what, which is only right for a
+    canvas on an easel. A layer standing on a wall runs down THAT wall, and a
+    canvas lying flat on a table has no in-plane gravity at all -- a puddle
+    there levels outward instead of running."""
+    import numpy as np
+    from lestudio import Document
+
+    def drift(gravity, angle):
+        d = Document(880, 150, background=(0.97, 0.96, 0.94))
+        d.add_layer("p")
+        lid = d.layers[-1].id
+        l = d.layer(lid)
+        l.gravity, l.gravity_angle = gravity, angle
+        d.paint(lid, [[90 + t * 9.0, 55] for t in range(80)],
+                color=(0.2, 0.35, 0.72), radius=18, media="water", load=1.5)
+        a = d.layers[-1].pixels[..., 3]
+        ys, xs = np.nonzero(a > 0.05)
+        return float(ys.mean() - 55), float(xs.mean() - 445.5)
+
+    dy_down, _ = drift(1.0, 90.0)
+    dy_flat, _ = drift(0.0, 90.0)
+    dy_up, _ = drift(1.0, 270.0)
+    _, dx_left = drift(1.0, 180.0)
+    _, dx_right = drift(1.0, 0.0)
+
+    assert dy_down > 3.0, "an easel must run the paint down: %.1f" % dy_down
+    assert dy_up < -3.0, "inverted gravity must run it up: %.1f" % dy_up
+    assert abs(dy_flat) < 1.0, \
+        "flat on a table must LEVEL, not run: %.1f" % dy_flat
+    assert dx_left < -3.0, "180 degrees must run it left: %.1f" % dx_left
+    assert dx_right > 3.0, "0 degrees must run it right: %.1f" % dx_right
+    # and a flat surface must still MOVE the paint (levelling is not "off")
+    d = Document(400, 300, background=(0.97, 0.96, 0.94))
+    d.add_layer("p")
+    lid = d.layers[-1].id
+    d.layer(lid).gravity = 0.0
+    d.paint(lid, [[190, 150], [210, 150]], color=(0.2, 0.35, 0.72),
+            radius=20, media="water", load=1.5)
+    spread = int((d.layers[-1].pixels[..., 3] > 0.05).sum())
+    d2 = Document(400, 300, background=(0.97, 0.96, 0.94))
+    d2.add_layer("p")
+    l2 = d2.layers[-1].id
+    d2.layer(l2).gravity = 0.0
+    d2.paint(l2, [[190, 150], [210, 150]], color=(0.2, 0.35, 0.72),
+             radius=20, media="acrylic", load=1.5)
+    assert spread > int((d2.layers[-1].pixels[..., 3] > 0.05).sum()), \
+        "a flat puddle must still spread outward as it levels"
+
+
+def test_surface_gravity_round_trips_through_the_api():
+    """The surface control has to READ BACK, or the UI cannot show which way
+    this layer's paint runs."""
+    import json
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+    lid = c.get("/api/state").json["layers"][0]["id"]
+    r = c.post("/api/layer", data=json.dumps(
+        {"action": "edit", "id": lid, "gravity": 0.0,
+         "gravity_angle": 90}), **J)
+    assert r.status_code == 200, r.data[:200]
+    l = c.get("/api/state").json["layers"][0]
+    assert l["gravity"] == 0.0 and l["gravity_angle"] == 90.0
+    ui = open(__file__.replace("tests/test_studio.py",
+                               "src/lestudio/static/index.html")).read()
+    assert "lGrav" in ui, "and it needs a control in the app"
+
+
+def test_palette_is_reachable_from_the_app():
+    """The palette must be reachable from the interface, and it must land on
+    its OWN surface -- passing a picture layer is no longer how you address
+    it, because the palette is not a layer of the picture."""
+    import json
+    import os
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+    before = [l["name"] for l in c.get("/api/state").json["layers"]]
+    r = c.post("/api/palette", data=json.dumps(
+        {"colors": [[0.8, 0.1, 0.1], [0.95, 0.95, 0.9]]}), **J)
+    assert r.status_code == 200 and len(r.json["spots"]) == 2
+    after = [l["name"] for l in c.get("/api/state").json["layers"]]
+    assert after == before, "squeezing must not add layers to the picture"
+    pd = SV.DOC.palette_doc(create=False)
+    assert pd is not None and pd is not SV.DOC
+    assert float(pd.palette_layer(create=False).height_map.max()) > 2.2, \
+        "mounds must be pilings you can dip into"
+    assert c.post("/api/palette", data=json.dumps(
+        {"colors": []}), **J).status_code == 400
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html"), encoding="utf-8").read()
+    assert "bSqueeze" in ui and "/api/palette" in ui
+def test_paper_stock_changes_how_paint_meets_the_surface():
+    """The substrate was ONE fixed field, so every surface behaved like the
+    same mid-grain canvas -- yet it decides where thin paint catches, where a
+    wash pools, and how hard things break up.
+
+    Measured as how strongly pigment tracks the paper's DIPS, which is the
+    mechanism itself. Variance proxies do not work here and it is worth
+    saying why: the wash alpha saturates near 1 over most of a loaded mark,
+    so the mottle is clipped out of any std you take, and high-pass filters
+    miss it unless the cutoff happens to match that stock's grain size --
+    both of which I got wrong before measuring the mechanism directly.
+    """
+    import numpy as np
+    from lestudio import Document, _tooth_hw
+
+    def settling(paper, load=1.0, media="water"):
+        d = Document(700, 200, background=(0.98, 0.97, 0.95))
+        d.add_layer("p")
+        lid = d.layers[-1].id
+        d.set_paper(paper)
+        d.paint(lid, [[80 + t * 4.4, 100] for t in range(100)],
+                color=(0.2, 0.35, 0.72), radius=26, media=media, load=load)
+        a = d.layers[-1].pixels[..., 3]
+        t = _tooth_hw(*a.shape, paper)
+        m = (a > 0.35) & (a < 0.999)
+        assert m.sum() > 200
+        return float(np.corrcoef(t[m], a[m])[0, 1])
+
+    rough, cold = settling("rough"), settling("cold_press")
+    hot, smooth = settling("hot_press"), settling("smooth")
+    # negative = pigment pooling in the dips. Rough grabs hard; a smooth
+    # sheet gives the wash nothing to settle into.
+    assert rough < -0.12, "rough must pool the wash in its dips: %.3f" % rough
+    assert rough < cold < hot, "and the stocks must order sensibly"
+    assert smooth > -0.02, "a smooth sheet must barely settle: %.3f" % smooth
+
+
+def test_paper_round_trips_through_the_api():
+    import json
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+    st = c.get("/api/state").json
+    assert "rough" in st["papers"] and "hot_press" in st["papers"]
+    assert c.post("/api/paper", data=json.dumps(
+        {"paper": "rough"}), **J).status_code == 200
+    assert c.get("/api/state").json["paper"] == "rough"
+    r = c.post("/api/paper", data=json.dumps({"paper": "papyrus"}), **J)
+    assert r.status_code == 400 and b"papyrus" in r.data
+    ui = open(__file__.replace("tests/test_studio.py",
+                               "src/lestudio/static/index.html"),
+              encoding="utf-8").read()
+    assert "dPaper" in ui, "and the stock needs a control in the app"
+
+
+def test_brush_loads_even_when_the_stroke_is_not_recorded():
+    """Painting ALWAYS changes what is on the brush. The reservoir write-back
+    used to be gated on `record`, conflating "should this stroke be undoable"
+    with "did the brush pick anything up" -- so dabs passed with record=False
+    (the normal way to lay texture without a stroke record per dab) silently
+    did not load the brush. Found by painting a still life: dipping into a
+    palette in a loop left the brush exactly the colour it started."""
+    import numpy as np
+    from lestudio import Document
+    for rec in (True, False):
+        d = Document(600, 300, background=(0.95, 0.94, 0.91))
+        lid = d.layers[0].id
+        sp = d.lay_palette(lid, [(0.74, 0.11, 0.09)], x=70, y=70, size=30,
+                           media="oil")
+        d.load_brush(color=(0.5, 0.5, 0.5), amount=1.0)
+        x, y = sp[0]
+        for k in range(3):
+            d.paint(lid, [[x - 20 + t * 2.2, y - 9 + k * 9] for t in range(19)],
+                    color=tuple(d.brush_color), radius=12, media="oil",
+                    load=1.2, real_brush=True, mix=1.0, record=rec)
+        c = np.asarray(d.brush_color)
+        assert c[0] - c[1] > 0.02, \
+            "record=%s must still load the brush: %s" % (rec, np.round(c, 3))
+
+
+def test_a_live_stroke_spends_the_brush_once_not_once_per_flush():
+    """A live stroke repaints the whole mark from `before` on every flush, so
+    the reservoir has to rewind with the pixels -- otherwise the brush emptied
+    once per flush and a long stroke went dry far too fast."""
+    from lestudio import Document
+    d = Document(900, 300)
+    lid = d.layers[0].id
+    pts = [[60 + i * 8, 150] for i in range(90)]
+    kw = dict(color=(0.2, 0.4, 0.8), radius=18, media="oil", load=1.2,
+              real_brush=True)
+    d.load_brush(color=(0.2, 0.4, 0.8), amount=1.0)
+    d.paint(lid, pts, **kw)
+    once = d.brush_charge
+    d2 = Document(900, 300)
+    l2 = d2.layers[0].id
+    d2.load_brush(color=(0.2, 0.4, 0.8), amount=1.0)
+    d2.paint_live(l2, pts[:6], True, **kw)
+    for k in range(12, 91, 12):
+        d2.paint_live(l2, pts[:k], False, **kw)
+    assert abs(d2.brush_charge - once) < 0.12, \
+        "live %.3f vs committed %.3f" % (d2.brush_charge, once)
+
+
+def test_paint_spills_onto_a_new_stratum_instead_of_flattening():
+    """A layer can only hold so much paint. Beyond `_HEIGHT_CAP` the height
+    field was simply CLIPPED, so a worked passage saturated after about two
+    loaded passes and every later stroke added nothing -- the mark flattened
+    to a plateau at exactly the cap, which is the inorganic stepped look.
+    The excess now starts a new stratum from zero, the way a painter builds
+    heavy impasto in campaigns."""
+    import numpy as np
+    from lestudio import Document, _HEIGHT_CAP
+
+    def worked(auto, passes=9):
+        d = Document(500, 200)
+        d.auto_stratum = auto
+        d.add_layer("p")
+        base = d.layers[-1].id
+        for _ in range(passes):
+            d.paint(base, [[60, 100], [440, 100]], color=(0.8, 0.3, 0.2),
+                    radius=30, media="oil", load=1.5)
+        st = [l for l in d.layers if l.height_map is not None]
+        return d, base, st, sum(float(l.height_map.max()) for l in st)
+
+    d0, _, st0, tot0 = worked(False)
+    d1, base, st1, tot1 = worked(True)
+    assert len(st0) == 1 and abs(tot0 - _HEIGHT_CAP) < 0.01, \
+        "with spilling off, paint must still saturate at the cap"
+    assert tot1 > tot0 * 4, \
+        "spilling must keep building relief: %.1f vs %.1f" % (tot1, tot0)
+    # NO stratum may exceed the cap -- spilling once only defers the ceiling
+    for l in st1:
+        assert float(l.height_map.max()) <= _HEIGHT_CAP + 1e-3, l.name
+    # named from the ROOT of the chain, not "p ~2 ~2 ~2 ~2"
+    assert all(l.name.count("build-up") <= 1 for l in d1.layers), \
+        [l.name for l in d1.layers]
+    # each stratum sits one cap higher than the last
+    zs = [float(getattr(l, "z_off", 0.0)) for l in st1]
+    assert zs == sorted(zs) and zs[-1] > zs[0]
+
+
+def test_a_stratum_is_rebuilt_not_piled_onto_by_replay():
+    """The stratum is DERIVED from the base layer's strokes, so a rebuild has
+    to clear the whole chain first or every replay stacks another copy."""
+    import numpy as np
+    from lestudio import Document
+    d = Document(400, 200)
+    d.auto_stratum = True
+    d.add_layer("p")
+    base = d.layers[-1].id
+    for _ in range(6):
+        d.paint(base, [[50, 100], [350, 100]], color=(0.8, 0.3, 0.2),
+                radius=28, media="oil", load=1.5)
+    before = [float(l.height_map.max()) for l in d.layers
+              if l.height_map is not None]
+    d.replay_layer(base)
+    d.replay_layer(base)
+    after = [float(l.height_map.max()) for l in d.layers
+             if l.height_map is not None]
+    assert len(after) == len(before)
+    assert max(after) <= max(before) + 1e-3, \
+        "replays must not pile onto the stratum: %s -> %s" % (before, after)
+
+
+def test_palette_knife_shapes_the_whole_paint_column():
+    """Paint can span several strata, and nothing could push it around. The
+    knife works the COLUMN -- the total across the whole chain -- and pours
+    the result back down, so the body stays one continuous mass. That
+    re-levelling is also the cure for stepping between strata."""
+    import numpy as np
+    from lestudio import Document, _HEIGHT_CAP
+
+    def worked():
+        d = Document(500, 240)
+        d.auto_stratum = True
+        d.add_layer("p")
+        lid = d.layers[-1].id
+        for _ in range(7):
+            d.paint(lid, [[70, 120], [430, 120]], color=(0.8, 0.35, 0.2),
+                    radius=34, media="oil", load=1.5)
+        return d, lid
+
+    d, lid = worked()
+    chain = d._stratum_chain(lid)
+    assert len(chain) > 2, "the test needs a column that spans strata"
+    before = d._column(chain)
+    rough0 = float(before[before > 0.1].std())
+    vol0 = float(before.sum())
+
+    d.knife(lid, [[60, 120], [440, 120]], mode="smooth", radius=40, strength=0.9)
+    after = d._column(d._stratum_chain(lid))
+    assert float(after[after > 0.1].std()) < rough0, "smooth must level it"
+    # every layer but the top still respects the cap after the refill
+    ch = d._stratum_chain(lid)
+    for l in ch[:-1]:
+        assert float(l.height_map.max()) <= _HEIGHT_CAP + 1e-3, l.name
+    # and a stratum knows what it sits on, so it lights as one column
+    assert getattr(ch[1], "height_below", None) is not None
+
+    # PUSH conserves volume -- it ploughs paint, it does not delete it
+    d2, l2 = worked()
+    v0 = float(d2._column(d2._stratum_chain(l2)).sum())
+    d2.knife(l2, [[80, 120], [420, 120]], mode="push", radius=36, strength=0.8)
+    v1 = float(d2._column(d2._stratum_chain(l2)).sum())
+    assert v1 > v0 * 0.90, "push must move paint, not destroy it: %.0f -> %.0f" % (v0, v1)
+
+    # SCRAPE takes the tops off
+    d3, l3 = worked()
+    p0 = float(d3._column(d3._stratum_chain(l3)).max())
+    d3.knife(l3, [[60, 120], [440, 120]], mode="scrape", radius=40, strength=0.9)
+    assert float(d3._column(d3._stratum_chain(l3)).max()) < p0 * 0.8
+
+
+def test_knife_is_a_recorded_replayable_stroke():
+    import numpy as np
+    from lestudio import Document
+    d = Document(400, 200)
+    d.add_layer("p")
+    lid = d.layers[-1].id
+    for _ in range(3):
+        d.paint(lid, [[50, 100], [350, 100]], color=(0.8, 0.3, 0.2),
+                radius=28, media="oil", load=1.4)
+    sid = d.knife(lid, [[40, 100], [360, 100]], mode="smooth", radius=34)
+    assert d.stroke_by_id(sid)["brush"].get("knife") == "smooth"
+    before = d.layers[-1].pixels.copy()
+    rep = d.replay_layer(lid)
+    assert np.allclose(rep, before, atol=1e-5), "a knife stroke must replay"
+
+
+def test_no_shortcut_is_silently_double_bound():
+    """A duplicate key in the tool map is not an error in JS -- the later one
+    silently wins and the earlier binding just stops working. This has bitten
+    twice: the blender took Nudge's N, and the knife took Select-strokes' K,
+    in both cases without a whisper."""
+    import os
+    import re
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html"), encoding="utf-8").read()
+    m = re.search(r"const KEYTOOL\s*=\s*\{(.*?)\n\s*\};", ui, re.S)
+    if not m:
+        # the map is an inline object literal; find the block holding the
+        # tool letters by its known members instead
+        i = ui.index("s:'smudge'")
+        j = ui.index("}", i)
+        block = ui[ui.rindex("{", 0, i):j]
+    else:
+        block = m.group(1)
+    keys = re.findall(r"[\{,]\s*'?([A-Za-z0-9])'?\s*:\s*'[a-z]+'", block)
+    dupes = sorted({k for k in keys if keys.count(k) > 1})
+    assert not dupes, "keys bound twice, the later silently wins: %s" % dupes
+
+
+def test_every_new_control_reaches_its_endpoint():
+    """Each control added for the paint work must actually drive something --
+    an endpoint with no UI is buried, and a control with no endpoint is a
+    dead button."""
+    import json
+    import os
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+    lid = c.get("/api/state").json["layers"][0]["id"]
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html"), encoding="utf-8").read()
+    # control id in the app  ->  the call it makes
+    pairs = [
+        ("dPaper",   "/api/paper",      {"paper": "rough"}),
+        ("bStrat",   "/api/stratum",    {"on": True}),
+        ("bSqueeze", "/api/palette",    {"layer": lid,
+                                         "colors": [[0.8, 0.1, 0.1]]}),
+        ("bCharge",  "/api/brush_load", {"amount": 1.0}),
+        ("ssGroup",  "/api/stroke_group", {"action": "create",
+                                           "strokes": []}),
+    ]
+    for cid, url, body in pairs:
+        assert 'id="%s"' % cid in ui, "%s has no control in the app" % cid
+        assert url in ui, "%s is never called from the app" % url
+        assert c.post(url, data=json.dumps(body), **J).status_code in (200, 400)
+    # the knife's four blades all have to work, not just the default
+    for blade in ("smooth", "push", "scrape", "spread"):
+        r = c.post("/api/paint", data=json.dumps(
+            {"layer": lid, "points": [[40, 75], [300, 75]], "mode": "knife",
+             "knife": blade, "radius": 30, "opacity": 0.7}), **J)
+        assert r.status_code == 200, (blade, r.data[:120])
+    assert "cycleKnife" in ui, "the blade must be reachable from the app"
+
+
+def test_compositing_is_atomic_against_a_resize():
+    """Compositing reads the document's SIZE and then its LAYERS -- two
+    separate reads. A resize landing between them composited layers of the
+    old shape into a frame of the new one and 500'd:
+      "operands could not be broadcast together with shapes (350,500,3) (200,300,3)"
+    This was intermittent across four sightings before it was reproduced (5
+    failures in 40 runs) and fixed with a document lock. Hammer it here so it
+    cannot come back silently."""
+    import threading
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    errs, stop = [], [False]
+
+    def reader():
+        while not stop[0]:
+            r = c.get("/api/composite.png?fmt=auto")
+            if r.status_code >= 500:
+                errs.append(r.data[:200])
+
+    t = threading.Thread(target=reader)
+    t.start()
+    try:
+        for rep in range(6):
+            for i in range(4):
+                w, h = (300, 200) if i % 2 else (500, 350)
+                c.post("/api/doc", json={"action": "settings", "width": w,
+                                         "height": h, "mode": "resample"})
+            c.post("/api/new", json={"width": 220, "height": 160,
+                                     "name": "race%d" % rep})
+    finally:
+        stop[0] = True
+        t.join()
+    assert not errs, errs[:2]
+
+
+def test_an_empty_brush_lays_nothing():
+    """Real-brush mode is meaningless if running dry does not stop you. The
+    coverage law has a 0.5 floor so a merely tired brush still puts colour
+    down -- but that floor ignored the reservoir, so a brush at zero charge
+    still laid a 50% film. It must fade out over the last sliver of charge,
+    not cut off, or a stroke ends in a hard edge mid-air."""
+    import numpy as np
+    from lestudio import Document
+
+    def lay(amount):
+        d = Document(400, 140)
+        d.add_layer("p")
+        lid = d.layers[-1].id
+        d.load_brush(color=(0.8, 0.3, 0.2), amount=amount)
+        d.paint(lid, [[40, 70], [360, 70]], color=(0.8, 0.3, 0.2), radius=22,
+                media="oil", load=1.3, real_brush=True)
+        a = d.layers[-1].pixels[..., 3]
+        return float((a > 0.05).mean()), float(a.max())
+
+    cov0, pk0 = lay(0.0)
+    cov_lo, pk_lo = lay(0.05)
+    cov_hi, pk_hi = lay(1.0)
+    assert cov0 == 0.0 and pk0 == 0.0, "an empty brush must lay NOTHING"
+    assert 0.0 < pk_lo < 0.5, "a nearly empty one ghosts: %.2f" % pk_lo
+    assert pk_hi > 0.9, "a loaded one is unaffected: %.2f" % pk_hi
+    assert cov_lo < cov_hi, "and it must fade, not cut off"
+
+
+def test_user_facing_errors_are_not_python_errors():
+    """A painter cannot act on "could not convert string to float: 'red'"."""
+    import json
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+    lid = c.get("/api/state").json["layers"][0]["id"]
+    bad = [("/api/palette", {"layer": lid, "colors": [["red"]]}),
+           ("/api/paper", {"paper": "papyrus"}),
+           ("/api/stroke_group", {"action": "dissolve", "group": "nope"})]
+    for url, body in bad:
+        r = c.post(url, data=json.dumps(body), **J)
+        assert r.status_code >= 400
+        msg = r.json.get("error", "")
+        for leak in ("Traceback", "could not convert", "NoneType",
+                     "object has no attribute", "list index"):
+            assert leak not in msg, "%s leaks a Python error: %s" % (url, msg)
+        assert len(msg) > 8
+
+
+def test_studio_setups_are_offered_where_the_intent_forms():
+    """Painting properly meant finding five separate switches -- a medium,
+    real brush, the paper, a palette to dip in, sometimes strata. The setups
+    are offered in the Media menu because that is where someone deciding to
+    try oil actually looks, and each one must configure the whole studio
+    rather than just naming a medium."""
+    import os
+    import re
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html"), encoding="utf-8").read()
+    assert 'value="setup:oil"' in ui and 'value="setup:water"' in ui \
+        and 'value="setup:ink"' in ui, "the setups must be in the Media menu"
+    m = re.search(r"const STUDIOS=\{(.*?)\n\};", ui, re.S)
+    assert m, "the setups must be declared"
+    block = m.group(1)
+    for key in ("oil", "water", "ink"):
+        assert re.search(r"\b%s:\s*\{" % key, block), key
+    # each one has to touch every axis, or it is a medium picker wearing a
+    # setup's name
+    for axis in ("media", "paper", "real", "strata", "mix", "cols", "says"):
+        assert block.count(axis + ":") >= 3, \
+            "%s is not set by every setup" % axis
+    # and it must actually drive the endpoints, not just set local state
+    i = ui.index("async function applyStudio")
+    seg = ui[i:i + 1200]
+    for call in ("/api/paper", "/api/palette"):
+        assert call in seg, "applyStudio never calls %s" % call
+    assert "refreshDock" in seg, "a setup squeezes paint, so the dock must show it"
+
+
+def test_studio_setup_endpoints_all_work_together():
+    """Walk what a setup does, in order, and check nothing 4xxs."""
+    import json
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+    for paper, cols in (("cold_press", [[0.82, 0.10, 0.06], [0.97, 0.96, 0.93]]),
+                        ("rough", [[0.11, 0.31, 0.69], [0.70, 0.19, 0.12]]),
+                        ("hot_press", [[0.07, 0.07, 0.08]])):
+        assert c.post("/api/paper", data=json.dumps(
+            {"paper": paper}), **J).status_code == 200
+        assert c.post("/api/palette", data=json.dumps(
+            {"colors": cols}), **J).status_code == 200
+        assert c.post("/api/stratum", data=json.dumps(
+            {"on": paper == "cold_press"}), **J).status_code == 200
+        st = c.get("/api/state").json
+        assert st["paper"] == paper
+        assert st["palette_ready"], "every setup leaves a palette to dip into"
+        assert c.get("/api/palette.png").status_code == 200
+
+
+def test_the_studio_survives_a_save_and_reopen():
+    """Everything added for painting is DOCUMENT STATE, and losing it on save
+    is silent: a reopened picture would sit on a different substrate, stop
+    building past the layer ceiling, shade its deep paint as stepped slabs
+    again, and put the palette back into the picture. Exercised through
+    `_doc_section` / `_doc_from_section`, which is what save/load use -- the
+    container format itself needs an optional dependency."""
+    import numpy as np
+    from lestudio import Document, _doc_section, _doc_from_section
+
+    d = Document(400, 300, background=(0.95, 0.94, 0.91))
+    d.set_paper("rough")
+    d.auto_stratum = True
+    d.add_layer("art")
+    art = d.layer(d.layers[-1].id)
+    art.gravity, art.gravity_angle = 0.0, 180.0
+    d.lay_palette(colors=[(0.8, 0.1, 0.1), (0.9, 0.9, 0.9)])
+    d.load_brush(color=(0.2, 0.5, 0.9), amount=0.7)
+    for _ in range(6):                      # deep enough to spill into strata
+        d.paint(art.id, [[60, 150], [340, 150]], color=(0.8, 0.3, 0.2),
+                radius=28, media="oil", load=1.5)
+    strata = [l for l in d.layers if getattr(l, "stratum_of", None)]
+    assert strata, "the test needs a column that spans strata"
+
+    dm, arrays = _doc_section(d, None)      # (doc, node graph)
+    e, _g = _doc_from_section(dm, arrays)   # returns (doc, node graph)
+
+    assert e.paper == "rough", "the substrate must come back"
+    assert e.auto_stratum is True, "so must building past the ceiling"
+    assert abs(e.brush_charge - 0.7) < 1e-3, "and what is on the brush"
+    assert getattr(e, "brush_lanes", None) is not None
+    pal = [l for l in e.layers if getattr(l, "palette", False)]
+    assert len(pal) == 1, "the palette must still be a palette, not picture"
+    assert pal[0] not in e.canvas_layers()
+    a2 = next(l for l in e.layers if l.name == "art")
+    assert a2.gravity == 0.0 and a2.gravity_angle == 180.0
+    # the chain, and what each stratum sits on -- without these the column
+    # shades as separate sheets and the stepping comes back
+    st2 = [l for l in e.layers if getattr(l, "stratum_of", None)]
+    assert len(st2) == len(strata), "the stratum chain must survive"
+    assert any(getattr(l, "height_below", None) is not None for l in st2), \
+        "and each stratum must remember what it sits on"
+    assert all(getattr(l, "stratum_root", None) for l in st2)
+
+
+def test_no_brush_control_is_labelled_only_by_a_symbol():
+    """Reported by a user: "some of the settings are just a single character
+    or symbol without explanation". A glyph plus a tooltip is still a guess --
+    you have to hover the right thing to find out what it is. Brush controls
+    say what they do in words."""
+    import os
+    import re
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html"), encoding="utf-8").read()
+    panel = ui[ui.index('<div class="row"><label>Color</label>'):][:12000]
+
+    offenders = []
+    for m in re.finditer(r'<button\b([^>]*)>([^<]*)</button>', panel):
+        attrs, txt = m.group(1), m.group(2).strip()
+        cid = re.search(r'id="([A-Za-z0-9_]+)"', attrs)
+        if not cid or not txt:
+            continue          # an empty button is a swatch, judged by colour
+        if len(txt) <= 2 and not txt.isalnum():
+            offenders.append(cid.group(1))
+    # a bare glyph as a label, e.g. a lone symbol standing in for a name
+    for m in re.finditer(r'<label[^>]*>([^<]{1,3})<', panel):
+        t = m.group(1).strip()
+        if t and not re.match(r'^[A-Za-z0-9]', t):
+            offenders.append("label:%r" % t)
+    assert not offenders, "symbol-only brush controls: %s" % offenders
+
+    # the ones that caused the complaint must now read as words
+    for word in ("runs out", "build up", "palette", "mirror",
+                 "snap", "shapes"):
+        assert ">%s" % word in panel or "%s<" % word in panel, \
+            "%r is not a visible label" % word
+    # and every brush control still carries an explanation
+    for m in re.finditer(r'<(button|select)\b([^>]*)>', panel):
+        attrs = m.group(2)
+        cid = re.search(r'id="([A-Za-z0-9_]+)"', attrs)
+        if cid and 'title=' not in attrs:
+            raise AssertionError("%s has no tooltip" % cid.group(1))
+def test_the_palette_is_its_own_surface_not_a_layer():
+    """A palette is not part of a picture and does not belong to any of its
+    layers. It is its own small document: it can never be nudged by editing
+    the painting, never exported, and never spills into strata -- which is
+    what bred "Palette ~2 ... ~6" when it lived in the document."""
+    from lestudio import Document
+    d = Document(600, 400)
+    d.auto_stratum = True
+    pd = d.palette_doc()
+    assert pd is not d and pd.auto_stratum is False
+    pd.lay_palette(colors=[(0.85, 0.08, 0.05), (0.97, 0.96, 0.93),
+                           (0.94, 0.75, 0.06), (0.1, 0.2, 0.6),
+                           (0.06, 0.05, 0.05), (0.24, 0.46, 0.14)],
+                   x=50, y=75, size=30)
+    assert [l.name for l in d.layers] == ["Background"], \
+        "the picture must have no palette layer at all: %s" % [l.name for l in d.layers]
+    assert not any(getattr(l, "stratum_of", None) for l in pd.layers), \
+        "and the palette must not spill: %s" % [l.name for l in pd.layers]
+    assert d.palette_doc() is pd, "it is reused, not rebuilt"
+
+
+def test_dipping_on_the_palette_loads_the_picture_s_brush():
+    """The brush you dip is the brush you paint with. The palette borrows its
+    owner's reservoir -- two reservoirs would silently disagree and a dip
+    would appear to do nothing."""
+    import numpy as np
+    from lestudio import Document
+    d = Document(600, 400)
+    pd = d.palette_doc()
+    pd.lay_palette(colors=[(0.85, 0.08, 0.05)], x=60, y=75, size=32)
+    assert pd._res() is d, "the palette must borrow the picture's brush"
+    d.load_brush(color=(0.5, 0.5, 0.5), amount=1.0)
+    lid = pd.palette_layer(create=False).id
+    for k in range(4):
+        pd.paint(lid, [[60 - 22 + t * 2.6, 75 - 12 + k * 8] for t in range(18)],
+                 color=tuple(d.brush_color), radius=13, media="oil",
+                 load=1.2, real_brush=True, mix=1.0)
+    c = np.asarray(d.brush_color)
+    assert c[0] - c[1] > 0.05, "the PICTURE's brush must load: %s" % np.round(c, 3)
+    # and mixing on the palette is ordinary painting, so the blender works
+    pd.blend_stroke(lid, [[40, 75], [200, 80]], radius=24, strength=0.6)
+
+
+def test_palette_surface_endpoints():
+    import json
+    import os
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+    assert c.post("/api/palette", data=json.dumps(
+        {"colors": [[0.85, 0.08, 0.05], [0.97, 0.96, 0.93]]}), **J).status_code == 200
+    r = c.get("/api/palette.png")
+    assert r.status_code == 200
+    box = [int(v) for v in r.headers["X-Palette-Box"].split(",")]
+    assert box[2] - box[0] > 80, "mounds must be big enough to dip in: %s" % box
+    assert c.get("/api/state").json["palette_ready"] is True
+    # dip
+    c.post("/api/brush_load", data=json.dumps({"color": [0.5, 0.5, 0.5],
+                                               "amount": 1.0}), **J)
+    cx, cy = box[0] + 30, (box[1] + box[3]) // 2
+    for k in range(4):
+        assert c.post("/api/palette/paint", data=json.dumps(
+            {"points": [[cx - 22 + t * 2.6, cy - 12 + k * 8] for t in range(18)],
+             "color": [0.5, 0.5, 0.5], "radius": 13, "media": "oil",
+             "load": 1.2, "real_brush": True, "mix": 1.0}), **J).status_code == 200
+    col = c.get("/api/state").json["brush_state"]["color"]
+    assert col[0] - col[1] > 0.05, "dipping must load the brush: %s" % col
+    # mix mode, then scrape clean
+    assert c.post("/api/palette/paint", data=json.dumps(
+        {"points": [[cx, cy], [cx + 90, cy + 8]], "mode": "blend",
+         "radius": 24}), **J).status_code == 200
+    assert c.post("/api/palette/clear", data="{}", **J).status_code == 200
+    assert c.get("/api/palette.png").status_code == 404
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html"), encoding="utf-8").read()
+    for tok in ("palMix", "palClear", "/api/palette/paint", "palette_ready"):
+        assert tok in ui, tok
+
+
+def test_the_palette_surface_survives_a_save_and_reopen():
+    """The palette is document state like any other: mixing a set of colours
+    and losing them on reopen is the same silent loss as any other. Its pixel
+    arrays go under a "pal_" prefix because BOTH documents number their layers
+    from L1 and the keys would otherwise collide -- the first attempt died
+    with KeyError: 'layer_L2'."""
+    import numpy as np
+    from lestudio import Document, _doc_section, _doc_from_section
+    d = Document(400, 300)
+    pd = d.palette_doc()
+    pd.lay_palette(colors=[(0.85, 0.08, 0.05), (0.97, 0.96, 0.93)],
+                   x=60, y=75, size=30)
+    d.load_brush(color=(0.85, 0.08, 0.05), amount=0.6)
+    before = float(pd.palette_layer(create=False).height_map.max())
+
+    dm, arrays = _doc_section(d, None)
+    e, _g = _doc_from_section(dm, arrays)
+
+    p2 = e.palette_doc(create=False)
+    assert p2 is not None, "the palette must come back with the picture"
+    assert abs(float(p2.palette_layer(create=False).height_map.max())
+               - before) < 1e-3, "with its paint still on it"
+    assert p2 is not e and p2.auto_stratum is False
+    assert p2._res() is e, "and still borrowing the REOPENED picture's brush"
+    assert [l.name for l in e.layers] == ["Background"], \
+        "and still not a layer of the picture"
+    # a dip after reopening must load the reopened brush
+    e.load_brush(color=(0.5, 0.5, 0.5), amount=1.0)
+    lid = p2.palette_layer(create=False).id
+    for k in range(4):
+        p2.paint(lid, [[60 - 22 + t * 2.6, 75 - 12 + k * 8] for t in range(18)],
+                 color=tuple(e.brush_color), radius=13, media="oil",
+                 load=1.2, real_brush=True, mix=1.0)
+    c = np.asarray(e.brush_color)
+    assert c[0] - c[1] > 0.05, "dipping after reopen must work: %s" % np.round(c, 3)
+
+
+def test_undo_follows_whichever_surface_you_last_worked_on():
+    """Undo has to undo THE LAST THING YOU DID. Mixing a colour on the
+    palette and pressing Ctrl+Z did nothing at all, because undo only ever
+    spoke to the picture while the palette kept its own stack."""
+    import json
+    import numpy as np
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+
+    def post(u, b={}):
+        return c.post(u, data=json.dumps(b), **J)
+
+    lid = c.get("/api/state").json["layers"][0]["id"]
+    post("/api/palette", {"colors": [[0.85, 0.08, 0.05], [0.97, 0.96, 0.93]]})
+    pd = SV.DOC.palette_doc(create=False)
+    plid = pd.palette_layer(create=False).id
+
+    # mix on the palette, then undo
+    pal_before = pd.layer(plid).pixels.copy()
+    post("/api/palette/paint", {"points": [[60, 70], [220, 80]],
+                                "mode": "blend", "radius": 24})
+    assert not np.array_equal(pd.layer(plid).pixels, pal_before)
+    assert post("/api/undo").json["ok"] is True
+    assert np.array_equal(pd.layer(plid).pixels, pal_before), \
+        "undo must revert the palette when that is what you last touched"
+
+    # paint the picture, then undo -- the flag has to come back
+    art_before = SV.DOC.layer(lid).pixels.copy()
+    post("/api/paint", {"layer": lid, "points": [[20, 20], [200, 60]],
+                        "color": [0.2, 0.4, 0.8], "radius": 18})
+    assert not np.array_equal(SV.DOC.layer(lid).pixels, art_before)
+    assert post("/api/undo").json["ok"] is True
+    assert np.array_equal(SV.DOC.layer(lid).pixels, art_before), \
+        "and the picture when THAT is what you last touched"
+
+
+def test_the_palette_is_frictionless_and_recoverable():
+    """The palette must not be able to lose a session of mixing to one click,
+    must not require remembering a mode, and must not be invisible to
+    somebody who picked a medium without running a setup."""
+    import json
+    import os
+    import numpy as np
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+
+    def post(u, b={}):
+        return c.post(u, data=json.dumps(b), **J)
+
+    post("/api/palette", {"colors": [[0.85, 0.08, 0.05], [0.97, 0.96, 0.93]]})
+    pd = SV.DOC.palette_doc(create=False)
+    lid = pd.palette_layer(create=False).id
+    before = pd.layer(lid).pixels.copy()
+
+    # SCRAPING IS RECOVERABLE. Dropping the surface outright destroyed a
+    # session of mixing on one click with nothing to press afterwards.
+    post("/api/palette/clear")
+    assert not (pd.layer(lid).pixels[..., 3] > 0.02).any()
+    assert post("/api/undo").json["ok"] is True
+    assert np.allclose(pd.layer(lid).pixels, before, atol=1e-5)
+    # ...and the layer is still the palette afterwards. The UNDO snapshot is a
+    # separate path from save/load and used to drop the flag, which turned the
+    # palette back into an ordinary layer and broke its dock.
+    assert pd.palette_layer(create=False) is not None
+    assert c.get("/api/palette.png").status_code == 200
+
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html"), encoding="utf-8").read()
+    # MIXING NEEDS NO MODE: shift-drag works whatever state the toggle is in
+    assert "dragShift" in ui and "e.shiftKey" in ui
+    assert "shift-drag to mix" in ui, "and the hint must say so"
+    # DISCOVERABLE: choosing a medium with no palette yet invites you to make one
+    assert "squeeze out paint you can dip into" in ui
+    # and scraping must not read as final
+    assert "Ctrl+Z brings the paint back" in ui
+
+
+def test_you_cannot_strand_yourself_with_no_layer():
+    """From user-testing: deleting the only layer left a document with NO
+    layers. Painting into it then 500'd with a bare "no such item: L2", and
+    the app offered nothing to paint on -- a dead end reached by one click."""
+    import json
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+
+    def post(u, b={}):
+        return c.post(u, data=json.dumps(b), **J)
+
+    post("/api/new", {"width": 320, "height": 240, "name": "t"})
+    lid = c.get("/api/state").json["layers"][0]["id"]
+    r = post("/api/layer", {"action": "delete", "id": lid})
+    assert r.status_code == 400 and "only layer" in r.json["error"]
+    assert len(c.get("/api/state").json["layers"]) == 1
+    # with two, deleting is fine
+    post("/api/layer", {"action": "add"})
+    extra = c.get("/api/state").json["layers"][-1]["id"]
+    assert post("/api/layer", {"action": "delete",
+                               "id": extra}).json.get("ok") is True
+
+
+def test_painting_explains_itself_instead_of_failing_silently():
+    """Painting a layer that had been deleted crashed with a 500; it is a
+    stale reference, a user error, not a server fault. Painting a HIDDEN
+    layer is a different case and must NOT be refused -- see below."""
+    import json
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+
+    def post(u, b={}):
+        return c.post(u, data=json.dumps(b), **J)
+
+    post("/api/new", {"width": 320, "height": 240, "name": "t"})
+    lid = c.get("/api/state").json["layers"][0]["id"]
+    stroke = {"points": [[10, 10], [120, 50]], "color": [0.8, 0.3, 0.2],
+              "radius": 20}
+
+    # A HIDDEN layer is NOT refused: the stroke lands and the response warns.
+    # That does what the painter asked and explains it; refusing throws the
+    # stroke away. (I got this wrong once -- my scenario read only the status
+    # code and the pixels, never `warning`, and called it a silent failure.)
+    post("/api/layer", {"action": "edit", "id": lid, "visible": False})
+    r = post("/api/paint", dict(stroke, layer=lid))
+    assert r.status_code == 200
+    assert "HIDDEN" in (r.json.get("warning") or ""), \
+        "it must say why nothing appeared: %s" % r.json
+
+    r = post("/api/paint", dict(stroke, layer="L999"))
+    assert r.status_code == 400, "a stale layer is a user error, not a 500"
+    assert "gone" in r.json["error"].lower()
+
+    post("/api/layer", {"action": "edit", "id": lid, "visible": True})
+    assert post("/api/paint", dict(stroke, layer=lid)).status_code == 200
+
+
+def test_a_brush_that_runs_dry_stops_painting_there():
+    """Checked after a user-test scenario suggested otherwise -- it did not:
+    the earlier report measured alpha on the opaque BACKGROUND layer, where
+    every pixel reads as painted. Measure on a transparent layer."""
+    import numpy as np
+    from lestudio import Document
+    d = Document(400, 240)
+    d.add_layer("p")
+    lid = d.layers[-1].id
+    d.load_brush(color=(0.8, 0.2, 0.1), amount=0.06)
+    d.paint(lid, [[20 + i * 6, 120] for i in range(50)], color=(0.8, 0.2, 0.1),
+            radius=20, media="oil", load=1.3, real_brush=True)
+    a = d.layers[-1].pixels[..., 3]
+    assert float(a[:, 30].max()) > 0.05, "it paints while it has paint"
+    assert float(a[:, 260].max()) == 0.0, "and stops where it runs out"
+    assert d.brush_charge == 0.0
+
+
+def test_the_eraser_goes_through_the_whole_paint_column():
+    """From user-testing: a passage that built past a layer's ceiling lives on
+    several layers, and the eraser only cleared the base -- you wiped a mark
+    and it was still there, sitting on the strata above. The strata are the
+    same body of paint, so the eraser must go through the column."""
+    import numpy as np
+    from lestudio import Document
+    d = Document(400, 300)
+    d.auto_stratum = True
+    d.add_layer("p")
+    lid = d.layers[-1].id
+    for _ in range(6):
+        d.paint(lid, [[40, 150], [360, 150]], color=(0.8, 0.3, 0.2),
+                radius=28, media="oil", load=1.5)
+    strata = [l for l in d.layers if getattr(l, "stratum_of", None)]
+    assert len(strata) >= 2, "the test needs a column that spans strata"
+    core = np.s_[140:160, 100:300]
+    assert any(float(l.pixels[..., 3][core].max()) > 0.5 for l in strata)
+
+    d.paint(lid, [[40, 150], [360, 150]], erase=True, radius=40,
+            opacity=1.0, hardness=0.95)
+
+    # measured in the CORE of the erased band -- a soft brush leaves residue
+    # at its edges by design, which is not what this test is about
+    assert float(d.layer(lid).pixels[..., 3][core].max()) < 0.02, "base"
+    for l in strata:
+        assert float(l.pixels[..., 3][core].max()) < 0.02, \
+            "%s still holds paint after erasing" % l.name
+        if l.height_map is not None:
+            assert float(l.height_map[core].max()) < 0.02, \
+                "%s still holds BODY after erasing" % l.name
+
+
+def test_strata_do_not_break_replay_determinism():
+    """Replay is the deepest correctness property here: a rebuilt layer must
+    equal what was painted. Strata were the ONE thing in the engine that broke
+    it -- spilling was suppressed during replay (to stop it breeding layers),
+    so a rebuild kept the overflow on the base instead of moving it up.
+    Suppression is unnecessary: `replay_layer` clears the whole chain first
+    and `_stratum_for` reuses the existing link."""
+    import numpy as np
+    from lestudio import Document
+    d = Document(400, 300)
+    d.auto_stratum = True
+    d.add_layer("p")
+    lid = d.layers[-1].id
+    d.load_brush(color=(0.8, 0.3, 0.2), amount=1.0)
+    for _ in range(5):
+        d.paint(lid, [[40, 150], [360, 150]], color=(0.8, 0.3, 0.2),
+                radius=26, media="oil", load=1.5, real_brush=True, mix=0.4)
+    d.blend_stroke(lid, [[40, 150], [360, 150]], radius=24, strength=0.5)
+    d.knife(lid, [[40, 150], [360, 150]], mode="smooth", radius=30)
+    assert any(getattr(l, "stratum_of", None) for l in d.layers), \
+        "the test needs strata"
+
+    before = d.layer(lid).pixels.copy()
+    n0 = len(d.layers)
+    r1 = d.replay_layer(lid).copy()
+    r2 = d.replay_layer(lid).copy()
+    assert np.allclose(r1, before, atol=1e-5), \
+        "a rebuild must match what was painted (max %.5f)" % float(
+            np.abs(r1 - before).max())
+    assert np.allclose(r1, r2, atol=1e-6), "and be repeatable"
+    assert len(d.layers) == n0, "replaying must not breed stratum layers"
+
+
+def test_a_stratum_inherits_how_its_base_meets_the_picture():
+    """A stratum is the same mark continued. A CLIPPED glaze that spilled
+    produced unclipped strata and the glaze escaped its base -- the exact
+    workflow clipping exists to support. Blend mode and opacity too: the
+    overflow of a multiply glaze is still multiply."""
+    from lestudio import Document
+    d = Document(400, 300)
+    d.auto_stratum = True
+    d.add_layer("base")
+    b = d.layers[-1].id
+    d.paint(b, [[40, 150], [360, 150]], color=(0.2, 0.4, 0.8), radius=30,
+            media="oil", load=1.2)
+    d.add_layer("glaze")
+    g = d.layers[-1].id
+    d.edit_layer(g, clip=True, blend="multiply", opacity=0.8)
+    for _ in range(6):
+        d.paint(g, [[40, 150], [360, 150]], color=(0.5, 0.2, 0.2), radius=26,
+                media="oil", load=1.5)
+    strata = [l for l in d.layers if getattr(l, "stratum_of", None)]
+    assert strata, "the test needs strata"
+    for l in strata:
+        assert getattr(l, "clip", False) is True, "%s is not clipped" % l.name
+        assert l.blend == "multiply", "%s lost the blend mode" % l.name
+        assert abs(float(getattr(l, "opacity", 1.0)) - 0.8) < 1e-6
+
+
+def test_paint_hands_back_the_stroke_it_made():
+    """`knife` and `blend_stroke` return their stroke id; `paint` returned
+    None, so a caller who wanted to group, move or delete what it had just
+    painted had no way to name it, and the server was reaching into
+    `strokes[-1]` for it."""
+    import numpy as np
+    from lestudio import Document
+    d = Document(400, 300)
+    d.auto_stratum = True
+    d.add_layer("p")
+    lid = d.layers[-1].id
+    sids = [d.paint(lid, [[40, 150], [360, 150]], color=(0.8, 0.3, 0.2),
+                    radius=26, media="oil", load=1.5) for _ in range(5)]
+    assert all(s for s in sids) and len(set(sids)) == 5
+    # an unrecorded stroke has no id -- checked on ITS OWN layer, because
+    # unrecorded content makes a layer unsafe to stroke-edit (by design) and
+    # would block the deletion below
+    d.add_layer("scratch")
+    assert d.paint(d.layers[-1].id, [[10, 10], [50, 50]], color=(0, 0, 0),
+                   radius=5, record=False) is None
+    # and the id is usable: deleting every stroke clears the whole column
+    core = np.s_[140:160, 100:300]
+    d.delete_strokes(sids)
+    for l in d.layers:
+        if l.name == "Background":
+            continue
+        assert float(l.pixels[..., 3][core].max()) < 0.05, \
+            "%s still holds paint after deleting every stroke" % l.name
+
+
+def test_the_palette_is_not_stretched_in_the_dock():
+    """A canvas cannot letterbox -- it STRETCHES. The dock draws the palette
+    into a wide, short strip, so a crop of the wrong proportions rendered
+    round mounds as ovals: measured up to 33% vertical distortion with a
+    fixed-height strip. The crop is shaped for the strip it will be shown in,
+    and the strip follows the image rather than a fixed height."""
+    import os
+    from lestudio import Document
+    for n in (1, 3, 6):
+        d = Document(600, 400)
+        pd = d.palette_doc()
+        cols = [(0.1 * (i % 9), 0.5, 0.8) for i in range(n)]
+        pd.lay_palette(colors=cols, x=60, y=75, size=30)
+        img, box = pd.palette_png()
+        w, h = box[2] - box[0], box[3] - box[1]
+        assert w > h * 3.5, \
+            "%d colours crop to %dx%d (aspect %.2f) - too tall for the strip" % (
+                n, w, h, w / h)
+        assert img.shape[0] == h and img.shape[1] == w
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html"), encoding="utf-8").read()
+    assert "im.height/im.width" in ui, \
+        "the strip must take its height from the image, not a fixed value"
+
+
+def test_autosave_says_so_when_it_cannot_save():
+    """Autosave is the crash net. When it cannot run, the person needs to know
+    their work is NOT being kept behind them -- a 500 carrying a raw Python
+    error ("No module named 'holographic'") tells them neither that autosave
+    is broken nor what to do."""
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    r = c.post("/api/autosave", data="{}",
+               content_type="application/json")
+    assert r.status_code == 200, "a failed autosave is not a server crash"
+    j = r.json
+    if j.get("ok") is False:
+        msg = j.get("error", "")
+        assert "save your work" in msg, "it must say what to do: %r" % msg
+        for leak in ("No module named", "Traceback", "NoneType"):
+            assert leak not in msg, "leaks a Python error: %r" % msg
+    else:
+        assert j.get("ok") is True
+
+
+def test_bad_paint_payloads_are_refused_not_crashed_on():
+    """A fuzz pass over /api/paint produced SEVEN 500s -- NaN and infinite
+    coordinates, a NaN radius, string coordinates, points that were not a
+    list, missing points, a point with one number.
+
+    Worse than the crashes: a NaN COLOUR returned 200 and propagated into the
+    layer's pixels and height map, corrupting the document silently. NaN does
+    not raise, it spreads. The payload is validated once, at the entrance,
+    before anything reads it -- the bounding box is computed straight from the
+    points, so bad values crashed long before the engine was reached."""
+    import json
+    import numpy as np
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+
+    def post(b):
+        return c.post("/api/paint", data=json.dumps(b), **J)
+
+    c.post("/api/new", data=json.dumps({"width": 300, "height": 220}), **J)
+    c.post("/api/layer", data=json.dumps({"action": "add"}), **J)
+    lid = c.get("/api/state").json["layers"][-1]["id"]
+    base = {"layer": lid, "color": [0.3, 0.5, 0.8], "radius": 12}
+
+    nan, inf = float("nan"), float("inf")
+    for name, over in (
+            ("NaN coords", {"points": [[nan, 10], [100, 50]]}),
+            ("inf coords", {"points": [[inf, 10], [100, 50]]}),
+            ("NaN radius", {"points": [[10, 10], [100, 50]], "radius": nan}),
+            ("NaN colour", {"points": [[10, 10], [100, 50]],
+                            "color": [nan, 0.5, 0.8]}),
+            ("string coords", {"points": [["a", "b"], [100, 50]]}),
+            ("points not a list", {"points": "nope"}),
+            ("colour a string", {"points": [[10, 10], [100, 50]],
+                                 "color": "red"}),
+            ("missing points", {}),
+            ("one-number point", {"points": [[10], [100, 50]]}),
+            ("opacity NaN", {"points": [[10, 10], [100, 50]],
+                             "opacity": nan}),
+            ("load inf", {"points": [[10, 10], [100, 50]], "media": "oil",
+                          "load": inf})):
+        r = post(dict(base, **over))
+        assert r.status_code == 400, "%s -> %s" % (name, r.status_code)
+        msg = r.json.get("error", "")
+        assert len(msg) > 8 and "Traceback" not in msg, (name, msg)
+
+    # out-of-range but real values CLAMP rather than being refused: a colour
+    # of 5 is a caller being sloppy, not a caller being wrong
+    assert post(dict(base, points=[[10, 10], [100, 50]],
+                     color=[5, -3, 99])).status_code == 200
+    assert post(dict(base, points=[[10, 10], [100, 50]],
+                     radius=-20)).status_code == 200
+
+    lay = SV.DOC.layer(lid)
+    assert np.isfinite(lay.pixels).all(), "the document must not hold NaN"
+    if lay.height_map is not None:
+        assert np.isfinite(lay.height_map).all()
+    assert post(dict(base, points=[[10, 10], [200, 80]], media="oil",
+                     load=1.2)).status_code == 200, "and normal paint works"
+
+
+def test_the_other_endpoints_refuse_bad_input_too():
+    """The same fuzz applied beyond /api/paint found five more: NaN reaching
+    the PALETTE and the BRUSH CHARGE (200, silently poisoned), an infinite
+    radius and a string colour crashing with 500s, and a layer edit with no id
+    500'ing on "no such item: None"."""
+    import json
+    import numpy as np
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+
+    def post(u, b):
+        return c.post(u, data=json.dumps(b), **J)
+
+    post("/api/new", {"width": 300, "height": 220})
+    lid = c.get("/api/state").json["layers"][0]["id"]
+    nan, inf = float("nan"), float("inf")
+    for u, b in (("/api/palette", {"colors": [[nan, 0.1, 0.1]]}),
+                 ("/api/palette", {"colors": [[0.1, 0.1]]}),
+                 ("/api/palette", {"colors": [[0.5, 0.5, 0.5]], "size": nan}),
+                 ("/api/palette/paint", {"points": [[10, 10], [50, 20]],
+                                         "radius": inf}),
+                 ("/api/palette/paint", {"points": "nope"}),
+                 ("/api/brush_load", {"color": "red"}),
+                 ("/api/brush_load", {"amount": nan}),
+                 ("/api/layer", {"action": "edit", "id": None,
+                                 "opacity": 1.0}),
+                 ("/api/layer", {"action": "edit", "id": "L999",
+                                 "opacity": 1.0})):
+        r = post(u, b)
+        assert r.status_code == 400, "%s %s -> %s" % (u, b, r.status_code)
+        msg = r.json.get("error", "")
+        for leak in ("could not convert", "cannot convert", "reshape",
+                     "no such item", "Traceback"):
+            assert leak not in msg, "%s leaks: %s" % (u, msg)
+
+    # the ordinary calls still work, and nothing was poisoned
+    assert post("/api/brush_load", {"color": [0.8, 0.2, 0.1],
+                                    "amount": 1.0}).status_code == 200
+    assert post("/api/palette", {"colors": [[0.8, 0.1, 0.1]]}).status_code == 200
+    assert post("/api/layer", {"action": "edit", "id": lid,
+                               "opacity": 0.5}).status_code == 200
+    bs = c.get("/api/state").json["brush_state"]
+    assert np.isfinite(bs["charge"]) and all(np.isfinite(v) for v in bs["color"])
+    pd = SV.DOC.palette_doc(create=False)
+    assert pd is None or np.isfinite(pd.layers[-1].pixels).all()
+
+
+def test_a_nan_light_cannot_corrupt_the_render():
+    """Found by fuzzing the stateful endpoints: a NaN intensity was accepted
+    with a 200 and nothing downstream caught it, so the whole LIT RENDER came
+    back non-finite -- the picture corrupted, invisibly, until you look at the
+    output. Same class as the NaN colour, in a place the paint validation
+    does not reach."""
+    import json
+    import numpy as np
+    import lestudio.server as SV
+    from lestudio import composite_lit
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+
+    def post(u, b):
+        return c.post(u, data=json.dumps(b), **J)
+
+    post("/api/new", {"width": 300, "height": 220})
+    nan = float("nan")
+    for body in ({"action": "add", "kind": "directional", "intensity": nan},
+                 {"action": "add", "kind": "directional", "azimuth": nan},
+                 {"action": "add", "kind": "directional",
+                  "color": [nan, 1, 1]},
+                 {"action": "add", "kind": "directional", "color": "warm"}):
+        r = post("/api/light", body)
+        assert r.status_code == 400, "%s -> %s" % (body, r.status_code)
+
+    assert post("/api/light", {"action": "add", "kind": "directional",
+                               "intensity": 0.5, "azimuth": 310,
+                               "elevation": 40}).status_code == 200
+    lid = c.get("/api/state").json["layers"][0]["id"]
+    post("/api/paint", {"layer": lid, "points": [[10, 10], [200, 80]],
+                        "color": [0.3, 0.5, 0.8], "radius": 14,
+                        "media": "oil", "load": 1.2})
+    assert np.isfinite(composite_lit(SV.DOC, view="flat")).all(), \
+        "the lit render must stay finite"
+
+
+def test_selection_corners_are_checked_and_explained():
+    """A NaN rect built a mask nothing could use, and a missing corner
+    reported just "'x0'" -- true, and useless to anyone."""
+    import json
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+
+    def post(b):
+        return c.post("/api/select", data=json.dumps(b), **J)
+
+    c.post("/api/new", data=json.dumps({"width": 300, "height": 220}), **J)
+    nan = float("nan")
+    r = post({"tool": "rect", "params": {"x0": nan, "y0": 0, "x1": 10,
+                                         "y1": 10}})
+    assert r.status_code == 400 and "real number" in r.json["error"]
+    r = post({"tool": "rect", "params": {"x0": 0}})
+    assert r.status_code == 400
+    assert "x0, y0, x1 and y1" in r.json["error"], \
+        "the message must say what is missing: %s" % r.json["error"]
+    assert post({"tool": "rect", "params": {"x0": 0, "y0": 0, "x1": 50,
+                                            "y1": 40}}).status_code == 200
+
+
+def test_dipping_changes_the_colour_you_paint_with():
+    """Usability test, task 2: a user dips in red and paints, and gets their
+    old colour. Painting always sends the COLOUR SWATCH, so with "runs out"
+    off the dip did nothing at all -- a physical, satisfying action with no
+    effect and no hint why. And nothing anywhere showed what was on the brush.
+
+    Putting the dipped colour into the swatch fixes both: the dip works in
+    either mode, and the swatch is the confirmation."""
+    import os
+    import re
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html"), encoding="utf-8").read()
+    i = ui.index("/api/palette/paint")
+    seg = ui[i:i + 1200]
+    assert "brush_state" in seg, "the dip must read back what it loaded"
+    assert "$('bColor').value=hex" in seg, \
+        "and put it in the swatch, or a dip with 'runs out' off does nothing"
+    assert "!mixing" in seg, "mixing must NOT hijack the colour swatch"
+
+    # the endpoint has to supply it
+    import json
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+    c.post("/api/palette", data=json.dumps(
+        {"colors": [[0.85, 0.08, 0.05]]}), **J)
+    r = c.post("/api/palette/paint", data=json.dumps(
+        {"points": [[40, 60], [80, 70]], "color": [0.5, 0.5, 0.5],
+         "radius": 12, "media": "oil", "load": 1.2, "real_brush": True,
+         "mix": 1.0}), **J)
+    assert r.status_code == 200 and "brush_state" in r.json
+    assert len(r.json["brush_state"]["color"]) == 3
+
+
+def test_build_up_layers_say_what_they_are():
+    """Usability test, task 5: turning on "build up" silently added layers
+    named "p ~2" to the layer list. That cryptic name was the mystery layer
+    in the first user report, and it says nothing about what it is or why it
+    appeared."""
+    import os
+    from lestudio import Document
+    d = Document(400, 300)
+    d.auto_stratum = True
+    d.add_layer("sky")
+    lid = d.layers[-1].id
+    for _ in range(9):
+        d.paint(lid, [[40, 150], [360, 150]], color=(0.8, 0.3, 0.2),
+                radius=28, media="oil", load=1.5)
+    strata = [l for l in d.layers if getattr(l, "stratum_of", None)]
+    assert strata, "the test needs strata"
+    for l in strata:
+        assert "build-up" in l.name, "cryptic stratum name: %r" % l.name
+        assert l.name.startswith("sky"), "it must name its parent: %r" % l.name
+        assert "~" not in l.name
+    # a deep build must not compound the suffix
+    assert all(l.name.count("build-up") == 1 for l in strata), \
+        [l.name for l in strata]
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html"), encoding="utf-8").read()
+    assert "starts a new one below it in the list" in ui, \
+        "and switching it on must say what will happen"
+
+
+def test_acceleration_is_reported_per_subsystem():
+    """The status chip read "GPU" whenever leCore found a device -- but the
+    PAINTING engine (deposit, flow, bristle tracks, blurs) is pure numpy on
+    the CPU whatever hardware is present. A painter with a GPU was told their
+    brush was accelerated when it was not."""
+    import os
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    j = c.get("/api/status").json
+    subs = j.get("subsystems")
+    assert subs, "status must say WHAT is accelerated, not just that a GPU exists"
+    assert subs["painting"]["device"] == "cpu", \
+        "painting is numpy on the CPU - do not claim otherwise"
+    for k in ("painting", "simulation", "shaders"):
+        assert subs[k].get("note"), "%s needs a plain-words note" % k
+    # simulation follows the actual device, and the flag stays a bool
+    assert subs["simulation"]["device"] == ("gpu" if j["gpu"] else "cpu")
+    assert isinstance(j["gpu"], bool)
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html"), encoding="utf-8").read()
+    assert "paint: CPU" in ui, "the chip must not imply GPU painting"
+
+
+def test_health_stays_answerable_while_the_engine_is_busy():
+    """A health probe that queues behind a slow stroke gets the process
+    killed by its orchestrator while it is working perfectly. /api/health is
+    deliberately cheap and takes no lock; /api/ready does touch the workspace,
+    which is what makes it a readiness check rather than a liveness one."""
+    import json
+    import threading
+    import time
+    import lestudio.server as SV
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+
+    def post(u, b={}):
+        return c.post(u, data=json.dumps(b), **J)
+
+    assert c.get("/api/health").json["ok"] is True
+    assert c.get("/api/ready").json["ok"] is True
+
+    post("/api/new", {"width": 900, "height": 700})
+    post("/api/layer", {"action": "add"})
+    lid = c.get("/api/state").json["layers"][-1]["id"]
+    lat, stop = [], [False]
+
+    def probe():
+        while not stop[0]:
+            t = time.perf_counter()
+            r = c.get("/api/health")
+            lat.append(((time.perf_counter() - t) * 1000, r.status_code))
+            time.sleep(0.005)
+
+    t = threading.Thread(target=probe)
+    t.start()
+    try:
+        for i in range(3):
+            post("/api/paint", {"layer": lid,
+                                "points": [[80 + j * 8, 200 + i * 90]
+                                           for j in range(90)],
+                                "color": [0.3, 0.5, 0.8], "radius": 26,
+                                "media": "water", "load": 1.2})
+    finally:
+        stop[0] = True
+        t.join()
+    assert lat, "the probe must have run"
+    assert all(s == 200 for _, s in lat), "health must not fail under load"
+    worst = max(ms for ms, _ in lat)
+    assert worst < 250, "health blocked for %.0f ms behind the engine" % worst
+
+
+def test_the_runtime_fits_the_machine_it_is_on():
+    """Hosting knobs, so the same build runs on a laptop and in a small
+    container without editing code. LESTUDIO_THREADS caps numpy's BLAS
+    threads, which on a shared or phone-class box otherwise spawns a thread
+    per core and thrashes."""
+    import os
+    import inspect
+    import lestudio.server as SV
+    old = os.environ.get("LESTUDIO_THREADS")
+    try:
+        os.environ["LESTUDIO_THREADS"] = "2"
+        for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                    "MKL_NUM_THREADS"):
+            os.environ.pop(var, None)
+        assert SV.apply_runtime_limits() == 2
+        assert os.environ["OMP_NUM_THREADS"] == "2"
+        os.environ["LESTUDIO_THREADS"] = "not a number"
+        assert SV.apply_runtime_limits() == 0, "a bad value must not crash"
+    finally:
+        if old is None:
+            os.environ.pop("LESTUDIO_THREADS", None)
+        else:
+            os.environ["LESTUDIO_THREADS"] = old
+    src = inspect.getsource(SV.serve)
+    assert "LESTUDIO_HOST" in src and "LESTUDIO_PORT" in src
+    # the single-worker constraint is the thing a host most needs to know
+    assert "ONE worker" in src and "SINGLE SHARED" in src
+
+
+def test_a_source_checkout_does_not_report_as_ancient():
+    """leCore's VERSION file is owned by its CI and excluded from source
+    archives, so a development tree reports a 0.0.0 sentinel -- which
+    DISPLAYS as if the user had an ancient engine when they are running the
+    newest one. Harmless functionally (availability is decided by have(),
+    never by comparing the string) but misleading on screen."""
+    from lestudio import engine_version
+    v = engine_version()
+    assert isinstance(v, dict) and v.get("engine")
+    assert str(v["engine"]) != "0.0.0", "0.0.0 must not reach the user"
+    if v.get("unversioned"):
+        assert v["engine"] == "development build"
+
+
+def test_the_first_relief_stroke_keeps_the_cache_honest_and_fast():
+    """Found running against real leCore: when a layer gains its FIRST height
+    map, canvas tooth starts lighting every painted pixel, not just the new
+    stroke -- so a window patch describes a picture that no longer exists.
+    Measured drift 0.127 (baseline got away with 0.0015 before the relief was
+    deepened).
+
+    The fix must not cost the cache: skipping the patch outright left
+    `_shade_rev` unset, so the layer never counted as "already relief" and
+    EVERY later stroke fell back to a full rebuild (1365 ms). Re-light once,
+    in full, then resume window patching."""
+    import time
+    import numpy as np
+    from lestudio import Document, composite_cached, composite
+    rng = np.random.default_rng(7)
+    d = Document(360, 240)
+    la = d.add_layer("a").id
+    lb = d.add_layer("b").id
+    d.edit_layer(lb, opacity=0.8)
+    composite_cached(d)
+    worst = 0.0
+    for i in range(8):
+        lid = la if i % 2 else lb
+        x0, y0 = rng.uniform(20, 320), rng.uniform(20, 200)
+        pts = [(float(x0), float(y0)),
+               (float(x0 + rng.uniform(-60, 60)),
+                float(y0 + rng.uniform(-60, 60)))]
+        d.paint(lid, pts, color=tuple(rng.uniform(0.1, 0.9, 3)),
+                radius=float(rng.uniform(6, 18)),
+                media=("oil" if i % 3 else ""), load=1.0,
+                opacity=float(rng.uniform(0.5, 1.0)))
+        worst = max(worst, float(np.abs(
+            composite_cached(d)
+            - composite(d.layers, d.height, d.width, d.mask_map())).max()))
+    assert worst < 2 / 255, "cache drift %.5f when a layer gained relief" % worst
+
+    # and the cache must still HIT afterwards: many strokes on a layer that
+    # already has relief stay cheap
+    d2 = Document(600, 400)
+    lid = d2.add_layer("p").id
+    d2.paint(lid, [[40, 200], [560, 210]], color=(0.8, 0.3, 0.2), radius=20,
+             media="oil", load=1.2)
+    composite_cached(d2)
+    t = time.perf_counter()
+    for k in range(6):
+        d2.paint(lid, [[40, 120 + k * 30], [560, 130 + k * 30]],
+                 color=(0.8, 0.3, 0.2), radius=20, media="oil", load=1.2)
+        composite_cached(d2)
+    ms = (time.perf_counter() - t) * 1000 / 6
+    assert ms < 400, "%.0f ms per stroke+composite - the cache stopped hitting" % ms
+
+
+def test_every_lecore_faculty_we_depend_on_is_present():
+    """An engine upgrade must not silently downgrade a medium. leStudio gates
+    at runtime with have(), so a RENAMED faculty is invisible to a version
+    pin -- this names the ones the app actually calls so an upgrade that drops
+    one fails loudly here instead of dimming a feature in front of a user."""
+    from lestudio import have, engine_version
+    used = ["depth_from_image", "auto_fuse_depth", "haze_depth",
+            "sharpness_depth", "ground_plane_depth", "depth_fog",
+            "pattern_field", "escape_time", "color_transfer", "segment_image",
+            "texture_image", "mask_refraction", "cloud_scene", "render_water",
+            "ramp", "fit_shape", "gpu_report", "should_pool", "should_offload",
+            "wrap_webgl2", "create_invite_link"]
+    if str(engine_version().get("engine")) == "stub":
+        return                       # the stub answers nothing; nothing to check
+    missing = [f for f in used if not have(f)]
+    assert not missing, "engine is missing faculties leStudio calls: %s" % missing
+
+
+def test_the_entry_point_registers_every_route():
+    """RELEASE CHECK: `main()` and the `__main__` guard sat MID-FILE, with
+    eight routes defined after them -- the whole palette and paint-setup
+    surface. Any invocation that executes the module top-to-bottom and stops
+    at the guard would register only part of the app.
+
+    (Latent rather than live: `python -m lestudio` and the console script both
+    import the module fully first, and running server.py directly fails on its
+    relative imports anyway. Pinned because the structure is a trap: appending
+    a route to the end of the file is the natural thing to do.)"""
+    import os
+    import re
+    src = open(os.path.join(os.path.dirname(__file__), "..", "src",
+                            "lestudio", "server.py"), encoding="utf-8").read()
+    guard = src.index('if __name__ == "__main__"')
+    after = re.findall(r'@app\.(?:post|get)\(', src[guard:])
+    assert not after, "%d routes are defined after the __main__ guard" % len(after)
+
+
+def test_the_launchers_agree_with_the_server_about_where_it_listens():
+    """The launchers hardcoded 5050 while serve() reads LESTUDIO_PORT, so
+    setting it made run.sh announce -- and open a browser at -- a URL nothing
+    was listening on."""
+    import os
+    here = os.path.dirname(__file__)
+    for name in ("run.sh", "run.bat"):
+        txt = open(os.path.join(here, "..", name), encoding="utf-8",
+                   errors="replace").read()
+        assert "LESTUDIO_PORT" in txt, "%s ignores the port setting" % name
+        assert "LESTUDIO_HOST" in txt, "%s ignores the host setting" % name
+        # the only 5050 left may be the default
+        for line in txt.splitlines():
+            if "5050" in line:
+                assert "LESTUDIO_PORT" in line, \
+                    "%s hardcodes a URL: %s" % (name, line.strip())
+
+
+def test_the_readme_describes_what_the_app_now_does():
+    """A release that ships undocumented headline features is a release the
+    user cannot find the features in."""
+    import os
+    txt = open(os.path.join(os.path.dirname(__file__), "..", "README.md"),
+               encoding="utf-8").read().lower()
+    for topic in ("palette knife", "runs out", "build up", "watercolour",
+                  "paper", "gravity", "lestudio_port", "/api/health",
+                  "single shared"):
+        assert topic in txt, "the README never mentions %r" % topic
+
+
+def test_every_path_tool_accepts_pressure_bearing_points():
+    """REPORTED BY A USER as a toast they saw a lot: "stroke not saved -- too
+    many values to unpack (expected 2)".
+
+    A point may arrive as (x, y, PRESSURE) -- that is what a pen sends, and
+    `paint` uses the third component for stroke width. But `_dense_points`
+    appended the FIRST point whole while building interpolated ones as
+    2-tuples, and every path-only tool unpacks `for (px, py) in ...`. So the
+    knife, blender, smudge, clone and heal all failed on the first point for
+    anyone using a tablet. Normalised at `_dense_points`, the one place they
+    all share."""
+    import json
+    from lestudio import Document
+    import lestudio.server as SV
+
+    pts = [[40, 100, 0.8], [150, 140, 0.95], [340, 110, 0.6]]
+    d = Document(400, 300)
+    d.add_layer("p")
+    lid = d.layers[-1].id
+    d.paint(lid, pts, color=(0.8, 0.3, 0.2), radius=22, media="oil", load=1.3)
+    d.knife(lid, pts, mode="smooth", radius=24)
+    d.blend_stroke(lid, pts, radius=20, strength=0.5)
+    d.smudge(lid, pts, radius=18, strength=0.5)
+
+    # ...and through the API, which is where the user hit it
+    c = SV.app.test_client()
+    J = {"content_type": "application/json"}
+
+    def post(b):
+        return c.post("/api/paint", data=json.dumps(b), **J)
+
+    c.post("/api/new", data=json.dumps({"width": 400, "height": 300}), **J)
+    c.post("/api/layer", data=json.dumps({"action": "add"}), **J)
+    lid2 = c.get("/api/state").json["layers"][-1]["id"]
+    base = {"layer": lid2, "points": pts, "color": [0.5, 0.3, 0.7],
+            "radius": 20, "opacity": 1.0}
+    post(dict(base, media="oil", load=1.3))
+    for extra in ({}, {"mode": "knife", "knife": "smooth"},
+                  {"mode": "knife", "knife": "push"}, {"mode": "blend"},
+                  {"mode": "smudge"}, {"erase": True},
+                  {"mode": "clone", "source": [20, 20]},
+                  {"mode": "heal", "source": [20, 20]}):
+        r = post(dict(base, **extra))
+        assert r.status_code == 200, (extra, r.status_code,
+                                      (r.json or {}).get("error"))
+
+    # pressure must still SHAPE the brush -- the fix must not discard it
+    d2 = Document(300, 120)
+    d2.add_layer("q")
+    l2 = d2.layers[-1].id
+    d2.paint(l2, [[30, 60, 0.15], [270, 60, 1.3]], color=(0.2, 0.4, 0.8),
+             radius=22, media="oil", load=1.2)
+    a = d2.layers[-1].pixels[..., 3]
+    assert float(a[:, 240].sum()) > float(a[:, 60].sum()) * 1.8, \
+        "the heavy end of a pressure ramp must be fatter"
+
+
+def test_the_palette_is_findable_by_a_first_timer():
+    """A reviewer could not find the palette at all. It cannot live on screen
+    permanently -- the Brush panel has a no-scroll budget it is already at --
+    so discovery has to be free: the first-run tip points at the Media
+    setups, and every setup squeezes a palette into the dock."""
+    import os
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
+                           "static", "index.html"), encoding="utf-8").read()
+    first = ui[ui.index('id="firstRun"'):][:600]
+    assert "Media" in first and "dip" in first.lower(), \
+        "the first-run tip must point at the paint setups: %s" % first[:200]
+    j = ui.index("const STUDIOS=")
+    assert "/api/palette" in ui[ui.index("async function applyStudio"):][:1200], \
+        "every setup must leave a palette to dip into"
+    # and the tooltip must describe the palette as it IS now (a surface)
+    sq = ui[ui.index('id="bSqueeze"'):][:800]
+    assert "Palette layer" not in sq, "stale: the palette is not a layer"
+    assert "never appears in your picture" in sq

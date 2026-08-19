@@ -39,11 +39,16 @@ if [ "${1:-}" = "accel" ]; then
     echo "[leStudio] Done. GPU is separate and CUDA-only (not Apple Silicon): pip install cupy-cuda12x on a CUDA machine."
 fi
 
-echo "[leStudio] Starting -- open http://127.0.0.1:5050 in your browser."
+# Honour the same environment the app reads, or the launcher announces (and
+# opens) a URL the server is not listening on.
+HOST="${LESTUDIO_HOST:-127.0.0.1}"
+PORT="${LESTUDIO_PORT:-5050}"
+URL="http://${HOST}:${PORT}"
+echo "[leStudio] Starting -- open ${URL} in your browser."
 echo "[leStudio] Tip: ./run.sh accel installs optional fast paths (2-5x on heavy nodes)."
 case "$(uname -s)" in                              # `open` exists on Linux too
-    Darwin) open "http://127.0.0.1:5050" >/dev/null 2>&1 || true ;;   # macOS
+    Darwin) open "$URL" >/dev/null 2>&1 || true ;;   # macOS
     *) command -v xdg-open >/dev/null 2>&1 && \
-       xdg-open "http://127.0.0.1:5050" >/dev/null 2>&1 || true ;;    # Linux
+       xdg-open "$URL" >/dev/null 2>&1 || true ;;    # Linux
 esac
 exec "$VPY" -m lestudio

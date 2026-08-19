@@ -85,7 +85,17 @@ def engine_version():
     try:
         v = mind().version()
         if isinstance(v, dict):
-            return dict(v)
+            v = dict(v)
+            # A SOURCE CHECKOUT has no version. leCore's VERSION file is owned
+            # by its CI and excluded from source archives, so the engine falls
+            # back to a 0.0.0 sentinel -- which displays as if the user had an
+            # ancient build when they are actually running a development tree.
+            # Say what it is instead. (Harmless functionally: availability is
+            # decided by have(), never by comparing this string.)
+            if str(v.get("engine", "")).strip() in ("0.0.0", "", "0"):
+                v["engine"] = "development build"
+                v["unversioned"] = True
+            return v
     except Exception:
         pass
     try:
@@ -272,6 +282,41 @@ def _gauss_blur_reflect(img, sigma, pad=8):
     p = int(max(2, pad))
     ap = np.pad(a, ((p, p), (p, p), (0, 0)), mode="reflect")
     out = _gauss_blur(ap, sigma)[p:-p, p:-p]
+    return out[..., 0] if single else out
+
+
+def _gauss_small(img, sigma):
+    """Direct separable Gaussian, for the SMALL sigmas the paint code uses.
+
+    `_gauss_blur` convolves in the frequency domain, which is the right call
+    for the big postfx kernels it was written for and badly wrong for a
+    sigma-2 blur on a stroke window: an FFT pair per channel dominated the
+    whole watercolour pass (183 ms of a 578 ms stroke, and 20 transforms for
+    one mark). A separable kernel of a dozen taps is the same result for a
+    fraction of the work, and it reflects at the border instead of wrapping,
+    which the paint code wants anyway.
+    """
+    if sigma <= 0:
+        return _f32(img).copy()
+    a = _f32(img)
+    single = a.ndim == 2
+    if single:
+        a = a[:, :, None]
+    r = int(max(1, round(sigma * 3.0)))
+    x = np.arange(-r, r + 1, dtype=np.float32)
+    k = np.exp(-(x * x) / (2.0 * sigma * sigma))
+    k /= k.sum()
+    pad = ((r, r), (0, 0), (0, 0))
+    t = np.pad(a, pad, mode="reflect")
+    out = np.zeros_like(a)
+    for i, w in enumerate(k):
+        if w > 1e-6:
+            out += t[i:i + a.shape[0]] * w
+    t = np.pad(out, ((0, 0), (r, r), (0, 0)), mode="reflect")
+    out = np.zeros_like(a)
+    for i, w in enumerate(k):
+        if w > 1e-6:
+            out += t[:, i:i + a.shape[1]] * w
     return out[..., 0] if single else out
 
 
@@ -598,28 +643,898 @@ def composite_display(layers, h, w, masks=None, max_w=None):
 # how long the paint stays mobile after the brush lifts, `gloss`/`shin` the
 # specular look. Oil holds a tall ridge and shines; watery media barely hold
 # and run, taking pigment with them.
+# `bristle` = how deeply the comb of the brush survives in the paint, `berm`
+# = how much paint the bristles shove sideways into rims. Both track how
+# STIFF the paint is: acrylic holds a bristle mark best, oil slumps a little,
+# watercolour is a fluid and keeps almost nothing.
 _MEDIA = {
-    "oil":     {"hold": 0.62, "flow": 0.22, "iters": 10, "gloss": 0.55, "shin": 26.0},
-    "acrylic": {"hold": 0.80, "flow": 0.16, "iters": 6,  "gloss": 0.30, "shin": 14.0},
-    "water":   {"hold": 0.10, "flow": 0.45, "iters": 26, "gloss": 0.08, "shin": 6.0},
+    # gloss/shin are lower and broader than the pre-slope model needed: once
+    # the surface has real slopes, a tight bright highlight reads as wet
+    # plastic. Oil is satin, not lacquer.
+    "oil":     {"hold": 0.62, "flow": 0.22, "iters": 10, "gloss": 0.34,
+                "shin": 17.0, "bristle": 0.54, "berm": 0.85, "pickup": 0.75},
+    "acrylic": {"hold": 0.80, "flow": 0.16, "iters": 6,  "gloss": 0.20,
+                "shin": 11.0, "bristle": 0.70, "berm": 0.70, "pickup": 0.60},
+    # Watercolour is not a thin film on a surface -- it is a fluid IN paper.
+    # `absorb` wicks the wash outward through the fibres, `edge_dark` is the
+    # dark rim left as water evaporates and carries pigment to the perimeter,
+    # `granulate` is pigment settling into the paper's valleys, and `settle`
+    # says pigment pools in the LOW places rather than catching on the high
+    # ones (see `_deposit`). Curtis et al., SIGGRAPH 97.
+    "water":   {"hold": 0.10, "flow": 0.45, "iters": 26, "gloss": 0.05,
+                "shin": 5.0,  "bristle": 0.12, "berm": 0.10, "pickup": 0.30,
+                "absorb": 0.9, "edge_dark": 0.7, "granulate": 0.42,
+                "settle": 1.0},
 }
+
+# Height is stored in "paint units"; this converts a unit of height into the
+# surface SLOPE the light sees. Without it `np.gradient` on a 1.6-unit ridge
+# spread over a 40px radius yields near-flat normals, and every stroke read
+# as an airbrushed sticker no matter how much body it had -- the single
+# biggest reason the old impasto did not look like paint.
+# 4.5, tuned against a dense field of small strokes rather than one fat
+# swatch: at 7.0 a radius-8 stroke became a glossy gel tube, because a narrow
+# ridge of the same height has far steeper flanks than a wide one.
+# How much paint one layer can hold before it is FULL. Beyond this the
+# height field was simply clipped, so a heavily worked passage saturated
+# after about two loaded passes and every further stroke added nothing --
+# the whole mark flattened to a plateau at exactly this value, which is the
+# inorganic stepped look. With `Document.auto_stratum` the excess instead
+# SPILLS ONTO A NEW LAYER that starts from zero, the way a painter builds a
+# heavy passage up in campaigns rather than in one impossible slab.
+_HEIGHT_CAP = 4.0
+
+_RELIEF_SLOPE = 4.5
+
+# How much of the canvas weave stands proud in the shading. Without it a
+# stroke is an extrusion floating on a perfect plane; paint in the world sits
+# IN a surface, and the surrounding tooth is most of what says so.
+_CANVAS_RELIEF = 0.30
+
+# How much paint it takes to BURY the weave. Paint is a fluid: it fills the
+# cavities of the canvas and levels off, so a thick passage has a smooth,
+# globby top surface with no trace of the substrate in it. Only where the
+# film is thin does the weave still read -- paint sitting in the valleys and
+# scraped bare off the risen threads, which is exactly what dry-brush is.
+# Adding the tooth to every pixel's height regardless of thickness printed
+# canvas texture onto the top of impasto, which no real painting does.
+_PAINT_LEVEL = 0.40
 
 _LIGHT = np.array([-0.45, -0.6, 0.66], np.float32)   # top-left key light
 _LIGHT /= np.linalg.norm(_LIGHT)
 
 
-def _relief_shade(px, height, gloss=0.3, shin=16.0):
+# PBR materials: painting with STUFF, not just colour. A material stroke lays
+# pigment (the brush colour is the albedo), a paint body (same physics as
+# media), and two per-pixel surface properties -- roughness and metalness --
+# into the layer's material map. The composite lights those properties per
+# pixel, so a gold stroke gleams like gold NEXT TO a chalk stroke that stays
+# dead matte on the same layer; the old per-layer "last media wins" scalar
+# gloss could never say that.
+#
+# rough: 0 = mirror-tight highlight, 1 = fully matte
+# metal: 0 = dielectric (white highlight, full diffuse),
+#        1 = metal (highlight TINTED BY THE ALBEDO -- gold's gleam is gold --
+#            and diffuse falls away, which is why metals look "dark" away
+#            from the light)
+# grain/gscale: micro-relief laid with the stroke (hammered/toothy surfaces),
+#        a POSITION-STABLE field so replays re-deposit the identical texture
+# hold/flow/iters: the paint body, same meaning as _MEDIA
+# color: a SUGGESTED albedo for the UI swatch only -- paint() never applies
+#        it; the brush colour is always the albedo
+# The set is limited to what the shading model can honestly show: no velvet
+# (needs retroreflection), no pearl (needs iridescence).
+_MATERIALS = {
+    "gold":    {"rough": 0.28, "metal": 1.0, "grain": 0.06, "gscale": 2.0,
+                "hold": 0.85, "flow": 0.10, "iters": 4,
+                "gloss": 0.85, "shin": 42.0, "color": (1.0, 0.78, 0.34)},
+    "silver":  {"rough": 0.18, "metal": 1.0, "grain": 0.04, "gscale": 2.0,
+                "hold": 0.85, "flow": 0.10, "iters": 4,
+                "gloss": 0.9, "shin": 60.0, "color": (0.91, 0.92, 0.94)},
+    "copper":  {"rough": 0.32, "metal": 1.0, "grain": 0.08, "gscale": 2.0,
+                "hold": 0.85, "flow": 0.10, "iters": 4,
+                "gloss": 0.8, "shin": 38.0, "color": (0.95, 0.54, 0.36)},
+    "chrome":  {"rough": 0.05, "metal": 1.0, "grain": 0.02, "gscale": 3.0,
+                "hold": 0.9, "flow": 0.08, "iters": 3,
+                "gloss": 1.0, "shin": 100.0, "color": (0.87, 0.9, 0.93)},
+    "brushed_steel": {"rough": 0.45, "metal": 1.0, "grain": 0.18,
+                      "gscale": 1.2, "hold": 0.9, "flow": 0.08, "iters": 3,
+                      "gloss": 0.6, "shin": 20.0, "color": (0.75, 0.77, 0.8)},
+    "lacquer": {"rough": 0.06, "metal": 0.0, "grain": 0.0, "gscale": 2.0,
+                "hold": 0.62, "flow": 0.2, "iters": 8,
+                "gloss": 0.7, "shin": 90.0, "color": None},
+    "plastic": {"rough": 0.3, "metal": 0.0, "grain": 0.0, "gscale": 2.0,
+                "hold": 0.8, "flow": 0.12, "iters": 4,
+                "gloss": 0.4, "shin": 34.0, "color": None},
+    "rubber":  {"rough": 0.85, "metal": 0.0, "grain": 0.05, "gscale": 1.6,
+                "hold": 0.85, "flow": 0.1, "iters": 3,
+                "gloss": 0.1, "shin": 6.0, "color": None},
+    "wax":     {"rough": 0.55, "metal": 0.0, "grain": 0.04, "gscale": 2.4,
+                "hold": 0.5, "flow": 0.22, "iters": 8,
+                "gloss": 0.22, "shin": 12.0, "color": None},
+    "clay":    {"rough": 0.82, "metal": 0.0, "grain": 0.12, "gscale": 1.8,
+                "hold": 0.9, "flow": 0.1, "iters": 4,
+                "gloss": 0.08, "shin": 5.0, "color": None},
+    "chalk":   {"rough": 1.0, "metal": 0.0, "grain": 0.3, "gscale": 1.0,
+                "hold": 0.35, "flow": 0.05, "iters": 2,
+                "gloss": 0.03, "shin": 3.0, "color": None},
+}
+
+
+def _mat_resample(mm, fn):
+    """Resample a material map through `fn` PREMULTIPLIED by coverage.
+
+    Bilinear interpolation of raw [rough, metal, coverage] mixes edge
+    properties with the 0/0/0 of uncovered neighbours, dragging roughness
+    toward 0 -- a faint CHROME HALO around every resized material stroke.
+    Weighting by coverage first is the same hygiene the pixel path applies
+    to colour vs alpha."""
+    pm = mm.copy()
+    pm[..., 0] *= mm[..., 2]
+    pm[..., 1] *= mm[..., 2]
+    out = fn(pm)
+    cov = np.maximum(out[..., 2:3], 1e-6)
+    out[..., 0:2] = out[..., 0:2] / cov
+    out[..., 2] = np.clip(out[..., 2], 0.0, 1.0)
+    return out
+
+
+_TOOTH_CACHE = {}
+_TOOTH_CACHE_HOLD = []
+
+
+def _canvas_tooth(doc):
+    return _tooth_hw(doc.height, doc.width, _paper_of(doc)[0])
+
+
+# PAPER AND CANVAS STOCKS. The substrate was one fixed field, so every
+# surface behaved like the same mid-grain canvas -- and the substrate decides
+# a great deal: where thin paint catches (stiff paint on the risen threads),
+# where a wash pools (in the dips), how hard dry-brush breaks up, and how
+# strongly watercolour granulates. `grain` scales the feature size, `weave`
+# how much of the crossed-thread structure shows over the fbm, `depth` the
+# overall amplitude, and `drink` how thirsty the surface is (watercolour
+# wicks further into rough rag than into sized hot-press).
+_PAPERS = {
+    "canvas":     {"grain": 3.0, "weave": 0.20, "depth": 1.0,  "drink": 1.0},
+    "rough":      {"grain": 6.5, "weave": 0.06, "depth": 1.55, "drink": 1.35},
+    "cold_press": {"grain": 4.2, "weave": 0.10, "depth": 1.1,  "drink": 1.15},
+    "hot_press":  {"grain": 2.2, "weave": 0.05, "depth": 0.42, "drink": 0.8},
+    "smooth":     {"grain": 1.6, "weave": 0.02, "depth": 0.14, "drink": 0.6},
+    "linen":      {"grain": 3.4, "weave": 0.42, "depth": 1.2,  "drink": 0.95},
+}
+
+
+def _paper_of(doc):
+    name = str(getattr(doc, "paper", "canvas") or "canvas")
+    return name if name in _PAPERS else "canvas", _PAPERS.get(name,
+                                                              _PAPERS["canvas"])
+
+
+def _tooth_hw(H, W, paper="canvas"):
+    """The SUBSTRATE: woven canvas micro-geometry, 0..1, one field per doc.
+
+    Real paint does not meet a perfect plane -- it meets a weave, and thin
+    paint only catches on the peaks. That single fact is what produces
+    dry-brush, scumbling and the broken edge of a fast stroke; without a
+    substrate every stroke lands with the same dead-even coverage.
+
+    Built from composite noise (fbm) plus a crossed-sinusoid weave term, the
+    recipe in Liu et al. 2026 (arXiv:2604.02752) sec.7. Procedural and seeded
+    by the document, so it is position-stable: replays and re-cooks land on
+    the identical tooth, and it costs nothing to store.
+    """
+    pk = paper if paper in _PAPERS else "canvas"
+    pp = _PAPERS[pk]
+    t = _TOOTH_CACHE.get((H, W, pk))  # local rebind: safe against a swap
+    if t is not None:
+        return t
+    # Seeded by a FIXED constant, not the document id: the weave is a
+    # property of the canvas stock, so the same stroke must land identically
+    # in any document. Keying it to doc.id silently gave every document a
+    # different substrate -- a live stroke and its committed twin diverged,
+    # and a save/load round trip re-rolled the texture under the paint.
+    rng = np.random.default_rng(0x0CA9A5)
+    acc = np.zeros((H, W), np.float32)
+    amp, sc = 1.0, float(pp["grain"])
+    for _ in range(4):                       # fbm
+        nh, nw = max(int(H / sc) + 2, 2), max(int(W / sc) + 2, 2)
+        n = _gauss_small(rng.random((nh, nw)).astype(np.float32)[..., None],
+                         1.0)[..., 0]
+        yi = np.clip(np.round(np.linspace(0, nh - 1, H)).astype(int), 0, nh - 1)
+        xi = np.clip(np.round(np.linspace(0, nw - 1, W)).astype(int), 0, nw - 1)
+        acc += amp * n[yi][:, xi]
+        amp *= 0.5
+        sc = max(sc * 0.5, 1.0)
+    acc = (acc - acc.min()) / max(float(acc.max() - acc.min()), 1e-6)
+    yy = np.arange(H, dtype=np.float32)[:, None]
+    xx = np.arange(W, dtype=np.float32)[None, :]
+    # 2.1 rad/px (a ~3px thread), not 0.7 (~9px): at the coarse frequency the
+    # crossed sinusoids read as a diagonal corduroy rib rather than canvas,
+    # and it dominated the fbm instead of sitting under it.
+    # 0.72 rad/px (~8.7px thread), not 2.1 (~3px). At 3px the weave beat
+    # against the bristle pitch (~3.3px) and the two produced a low-frequency
+    # moire -- a plaid crosshatch over every stroke that looked like a render
+    # artifact because it was one. Keeping the substrate well away from the
+    # hair pitch removes the beat entirely.
+    wf = 0.72 * (3.0 / max(float(pp["grain"]), 0.5))
+    weave = 0.5 + 0.5 * np.sin(xx * wf) * np.sin(yy * wf)
+    wv = float(pp["weave"])
+    t = np.clip((1.0 - wv) * acc + wv * weave, 0.0, 1.0).astype(np.float32)
+    # depth flattens the whole field toward its mean rather than clipping it:
+    # a hot-press sheet is a shallow tooth, not a truncated rough one
+    d = float(pp["depth"])
+    t = np.clip(0.5 + (t - 0.5) * d, 0.0, 1.0).astype(np.float32)
+    # Rebind rather than mutate: composites are served concurrently, and
+    # clear()-then-insert on a shared dict leaves a window where a reader
+    # sees neither the old entry nor the new one.
+    if len(_TOOTH_CACHE) > 6:
+        _TOOTH_CACHE_HOLD.append({})
+        globals()["_TOOTH_CACHE"] = _TOOTH_CACHE_HOLD[-1]
+    _TOOTH_CACHE[(H, W, pk)] = t
+    return t
+
+
+def _stroke_frame(dense, dwid, radius, x0b, y0b, x1b, y1b):
+    """Stroke-LOCAL coordinates for every pixel in the stroke's box.
+
+    Returns (u, s): `u` is the signed distance across the stroke normalised
+    by the local brush radius (-1 = one edge, +1 = the other), `s` is how far
+    along the stroke the pixel sits, 0..1. Everything that makes a stroke
+    look like a brush dragged it needs one or both: bristle furrows run along
+    the stroke at fixed `u`, rims sit at |u| ~ 0.8, and the load runs out
+    with `s`. The old model had neither coordinate, which is precisely why
+    every stroke was a featureless dome.
+
+    Nearest-segment projection, walked at a stride of about one radius so
+    the cost tracks brush size rather than point count.
+    """
+    W, H = x1b - x0b, y1b - y0b
+    P = np.asarray(dense, np.float32)
+    if len(P) < 2 or W <= 0 or H <= 0:
+        return None
+    seg = np.hypot(*(P[1:] - P[:-1]).T)
+    arc = np.concatenate([[0.0], np.cumsum(seg)]).astype(np.float32)
+    total = max(float(arc[-1]), 1e-6)
+    best = np.full((H, W), np.inf, np.float32)
+    u = np.zeros((H, W), np.float32)
+    sv = np.zeros((H, W), np.float32)
+    ov = np.zeros((H, W), np.float32)
+    stride = max(1, int(radius * 0.8))
+    idx = list(range(0, len(P) - 1, stride))
+    if idx[-1] != len(P) - 2:
+        idx.append(len(P) - 2)
+    for i in idx:
+        j = min(i + stride, len(P) - 1)
+        ax, ay = float(P[i][0]), float(P[i][1])
+        bx, by = float(P[j][0]), float(P[j][1])
+        wi = float(dwid[i]) if i < len(dwid) else 1.0
+        wj = float(dwid[j]) if j < len(dwid) else wi
+        r = radius * max(wi, 0.05)          # window sizing only
+        wx0 = max(x0b, int(min(ax, bx) - r - 2))
+        wx1 = min(x1b, int(max(ax, bx) + r + 3))
+        wy0 = max(y0b, int(min(ay, by) - r - 2))
+        wy1 = min(y1b, int(max(ay, by) + r + 3))
+        if wx1 <= wx0 or wy1 <= wy0:
+            continue
+        yy = np.arange(wy0, wy1, dtype=np.float32)[:, None]
+        xx = np.arange(wx0, wx1, dtype=np.float32)[None, :]
+        dx, dy = bx - ax, by - ay
+        L2 = dx * dx + dy * dy
+        traw = (((xx - ax) * dx + (yy - ay) * dy) / L2
+                if L2 > 1e-9 else np.zeros((wy1 - wy0, wx1 - wx0), np.float32))
+        traw = np.broadcast_to(traw, (wy1 - wy0, wx1 - wx0))
+        t = np.clip(traw, 0.0, 1.0)
+        # how far past the START or END of the whole path a pixel sits. The
+        # round cap comes from distance-to-endpoint being radial; with an
+        # axial measure each hair can be cut to its own length instead, which
+        # is what makes a brush end chisel-shaped and frayed rather than a
+        # capsule.
+        seglen = float(np.sqrt(L2)) if L2 > 1e-9 else 0.0
+        ovs = np.zeros_like(t)
+        if i == idx[0]:
+            ovs = np.maximum(ovs, np.maximum(-traw, 0.0) * seglen)
+        if j >= len(P) - 1:
+            ovs = np.maximum(ovs, np.maximum(traw - 1.0, 0.0) * seglen)
+        ox = xx - (ax + t * dx)
+        oy = yy - (ay + t * dy)
+        dist = np.hypot(ox, oy)
+        # normalise by the width AT THIS PIXEL, interpolated along the
+        # segment. One width per stride made u's scale piecewise-constant, so
+        # a stroke whose width changed showed the stride boundaries as hard
+        # steps -- the tiling seam down a pressure ramp.
+        rpix = np.maximum(radius * (wi + (wj - wi) * t), 1e-3)
+        # signed side of the path: the cross product's sign, so the two
+        # flanks of the stroke are distinguishable (a rim on each)
+        sgn = np.sign(dx * oy - dy * ox)
+        sgn = np.where(sgn == 0, 1.0, sgn)
+        win = np.s_[wy0 - y0b:wy1 - y0b, wx0 - x0b:wx1 - x0b]
+        take = dist < best[win]
+        best[win] = np.where(take, dist, best[win])
+        u[win] = np.where(take, sgn * dist / rpix, u[win])
+        sv[win] = np.where(
+            take, (arc[i] + t * (arc[j] - arc[i])) / total, sv[win])
+        ov[win] = np.where(take, ovs / rpix, ov[win])
+    return u, sv, total, ov
+
+
+def _bristle_tracks(u, sv, ov, seed, n, press, spd):
+    """Coverage as the UNION OF BRISTLE TRACKS -- the mark generator.
+
+    A brush does not lay a capsule. Each hair drags its own narrow track, and
+    the stroke's outline is the union of those tracks: solid through the
+    middle where neighbouring hairs overlap, breaking into separate streaks
+    and gaps toward the edges, ragged rather than a clean offset curve. Every
+    earlier attempt here modulated a disc-shaped mask AFTER the fact -- comb,
+    tooth, edge bite, load wobble -- and the capsule kept showing through,
+    because decoration cannot change a silhouette. This changes the
+    silhouette.
+
+    Evaluated ANALYTICALLY from the stroke-local frame rather than by
+    stamping each hair: a hair covers a pixel when |u - offset_b(s)| < its
+    half-width, which is a per-pixel test. Built as a small 2-D table over
+    (arc bucket, cross-stroke position) and read with one gather, so the cost
+    is flat in bristle count -- stamping 26 hairs along 200 path points would
+    have been thousands of small array ops per stroke.
+
+    Pressure splays the hairs apart and presses more of them into contact;
+    speed lifts them, so a fast pass rides on fewer hairs and breaks up.
+    """
+    rng = np.random.default_rng(seed)
+    n = int(np.clip(n, 6, 64))
+    # 24 x 512, not 64 x 1024. Both axes are read with linear interpolation,
+    # and the functions sampled are slow: the contact flicker is under one
+    # cycle along the whole stroke, and 512 samples across the tuft is still
+    # ~5 per pixel on a fat brush. The larger table cost 4x the work for
+    # detail that interpolation was reconstructing anyway.
+    S, K = 24, 512
+    lo, hi = -1.7, 1.7
+    axis = np.linspace(lo, hi, K).astype(np.float32)
+    sb = np.linspace(0.0, 1.0, S).astype(np.float32)
+    pmean = float(np.clip(np.mean(press), 0.05, 2.0))
+    smean = float(np.clip(np.mean(spd), 0.0, 2.0))
+    # splay: leaning on the brush pushes the hairs apart and flattens the tuft
+    splay = float(np.clip(0.72 + 0.42 * pmean, 0.6, 1.5))
+    spacing = 2.0 * splay / max(n - 1, 1)
+    pos = (np.linspace(-splay, splay, n)
+           + rng.uniform(-0.34, 0.34, n).astype(np.float32) * spacing)
+    # hairs overlap in the middle (solid) and thin out at the rim
+    hw = spacing * (0.52 + 0.40 * rng.random(n).astype(np.float32))
+    edge = np.abs(pos) / max(splay, 1e-3)
+    # contact: how firmly each hair rides. Outer hairs touch more lightly,
+    # pressure presses more of them home, speed lifts them off
+    base = np.clip((0.98 - 0.45 * edge ** 2) * (0.55 + 0.5 * pmean)
+                   / (1.0 + 0.45 * smean), 0.0, 1.0)
+    wob = rng.uniform(0.0, 6.28, n).astype(np.float32)
+    # Built for ALL hairs at once. The per-hair Python loop ran one exp() per
+    # bristle over the whole table -- about two million exponentials for a
+    # single flush, which made this the third-hottest thing in the paint path
+    # for a table that is pure setup. Broadcasting gives one exp() call.
+    # Each hair wanders a little along the stroke and its contact flickers:
+    # that is where interior gaps and dry skips come from.
+    off = pos[:, None] + 0.045 * np.sin(wob[:, None] + sb[None, :] * 7.0)
+    con = np.clip(base[:, None] * (0.90 + 0.12 * np.sin(
+        wob[:, None] * 1.7 + sb[None, :] * 5.0)), 0.0, 1.0)
+    d = (np.abs(axis[None, None, :] - off[:, :, None])
+         / np.maximum(hw, 1e-3)[:, None, None])
+    # a hair is a rounded thread, not a flat-topped ribbon: at 1-d**3 the
+    # profiles were plateaus that merged into a few thick bands instead of
+    # reading as many fine hairs
+    lut = (np.exp(-(d * d) * 2.2) * con[:, :, None]).max(0).astype(np.float32)
+    # INTERPOLATE along the arc. Nearest-bucket made the hair pattern jump in
+    # S discrete steps down the stroke -- visible as regular vertical seams,
+    # a tiling artifact rather than anything physical.
+    sf = np.clip(sv, 0.0, 1.0) * (S - 1)
+    s0 = np.floor(sf).astype(np.int32)
+    s1 = np.minimum(s0 + 1, S - 1)
+    w1 = (sf - s0).astype(np.float32)
+    uf = np.clip((u - lo) * ((K - 1) / (hi - lo)), 0.0, K - 1)
+    u0 = np.floor(uf).astype(np.int32)
+    u1 = np.minimum(u0 + 1, K - 1)
+    wu = (uf - u0).astype(np.float32)
+    def _bi(si_):
+        return lut[si_, u0] * (1.0 - wu) + lut[si_, u1] * wu
+    field = _bi(s0) * (1.0 - w1) + _bi(s1) * w1
+    ui = u0
+    # THE END OF THE STROKE. A brush does not stop in a neat semicircle: the
+    # hairs are different lengths and the tuft is chisel-shaped, so the mark
+    # ends ragged. Each hair is cut at its own reach past the path end.
+    reach = (0.02 + 0.55 * rng.random(n).astype(np.float32))
+    rl = (np.exp(-((axis[None, :] - pos[:, None])
+                   / np.maximum(hw * 1.6, 1e-3)[:, None]) ** 2)
+          * reach[:, None]).max(0).astype(np.float32)
+    # the end gate is handed back separately: coverage needs it even where
+    # the paint film is continuous and not driven by the hairs
+    egate = (ov <= rl[ui]).astype(np.float32)
+    return field * egate, egate
+
+def _bristle_comb(u, sv, seed, n):
+    """The comb the bristles leave: grooves at FIXED lateral positions that
+    run the whole length of the stroke. Fixed position is the whole point --
+    noise sprinkled per pixel reads as dirt, whereas a bristle holds its lane
+    and draws a continuous furrow, which is what the eye recognises as a
+    brush. The lanes drift very slightly along the stroke (a real hand and a
+    real ferrule are not rigid)."""
+    rng = np.random.default_rng(seed)
+    n = int(np.clip(n, 5, 26))
+    pos = np.linspace(-0.92, 0.92, n).astype(np.float32)
+    pos = pos + rng.uniform(-0.5, 0.5, n).astype(np.float32) * (1.8 / n)
+    amp = rng.uniform(0.45, 1.0, n).astype(np.float32)
+    # width as a fraction of the LANE SPACING, not of the stroke: at 0.62 of
+    # spacing the Gaussians overlapped into one smooth bump whenever the lane
+    # count was low, so small brushes lost the comb entirely and every short
+    # stroke rendered as a flawless extruded tube. 0.32 keeps the furrows
+    # separate at any brush size.
+    spacing = 1.84 / max(n - 1, 1)
+    width = max(spacing * 0.32, 0.02)
+    # The comb is a function of the cross-stroke coordinate alone, so build
+    # it ONCE as a 1-D profile and gather. Evaluating up to 26 Gaussians over
+    # the whole stroke window was the most expensive thing in the deposit
+    # (26 exp() passes over every pixel); this is one table build plus one
+    # integer gather, and it is exact, not an approximation.
+    K = 1024
+    axis = np.linspace(-1.45, 1.45, K).astype(np.float32)
+    prof = np.zeros(K, np.float32)
+    for k in range(n):
+        prof += amp[k] * np.exp(-((axis - pos[k]) / width) ** 2)
+    m = float(prof.max())
+    if m > 1e-6:
+        prof /= m
+    # the ferrule wanders as a whole -- one shared phase, which is also truer
+    # than letting each bristle wobble independently of its neighbours
+    uu = u + 0.035 * np.sin(float(rng.uniform(0.0, 6.28)) + sv * 9.0)
+    idx = np.clip(((uu + 1.45) * ((K - 1) / 2.9)), 0, K - 1).astype(np.int32)
+    return prof[idx]
+
+
+def _deposit(doc, l, med, mask, opacity, load, dense, dwid, radius,
+             x0b, y0b, x1b, y1b, seed, load_field=None, dspd=None):
+    """Turn a coverage mask into a PAINT SURFACE.
+
+    The old model was `mask * opacity * load * 1.6` -- height as a rescaled
+    copy of alpha. It had a number for thickness but no signature of a tool:
+    the same smooth dome for every stroke, even along its whole length,
+    identical whatever the brush did or crossed. Four mechanisms, each from
+    the painting-simulation literature, are what actually make a mark read as
+    paint:
+
+      1. LOAD DEPLETION -- the brush empties as it travels (IMPaSTo, Baxter
+         et al. 2004, treats paint as conserved rather than stamped), so a
+         stroke thins along its length and a long one runs dry.
+      2. BRISTLE COMB -- fixed lanes of furrow and ridge running the length
+         of the stroke.
+      3. CANVAS TOOTH -- deposit modulated by the substrate, so thin paint
+         catches only on the weave peaks and breaks up (Chu & Baxter 2010
+         modulate the brush footprint with the canvas tooth for exactly
+         this); together with (1) this is what produces dry-brush.
+      4. BERM -- bristles shove paint sideways, so the cross-section is not
+         a dome but a shallow trough between two raised rims. Redistributed
+         with volume conserved, because the paint moves, it does not appear.
+
+    Returns (height, coverage_factor). The coverage factor matters as much as
+    the height: a drying brush skipping over the weave lays LESS PIGMENT, not
+    just less body. Modulating only the height left a solid-colour stroke
+    with an embossed texture -- it read as printed vinyl. Dry-brush is a hole
+    in the paint film, so the same mechanisms have to reach the alpha.
+    """
+    dep = mask * float(opacity) * float(load) * 1.6
+    fr = _stroke_frame(dense, dwid, radius, x0b, y0b, x1b, y1b)
+    if fr is None:
+        return dep, None, None          # a single dab has no along-direction
+    u, sv, total, ov = fr
+    bristle = float(med.get("bristle", np.clip(med.get("hold", 0.6), 0, 1)))
+    berm = float(med.get("berm", np.clip(med.get("hold", 0.6) * 0.9, 0, 1)))
+
+    # PRESSURE and SPEED, looked up per pixel by arc position -- the same
+    # trick the reservoir uses, so neither costs anything as the brush grows.
+    # Pressure already scales the radius when the mask is stamped; what it
+    # adds HERE is everything a wider dab alone does not say.
+    nD = len(dense)
+    aix = np.clip((sv * (nD - 1)).astype(np.int32), 0, nD - 1)
+    press = np.clip(np.asarray(dwid, np.float32)[aix]
+                    if len(dwid) >= nD else np.ones_like(sv), 0.05, 2.0)
+    if dspd is not None and len(dspd) >= nD:
+        # brush-widths per sample; ~0.3 is a considered stroke, >1.5 a flick
+        spd = np.clip(np.asarray(dspd, np.float32)[aix], 0.0, 2.0)
+    else:
+        spd = np.zeros_like(sv)
+
+    # 1. the brush empties. How far it gets is set by how much it carries and
+    # how wide it is: `spend` is the fraction of its load used over this
+    # stroke, so a short dab barely depletes and a long sweep runs dry.
+    if load_field is not None:
+        # REAL BRUSH MODE: the load is not a per-stroke setting that resets,
+        # it is what is actually left on the brush, tracked across strokes.
+        # The reservoir walk already accounts for running dry and recharging,
+        # so the synthetic per-stroke depletion below must not also apply.
+        dep = mask * float(opacity) * np.maximum(load_field, 0.0) * 1.6
+        fade = np.clip(load_field / max(float(load), 1e-6), 0.0, 1.0)
+    else:
+        spend = float(np.clip(total / max(radius * 34.0 * max(load, 0.12), 1e-6),
+                              0.0, 1.0))
+        fade = 1.0 - spend * 0.70 * sv
+        dep = dep * fade
+
+    # PRESS: leaning on a brush squeezes paint out of it, and it splays the
+    # bristles so the comb bites HARDER rather than washing out -- press hard
+    # and you want the bristle marks to show, which is why this scales up
+    # with pressure rather than smoothing away.
+    # SPEED: a fast pass gives the paint less contact time to transfer, so a
+    # flick lays a thin broken mark. This is where dry-brush comes from for
+    # free -- a thinner deposit trips the canvas-tooth gate below by itself,
+    # no separate rule needed.
+    dep = dep * (0.5 + 0.5 * press) / (1.0 + 0.55 * spd)
+
+    # 2. the comb: lanes scale with brush width, so a big brush shows more
+    # 2. THE HAIRS. Not a comb multiplied over a disc afterward -- the tracks
+    # ARE the mark, and they carry both the body and the silhouette.
+    n = int(np.clip(radius * 0.6, 5, 30))   # ~3.3px hair pitch: fine, but clear of Nyquist
+    track, egate = _bristle_tracks(u, sv, ov, seed, n, press, spd)
+    # the end gate must reach the BODY as well as the pigment: cutting only
+    # coverage left the old capsule cap standing as a ghost ridge with no
+    # paint on it, which the relief lit as a pale blob past the stroke's end
+    egate = np.maximum(egate, 0.0)
+    # The BODY has to follow the hairs as closely as the pigment does. While
+    # height still came from the disc and coverage came from the tracks,
+    # there was paint thickness in a ring where there was no paint colour --
+    # the relief lit those ghost ridges over bare canvas and haloed every
+    # stroke. Height and pigment must be laid by the same hairs.
+    # Furrows are GROOVES in a film, not canyons. Letting height swing from
+    # 6% to 100% across a hair pitch made the relief violent enough to read
+    # as shredded meat rather than dragged paint.
+    # HOW DEEP THE HAIRS MARK, which is not a constant:
+    #  - thick paint LEVELS. The same fluid behaviour that buries the canvas
+    #    weave also flows back into the brush's own furrows, so a heavy
+    #    passage is smoother and globbier than a thin one. How much survives
+    #    depends on how clay-like the paint is: a stiff medium holds its
+    #    ridges (that is impasto), a watery one closes them almost entirely.
+    #  - PRESSURE drives the hairs into the film. Pressure already sets the
+    #    stroke's diameter; it also sets how much of the brush's texture gets
+    #    pressed in, which is why a light touch leaves a smooth mark and
+    #    leaning on the brush leaves a raked one.
+    levelling = np.exp(-np.maximum(dep, 0.0)
+                       / (0.22 + 3.5 * float(med.get("hold", 0.6))))
+    press_tex = np.clip(0.30 + 0.80 * press, 0.15, 1.4)
+    depth = np.clip(bristle * press_tex * levelling, 0.0, 1.0)
+    comb = (1.0 - depth * 0.44 * (1.0 - track)) * egate
+    # a real hand and real paint are not uniform: the load fluctuates along
+    # the stroke, so the slab is never a constant plateau
+    # Gentle and LONG-WAVELENGTH. A random value per arc bucket is applied
+    # uniformly across the full width of the stroke -- which is by definition
+    # a vertical band. At 96 buckets with light smoothing the bands landed
+    # every ~10px on a short stroke and read as a render artifact. Few
+    # buckets, heavy smoothing and a small amplitude give the hand-tremor
+    # this was meant to be instead of a barcode.
+    # Bucket count must follow the stroke's PHYSICAL LENGTH, not be fixed.
+    # At a constant K the wobble's wavelength scaled with the stroke, so a
+    # short mark got buckets every few pixels and banded -- and the levelling
+    # term below amplifies any variation in `dep`, which made it obvious
+    # again exactly where the paint is thickest. ~55px per bucket keeps the
+    # tremor long-wavelength on a dab and on a sweep alike.
+    rngv = np.random.default_rng(seed ^ 0x5EED)
+    K = int(np.clip(total / 55.0, 3, 64))
+    wob = rngv.random(K).astype(np.float32)
+    kb = max(3, min(11, K))
+    wob = np.convolve(np.concatenate([wob[-kb:], wob, wob[:kb]]),
+                      np.ones(kb, np.float32) / kb, "same")[kb:-kb]
+    wob = 1.0 + 0.06 * (wob - wob.mean()) / max(float(wob.std()), 1e-6)
+    wf = np.clip(sv, 0.0, 1.0) * (K - 1)
+    w0 = np.floor(wf).astype(np.int32)
+    wobp = (wob[w0] * (1.0 - (wf - w0))
+            + wob[np.minimum(w0 + 1, K - 1)] * (wf - w0)).astype(np.float32)
+    dep = dep * comb * wobp
+
+    # 3. the tooth: gate hardest where the paint is thinnest, so heavy loads
+    # bury the weave and a starved brush skips across its peaks
+    tooth = _canvas_tooth(doc)[y0b:y1b, x0b:x1b]
+    thin = np.clip(1.0 - dep / 0.55, 0.0, 1.0)
+    # `settle` flips which way the substrate works. Stiff paint dragged by a
+    # brush is scraped off the risen threads and catches on their tops; a
+    # fluid wash runs off the tops and POOLS IN THE DIPS. Same tooth field,
+    # opposite sign, and using the stiff-paint rule for watercolour was
+    # putting the wash exactly where the water would have run out of.
+    settle = float(med.get("settle", 0.0))
+    high = 1.0 - thin * (1.0 - tooth) * 0.92
+    low = 1.0 - thin * tooth * 0.92
+    grip = high * (1.0 - settle) + low * settle
+    dep = dep * grip
+
+    # The film breaks only where the brush is genuinely STARVED. Applying the
+    # thinning to coverage flat made even a fully loaded stroke lay a 40%
+    # transparent film -- every medium looked like a watercolour wash. The
+    # offset holds coverage pinned at 1 until the surviving deposit drops
+    # well below a full load, and only then lets the weave show through.
+    # (The berm below is pure redistribution of height, so it never reaches
+    # coverage: banking paint sideways must not make the stroke see-through.)
+    # THE SILHOUETTE. A bristle brush does not lay a capsule. Its outline is
+    # the union of individual hair tracks: solid through the middle where the
+    # lanes overlap, but breaking into separate streaks and gaps toward the
+    # edges, so the boundary is ragged and a few hairs run out past the body.
+    # Holding the film's floor constant across the whole width made every
+    # stroke a clean rounded bar with a hard rim -- the extruded-plastic look.
+    # The floor now falls off toward the rim, so the comb fully controls
+    # coverage out there and the lanes separate into hairs.
+    # COVERAGE IS THE TRACK FIELD. Where no hair passed there is no paint --
+    # a true zero, not a floored minimum -- so the boundary is the union of
+    # the hairs and comes out ragged, with gaps and stray streaks, instead of
+    # the clean offset curve a disc mask always produces. A well-loaded brush
+    # still reads solid because neighbouring hairs overlap through the middle.
+    # PAINT IS A FILM THAT THE HAIRS FURROW -- it is not a bundle of threads.
+    # Letting the track field drive coverage across the whole width punched
+    # canvas between every hair, so a loaded stroke read as combed fibre and
+    # the outermost hair became a bright line outlining the mark. A loaded
+    # brush lays a CONTINUOUS film; the hairs show as ridges in the HEIGHT,
+    # which is what the relief is for. Holes belong in exactly two places:
+    # at the rim, where the outer hairs really do separate, and wherever the
+    # brush is starved or riding the weave -- which is dry-brush.
+    wet = np.clip(fade * grip * wobp, 0.0, 1.0)
+    # AN EMPTY BRUSH MUST LAY NOTHING. `film` has a 0.5 floor so that a
+    # merely tired brush still puts colour down -- but that floor ignored the
+    # reservoir, so painting with a brush at zero charge still laid a 50%
+    # film and real-brush mode meant nothing. Fade coverage out over the last
+    # sliver of charge instead of cutting it off, or the stroke would end in
+    # a hard edge mid-air.
+    dry_gate = 1.0
+    if load_field is not None:
+        dry_gate = np.clip(load_field / max(float(load) * 0.18, 1e-6), 0.0, 1.0)
+    rimness = np.clip((np.abs(u) - 0.5) / 0.5, 0.0, 1.0)
+    breakup = np.clip(rimness + 1.5 * (1.0 - wet), 0.0, 1.0)
+    film = np.clip(0.5 + 0.95 * wet, 0.0, 1.0)
+    cover = np.clip(film * (1.0 - breakup * (1.0 - track) * depth),
+                    0.0, 1.0) * egate * dry_gate
+
+    # 4. the berm, volume-conserving: take from the middle, pile at the rims
+    # a hurried brush has no time to bank paint sideways, a leaning one
+    # shoves plenty: the rim is where pressure and speed argue directly
+    berm = berm * float(np.clip(np.mean((0.55 + 0.55 * press)
+                                        / (1.0 + 0.5 * spd)), 0.0, 1.6))
+    if berm > 1e-3:
+        au = np.abs(u)
+        # broad and low. A narrow tall rim reads as piped icing: two hard
+        # parallel lines inside the stroke rather than paint banked up by a
+        # bristle. The bank is wide and its crest sits near the edge.
+        trough = 1.0 - berm * 0.30 * np.exp(-(u * 1.5) ** 2)
+        rim = np.exp(-((au - 0.70) / 0.34) ** 2) * (au < 1.3)
+        before = float(dep.sum())
+        dep = dep * trough + berm * 0.26 * rim * dep
+        after = float(dep.sum())
+        if after > 1e-6:
+            dep *= before / after       # the paint moved; none was created
+    return np.clip(dep, 0.0, None), cover, sv
+
+
+_BRUSH_LANES = 7          # bands across the tuft that hold colour separately
+
+
+def _brush_walk(l, dense, color, media_hold, pickup, charge0, spend_rate,
+                reload_rate, radius=12.0):
+    """Walk the brush along its path, tracking what it CARRIES.
+
+    One 1-D recurrence over the path points returns three tables indexed by
+    arc position: the colour on the brush, the charge remaining, and how much
+    paint was lifted off the canvas at each step. Everything expensive about
+    a physical brush -- mixing, running dry, recharging from thick paint --
+    falls out of this single walk, and because the result is looked up per
+    pixel by arc length, none of it costs anything as the brush gets bigger.
+
+    Charge falls as paint is laid and rises where the brush is dragged
+    through paint that has body. Recharge scales with how EMPTY the brush is:
+    a loaded brush mostly deposits, a dry one mostly lifts -- which is what
+    makes "go and get more paint from a thick area" work without a mode
+    switch. What it lifts, the canvas loses (`taken`), because paint is
+    conserved: picking colour up has to leave a scrape behind.
+    """
+    P = np.asarray(dense, np.float32)
+    n = len(P)
+    if n < 2:
+        return None
+    H, W = l.pixels.shape[:2]
+    # ACROSS THE WIDTH, not one colour for the whole brush. Loading different
+    # parts of the bristles with different colours -- pulling one edge of the
+    # brush through blue and the other through white -- is the core of the
+    # Bob Ross technique, and a single scalar reservoir cannot express it: it
+    # averages the two into one flat mix before the stroke is even laid. Each
+    # lane samples the canvas under ITS OWN part of the tuft, so a dip that
+    # only touches one side loads only that side.
+    tang = np.zeros_like(P)
+    tang[1:-1] = P[2:] - P[:-2]
+    tang[0] = P[1] - P[0]
+    tang[-1] = P[-1] - P[-2]
+    tl = np.maximum(np.hypot(tang[:, 0], tang[:, 1]), 1e-6)
+    perp = np.stack([-tang[:, 1] / tl, tang[:, 0] / tl], 1)
+    # The lanes sample where each part of the TUFT sits, so they must stay
+    # inside the mark the brush actually makes. At +/-0.78 radius the outer
+    # lanes sampled past the edge of a narrow pile, missed it, and dragged
+    # the averaged charge and colour down -- a dip loaded the middle of the
+    # brush and reported almost nothing.
+    lanes = np.linspace(-0.55, 0.55, _BRUSH_LANES).astype(np.float32)
+    lx = P[:, 0:1] + perp[:, 0:1] * lanes[None, :] * radius
+    ly = P[:, 1:2] + perp[:, 1:2] * lanes[None, :] * radius
+    xi = np.clip(lx.astype(np.int32), 0, W - 1)
+    yi = np.clip(ly.astype(np.int32), 0, H - 1)
+    under = l.pixels[yi, xi]                       # (n, L, 4)
+    ua = under[..., 3]
+    hm = getattr(l, "height_map", None)
+    raw = hm[yi, xi] if hm is not None else np.zeros((n, _BRUSH_LANES), np.float32)
+    body = np.clip(raw / max(media_hold, 0.05), 0.0, 1.0)
+    # A RESERVOIR is a pile, not just any wet paint. `body` saturates at 1,
+    # so a single normal stroke and a six-stroke mound looked identical to it
+    # and the brush merrily recharged off its own last mark -- charge went UP
+    # while painting. Only height ABOVE what one loaded stroke leaves counts
+    # as somewhere you can dip.
+    thick = np.clip(raw - 2.2, 0.0, 6.0) * 0.5      # (n, L)
+    step = np.concatenate([[0.0], np.hypot(*(P[1:] - P[:-1]).T)]).astype(np.float32)
+    L = _BRUSH_LANES
+    cols = np.empty((n, L, 3), np.float32)
+    chg = np.empty((n, L), np.float32)
+    taken = np.zeros((n, L), np.float32)
+    col0 = np.asarray(color, np.float32)
+    cur = (col0.copy() if col0.shape == (L, 3)
+           else np.repeat(_f32(color).reshape(1, 3), L, 0))
+    c = (np.asarray(charge0, np.float32).copy()
+         if np.ndim(charge0) else np.full(L, float(charge0), np.float32))
+    for i in range(n):
+        st = float(step[i])
+        # lift: the emptier the brush, the more it takes
+        act = thick[i] > 0.01
+        if reload_rate > 0.0 and np.any(act):
+            # Dragging through a PILE trades paint even when the brush is
+            # full. Gating this on "has room" meant a freshly loaded brush
+            # dipped into a second colour only got the slow trickle, so red
+            # into white stayed red -- and dipping to mix is the whole point
+            # of a palette. An emptier brush still takes more, but a full one
+            # exchanges: what it gains in colour it gives up in load.
+            g = (reload_rate * thick[i] * ua[i] * st
+                 * (0.40 + 0.60 * (1.0 - c))) * act
+            w = np.minimum(g / np.maximum(c, 0.12), 0.55)[:, None]
+            cur = cur * (1.0 - w) + under[i, :, :3] * w
+            # A full brush still LIFTS paint as it drags -- it displaces and
+            # carries even when it cannot hold more. Capping the take strictly
+            # by remaining room meant that once the brush filled (which is
+            # fast now) it stopped scraping the mound at all, and paint
+            # stopped being conserved half way through a dip.
+            taken[i] = g * (0.30 + 0.70 * np.maximum(1.0 - c, 0.0))
+            c = np.minimum(c + g, 1.0)
+        elif pickup > 1e-3:
+            k = np.clip(pickup * ua[i] * body[i] * 0.012 * max(st, 1.0),
+                        0.0, 0.05)[:, None]
+            cur = cur * (1.0 - k) + under[i, :, :3] * k
+        # lay: what leaves the brush
+        if spend_rate > 0.0:
+            c = np.maximum(c - spend_rate * st, 0.0)
+        cols[i] = cur
+        chg[i] = c
+    return cols, chg, taken
+
+
+def _wet_mix(l, dense, color, media_hold, pickup, dense_arc_total):
+    """Wet-on-wet: the brush PICKS UP what it crosses and drags it forward.
+
+    Real paint mixes on the canvas, not in a colour picker. Drag blue across
+    a wet red stroke and the blue goes purple *from the crossing onward* --
+    the brush carries the red it lifted, and the further it travels the more
+    it has spent. That asymmetry is the whole tell: a stroke that mixes
+    symmetrically along its length looks like a gradient, not like paint.
+
+    Modelled as a reservoir walked ALONG the path: at each step the brush
+    trades a little of its load for what is under it. One 1-D recurrence over
+    the path points -- a few hundred steps -- and the result is looked up per
+    pixel by arc length, so the cost does not scale with brush size at all.
+    Returns an (N,3) table of brush colour versus arc position.
+
+    `pickup` is 0..1. Stiff media lift more (a loaded bristle drags pigment);
+    a watery brush mostly deposits.
+    """
+    P = np.asarray(dense, np.float32)
+    n = len(P)
+    if n < 2 or pickup <= 1e-3:
+        return None
+    H, W = l.pixels.shape[:2]
+    xi = np.clip(P[:, 0].astype(np.int32), 0, W - 1)
+    yi = np.clip(P[:, 1].astype(np.int32), 0, H - 1)
+    under = l.pixels[yi, xi]                       # what the path crosses
+    ua = under[:, 3]
+    # only WET paint lifts. Height is the paint body: bare canvas and thin
+    # stain give nothing back, a fat ridge gives plenty.
+    hm = getattr(l, "height_map", None)
+    body = (np.clip(hm[yi, xi] / max(media_hold, 0.05), 0.0, 1.0)
+            if hm is not None else np.zeros(n, np.float32))
+    # PER STEP, and the path is sampled about a pixel apart -- so this is a
+    # rate per pixel travelled, not per crossing. At the obvious-looking 0.55
+    # a brush crossing one 34px bar compounded (1-0.55)^34 and came out the
+    # far side pure red: one touch of wet paint wiped the load entirely.
+    # 0.012 leaves roughly two thirds of the original colour after a single
+    # crossing, and mud only after several -- which is how it goes.
+    take = np.clip(pickup * ua * body * 0.012, 0.0, 0.05).astype(np.float32)
+    res = np.empty((n, 3), np.float32)
+    cur = _f32(color).reshape(3).copy()
+    for i in range(n):
+        k = float(take[i])
+        if k > 1e-4:
+            cur = cur * (1.0 - k) + under[i, :3] * k
+        res[i] = cur
+    return res
+
+
+def _resolve_material(material):
+    """A material request -> a full parameter dict, or None.
+
+    Accepts a preset name or a dict of overrides (a dict may name a preset
+    to start from via "preset"). Unknown names raise -- a silent fallback
+    would paint the wrong stuff, and the error names the choices."""
+    if not material:
+        return None
+    if isinstance(material, str):
+        m = _MATERIALS.get(material)
+        if m is None:
+            raise ValueError("unknown material %r -- one of %s"
+                             % (material, ", ".join(sorted(_MATERIALS))))
+        return dict(m, name=material)
+    if isinstance(material, dict):
+        base = dict(_MATERIALS.get(str(material.get("preset", "")), {
+            "rough": 0.5, "metal": 0.0, "grain": 0.0, "gscale": 2.0,
+            "hold": 0.8, "flow": 0.12, "iters": 4,
+            "gloss": 0.4, "shin": 20.0, "color": None}))
+        for k in ("rough", "metal", "grain", "gscale", "hold", "flow",
+                  "iters", "gloss", "shin"):
+            if k in material and material[k] is not None:
+                base[k] = float(material[k])
+        base["rough"] = float(np.clip(base["rough"], 0.0, 1.0))
+        base["metal"] = float(np.clip(base["metal"], 0.0, 1.0))
+        base["name"] = str(material.get("preset", "custom"))
+        return base
+    raise ValueError("material must be a preset name or a dict")
+
+
+def _material_grain(doc, l, gscale):
+    """The material's micro-relief field: position-stable noise so a replay
+    re-deposits the IDENTICAL texture (seeded by document + layer + scale,
+    never by stroke order), centred on zero so grain roughens without
+    inflating the mean height."""
+    key = round(float(gscale), 2)
+    cache = getattr(l, "_mat_grain", None)
+    if cache is None:
+        cache = l._mat_grain = {}
+    g = cache.get(key)
+    if g is None or g.shape != (doc.height, doc.width):
+        seed = hash((doc.id, l.id, "matgrain", key)) & 0x7fffffff
+        rng = np.random.default_rng(seed)
+        n = rng.random((doc.height, doc.width)).astype(np.float32)
+        g = _gauss_blur(n[..., None], max(key, 0.6))[..., 0]
+        lo, hi = float(g.min()), float(g.max())
+        g = (g - lo) / max(hi - lo, 1e-6) - 0.5
+        cache[key] = g
+    return g
+
+
+def _relief_shade(px, height, gloss=0.3, shin=16.0, material=None,
+                  slope=_RELIEF_SLOPE):
     """Light the paint surface: normals from the height field, lambert plus a
     specular term, applied to a COPY of the pixels -- the stored pigment stays
     flat and undamaged, the relief is a view. This is what makes built-up
     paint read as physical: ridges catch the key light on one side and shadow
-    on the other, and oil gets its sheen."""
+    on the other, and oil gets its sheen.
+
+    `material` is the layer's (H,W,3) [rough, metal, coverage] window, or
+    None. Where coverage is 0 the maths reduces EXACTLY to the scalar
+    gloss/shin path, so plain impasto shades byte-for-byte as before; where
+    material was painted, the highlight tightens with 1-rough, metals tint
+    their gleam with the pigment underneath (gold's shine is gold, chrome's
+    is silver) and give up their diffuse -- the two behaviours that make a
+    metal read as metal rather than as glossy plastic."""
     # surface tension: real paint rounds itself off, so the normals come
     # from a slightly smoothed surface. Raw mask edges made near-vertical
     # normals, and every stroke boundary inside a blob shaded as a hard dark
     # vein -- the "glitchy" creases in the user's screenshot.
-    smooth = _gauss_blur_reflect(height.astype(np.float32), 1.4)
+    # 0.6, not the old 1.4: surface tension should round a ridge, not erase
+    # the bristle comb and canvas tooth that the deposit model works to lay
+    # down. The hard "veins" that 1.4 was hiding came from raw mask edges;
+    # the deposit now models a real edge profile (rim, then falloff), so the
+    # veins have no reason to exist and a light touch is enough.
+    smooth = _gauss_small(height.astype(np.float32), 0.6)
     gy, gx = np.gradient(smooth)
+    gy = gy * slope
+    gx = gx * slope
     nz = np.ones_like(height, np.float32)
     inv = 1.0 / np.sqrt(gx * gx + gy * gy + 1.0)
     nx, ny, nzn = -gx * inv, -gy * inv, nz * inv
@@ -627,11 +1542,59 @@ def _relief_shade(px, height, gloss=0.3, shin=16.0):
     # Blinn half-vector with the view straight on (0,0,1)
     hx, hy, hz = _LIGHT[0], _LIGHT[1], _LIGHT[2] + 1.0
     hn = 1.0 / np.sqrt(hx * hx + hy * hy + hz * hz)
-    spec = np.clip(nx * hx * hn + ny * hy * hn + nzn * hz * hn, 0.0, 1.0) ** shin
+    sdot = np.clip(nx * hx * hn + ny * hy * hn + nzn * hz * hn, 0.0, 1.0)
     out = px.copy()
-    lit = 0.72 + 0.42 * lam
+    cov = None
+    if material is not None:
+        cov = np.clip(material[..., 2], 0.0, 1.0)
+        if not (cov > 1e-3).any():
+            cov = None
+    if cov is None:
+        spec = sdot ** shin
+        lit = 0.72 + 0.42 * lam
+        out[..., :3] = np.clip(
+            out[..., :3] * lit[..., None]
+            + (gloss * spec * (height > 0.02))[..., None], 0.0, 1.0)
+        return out
+    rough = np.clip(material[..., 0], 0.0, 1.0)
+    metal = np.clip(material[..., 1], 0.0, 1.0)
+    # highlight WIDTH: rough 0 -> exponent ~114 (chrome pin-dot), rough 1 ->
+    # 4 (broad dull sheen); blended toward the layer's scalar exponent by
+    # coverage so a material edge fades into plain impasto, never snaps
+    # exponent cap 60, not the Blinn-classic ~110: surface tension smooths
+    # every ridge, so past ~60 no canvas pixel ever aligns and the highlight
+    # exists only in the maths (chrome measured duller than chalk). At 60
+    # the pin-dot fires on real ridge flanks and still reads tight.
+    shin_px = float(shin) * (1.0 - cov) + (4.0 + (1.0 - rough) ** 2
+                                           * 56.0) * cov
+    spec = np.power(sdot, shin_px)
+    # highlight STRENGTH: dielectrics keep a Fresnel-ish floor (0.06) that
+    # grows as they polish; metals are strong but a rough metal scatters
+    amt_d = 0.06 + 0.5 * (1.0 - rough) ** 2
+    amt_m = 0.9 * (1.0 - 0.55 * rough)
+    amt = (float(gloss) * (1.0 - cov)
+           + (amt_d * (1.0 - metal) + amt_m * metal) * cov)
+    # a SECOND, broad lobe for polished surfaces: with one key light and
+    # surface-tension-smoothed ridges, almost no pixel aligns with a ^110
+    # half-vector, so chrome shaded as dark slate -- the pin-dot existed
+    # in the maths and never on the canvas. Real polished surfaces pick up
+    # the whole environment; this wide low lobe is that pickup, scaled by
+    # polish and boosted for metals, and it is what makes a chrome flank
+    # actually gleam. Matte materials get none ((1-rough)^2 -> 0).
+    spec2 = sdot ** 4
+    amt2 = cov * (1.0 - rough) ** 2 * (0.1 + 0.35 * metal)
+    # metals gleam in their own colour; dielectric highlights stay white
+    tint = metal[..., None] * 0.85 * cov[..., None]
+    spec_rgb = (1.0 - tint) + out[..., :3] * tint
+    # metals surrender diffuse -- kept off a hard zero so an unlit gold
+    # stroke reads as dark metal, not a hole in the picture
+    lit = 0.72 + 0.42 * lam * (1.0 - 0.72 * metal * cov)
+    lit = lit - 0.34 * metal * cov * (1.0 - lam)   # away from light: darker
+    vis = np.maximum((height > 0.02).astype(np.float32), cov > 0.05)
     out[..., :3] = np.clip(out[..., :3] * lit[..., None]
-                           + (gloss * spec * (height > 0.02))[..., None], 0.0, 1.0)
+                           + spec_rgb * ((amt * spec + amt2 * spec2)
+                                         * vis)[..., None],
+                           0.0, 1.0)
     return out
 
 
@@ -1644,6 +2607,27 @@ def _optically_active(l):
     light/refraction/shadows while having the layer still hidden')."""
     return bool(l.visible) or bool(getattr(l, "optical", False))
 
+
+def _flow_dir(doc, l):
+    """Which way is DOWN for this layer's wet paint, and how hard.
+
+    Gravity was hardcoded to screen-down, which is only right for a canvas on
+    an easel. A layer standing on one of the room's walls runs down THAT
+    wall, and a canvas lying flat on a table has no in-plane gravity at all --
+    a puddle there spreads outward and levels instead of running. Baking the
+    easel case in meant every surface behaved like an easel.
+
+    Returns (strength, dx, dy). Strength 0 means "level, do not run".
+    """
+    g = getattr(l, "gravity", None)
+    if g is None:
+        g = getattr(doc, "gravity", 1.0)
+    a = getattr(l, "gravity_angle", None)
+    if a is None:
+        a = getattr(doc, "gravity_angle", 90.0)
+    g = float(np.clip(g, 0.0, 1.0))
+    r = np.radians(float(a))
+    return g, float(np.cos(r)), float(np.sin(r))   # +y is down the screen
 
 def _on_floor(doc, l):
     """Does this layer lie on the CANVAS, as opposed to standing on one
@@ -2903,12 +3887,32 @@ def _shaded_pixels(lyr):
     _shade_patch), so a brush stroke re-lights a few thousand pixels rather
     than the whole frame -- measured 268 ms per stroke at 1080p before."""
     hgt = getattr(lyr, "height_map", None)
-    if hgt is None or not (hgt > 0.02).any():
+    mat = getattr(lyr, "material_map", None)
+    if mat is not None and not (mat[..., 2] > 1e-3).any():
+        mat = None
+    if (hgt is None or not (hgt > 0.02).any()) and mat is None:
         return lyr.pixels
+    if hgt is None:
+        # a flat material wash still gleams: light it over a level surface
+        hgt = np.zeros(lyr.pixels.shape[:2], np.float32)
+    # A STRATUM IS NOT A SEPARATE SHEET. It is the top of a paint column, and
+    # lighting it on its own height alone made it read as a thin slab resting
+    # on a plateau -- the visible stepping between layers. Shade the total.
+    _bel = getattr(lyr, "height_below", None)
+    if _bel is not None and _bel.shape == hgt.shape:
+        hgt = hgt + _bel
+    # the paint sits ON canvas -- but it FILLS it: the weave shows through a
+    # thin film and is buried by a thick one
+    hgt = hgt + (_tooth_hw(*hgt.shape, getattr(lyr, "paper", "canvas"))
+                 * _CANVAS_RELIEF
+                 * np.exp(-np.maximum(hgt, 0.0) / _PAINT_LEVEL))
     if getattr(lyr, "_shade_rev", None) == _MUT_REV[0]:
         return lyr._shaded
     out = _relief_shade(lyr.pixels, hgt, getattr(lyr, "paint_gloss", 0.3),
-                        _MEDIA.get(getattr(lyr, "paint_media", ""), {}).get("shin", 16.0))
+                        _MEDIA.get(getattr(lyr, "paint_media", ""), {}).get("shin", 16.0),
+                        material=mat,
+                        slope=_RELIEF_SLOPE * float(np.clip(
+                            getattr(lyr, "relief", 1.0), 0.0, 1.0)))
     try:
         lyr._shaded, lyr._shade_rev = out, _MUT_REV[0]
     except AttributeError:
@@ -2946,10 +3950,21 @@ def _shade_patch(lyr, x0, y0, x1, y1, rev_before):
         # Invalidate instead; the next serve recomputes the full shade.
         lyr._shade_rev = None
         return
+    mat = getattr(lyr, "material_map", None)
+    _hw = lyr.height_map[ey0:ey1, ex0:ex1]
+    _bel = getattr(lyr, "height_below", None)
+    if _bel is not None and _bel.shape == lyr.height_map.shape:
+        _hw = _hw + _bel[ey0:ey1, ex0:ex1]
     win = _relief_shade(lyr.pixels[ey0:ey1, ex0:ex1],
-                        lyr.height_map[ey0:ey1, ex0:ex1],
+                        _hw + (_tooth_hw(*lyr.height_map.shape,
+                                        getattr(lyr, "paper", "canvas"))[ey0:ey1, ex0:ex1]
+                               * _CANVAS_RELIEF
+                               * np.exp(-np.maximum(_hw, 0.0) / _PAINT_LEVEL)),
                         getattr(lyr, "paint_gloss", 0.3),
-                        _MEDIA.get(getattr(lyr, "paint_media", ""), {}).get("shin", 16.0))
+                        _MEDIA.get(getattr(lyr, "paint_media", ""), {}).get("shin", 16.0),
+                        material=None if mat is None else mat[ey0:ey1, ex0:ex1],
+                        slope=_RELIEF_SLOPE * float(np.clip(
+                            getattr(lyr, "relief", 1.0), 0.0, 1.0)))
     # the outermost pad ring saw a CROPPED blur neighbourhood; only trust the
     # interior of the window
     trim = 6
@@ -3083,6 +4098,8 @@ class Layer:
         self.mask = None          # a Mask id, or None
         self.mask_invert = False
         self.height_map = None    # impasto: per-pixel paint thickness, lazy
+        self.material_map = None  # PBR paint: (H,W,3) [rough, metal,
+                                  # coverage], lazy like height_map
         self.wall = None          # which perpendicular plane this stands on
         self.paint_gloss = 0.3    # specular strength of the last media used
         self.alpha_lock = False   # paint recolors existing pixels only
@@ -3149,6 +4166,12 @@ class Layer:
                                                        None))),
                 "locked": bool(getattr(self, "locked", False)),
                 "relief": float(getattr(self, "relief", 1.0)),
+                # which way is DOWN for this surface: the UI needs to read
+                # it back or the control cannot show the layer's state
+                "gravity": (None if getattr(self, "gravity", None) is None
+                            else float(self.gravity)),
+                "gravity_angle": (None if getattr(self, "gravity_angle", None) is None
+                                  else float(self.gravity_angle)),
                 "optical": bool(getattr(self, "optical", False)),
                 "media_res": str(getattr(self, "media_res", "normal")),
                 "media_time": str(getattr(self, "media_time", "timeline")),
@@ -3305,6 +4328,27 @@ class Document:
         self.width, self.height = int(width), int(height)
         self.layers = []
         self.groups = []          # [{id, name, layers: [layer_id, ...]}]
+        # Stroke groups bundle a blended passage into ONE editable object.
+        # The replay pipeline already makes mixing non-destructive, so this
+        # buys organisation, not semantics: you can drag a whole blended sky
+        # without rubber-banding a marquee round every contributing mark.
+        self.stroke_groups = []   # [{id, name, strokes: [sid, ...]}]
+        # REAL BRUSH MODE: the brush is a physical object that holds a finite
+        # amount of paint. It empties as you work, it can be recharged by
+        # going and getting more from thick paint already on the canvas, and
+        # it can be fully reloaded from the palette. See `load_brush`.
+        # When a layer fills up, spill the excess onto a fresh one. OPT-IN:
+        # it changes how a heavily worked passage builds (and costs a full
+        # extra composite pass per stratum), so it is a choice the painter
+        # makes rather than something that happens to their document.
+        self.auto_stratum = False
+        self.brush_charge = 1.0          # 0..1 of capacity
+        self.brush_color = (0.0, 0.0, 0.0)
+        # A palette is not part of a picture and does not belong to any of its
+        # layers. It is its own small surface, and the brush you dip there is
+        # the SAME brush you paint with -- see `_brush_host`.
+        self._palette_doc = None
+        self._brush_host = None
         self._gnext = 1
         self.masks = []
         self.selections = []
@@ -3396,8 +4440,25 @@ class Document:
                 x0, y0, x1, y1 = region
                 return (region, hm[y0:y1, x0:x1].copy())
             return hm.copy()
+
+        def _mat(l):
+            # the material map is document state exactly like the height:
+            # undoing a gold stroke must take its metalness with it, or the
+            # next plain stroke there gleams for no reason. Same window
+            # discipline as _hg.
+            mm = getattr(l, "material_map", None)
+            if keep is not None and l.id not in keep:
+                return None
+            if mm is None:
+                return False
+            if region is not None:
+                x0, y0, x1, y1 = region
+                return (region, mm[y0:y1, x0:x1].copy())
+            return mm.copy()
         return {"w": self.width, "h": self.height, "partial": keep is not None,
                 "groups": [dict(g, layers=list(g["layers"])) for g in self.groups],
+                "stroke_groups": [dict(g, strokes=list(g["strokes"]))
+                                  for g in self.stroke_groups],
                 "masks": [(m.id, m.name, m.data.copy()) for m in self.masks],
                 "selections": [(x.id, x.name, x.data.copy())
                                for x in self.all_selections()],
@@ -3461,6 +4522,20 @@ class Document:
                                  getattr(l, "place", None))),
                              "locked": bool(getattr(l, "locked", False)),
                              "relief": float(getattr(l, "relief", 1.0)),
+                             # the UNDO snapshot is a separate path from
+                             # save/load: without these an undo turned the
+                             # palette back into an ordinary layer and broke
+                             # its dock, and severed the stratum chain
+                             "palette": bool(getattr(l, "palette", False)),
+                             "stratum_of": getattr(l, "stratum_of", None),
+                             "stratum_next": getattr(l, "stratum_next", None),
+                             "stratum_root": getattr(l, "stratum_root", None),
+                             # which way is DOWN for this surface's wet
+                             # paint -- an easel, a wall, or flat on a table
+                             "gravity": (None if getattr(l, "gravity", None) is None
+                                         else float(l.gravity)),
+                             "gravity_angle": (None if getattr(l, "gravity_angle", None) is None
+                                               else float(l.gravity_angle)),
                              "optical": bool(getattr(l, "optical", False)),
                              "media_res": str(getattr(l, "media_res", "normal")),
                              "media_time": str(getattr(l, "media_time", "timeline")),
@@ -3469,7 +4544,10 @@ class Document:
                                  getattr(l, "curve_profile", None))),
                              "dome_profile": json.loads(json.dumps(
                                  getattr(l, "dome_profile", None))),
-                             "source": getattr(l, "source", None)})
+                             "source": getattr(l, "source", None)},
+                            # rec[12]: the material map, windowed like _hg --
+                            # older snapshots simply lack the slot
+                            _mat(l))
                            for l in self.layers],
                 # Stroke PATHS are document state too. Without them undo put the
                 # pixels back but left the paths where the edit moved them, so a
@@ -3488,6 +4566,8 @@ class Document:
     def _restore(self, snap):
         self.width, self.height = snap["w"], snap["h"]
         self.groups = [dict(g, layers=list(g["layers"])) for g in snap.get("groups", [])]
+        self.stroke_groups = [dict(g, strokes=list(g["strokes"]))
+                              for g in snap.get("stroke_groups", [])]
         if "brushes" in snap:
             self.brushes = []
             for rec in snap["brushes"]:
@@ -3543,6 +4623,7 @@ class Document:
                             for k in snap["strokes"]]
         live = {l.id: l.pixels for l in self.layers}
         live_h = {l.id: getattr(l, "height_map", None) for l in self.layers}
+        live_m = {l.id: getattr(l, "material_map", None) for l in self.layers}
         self.layers = []
         for rec in snap["layers"]:
             lid, name, vis, op, bl, msk, minv, px = rec[:8]
@@ -3577,6 +4658,21 @@ class Document:
             else:
                 hm = live_h.get(lid)
                 l.height_map = None if hm is None else hm
+            mg = rec[12] if len(rec) > 12 else None
+            if mg is False:
+                l.material_map = None          # that state HAD no material
+            elif isinstance(mg, tuple):
+                (rx0, ry0, rx1, ry1), sub = mg
+                base = live_m.get(lid)
+                if base is None or base.shape != (self.height, self.width, 3):
+                    base = np.zeros((self.height, self.width, 3), np.float32)
+                l.material_map = base.copy()
+                l.material_map[ry0:ry1, rx0:rx1] = sub
+            elif mg is not None:
+                l.material_map = mg.copy()
+            else:                              # untouched (or a pre-material
+                mm = live_m.get(lid)           # snapshot): keep what is live
+                l.material_map = None if mm is None else mm
             l.paint_gloss = gloss
             if pmedia:
                 l.paint_media = pmedia
@@ -3756,6 +4852,9 @@ class Document:
         hm = getattr(l, "height_map", None)
         if hm is not None:
             l.height_map = np.flip(hm, axis=ax).copy()
+        mm = getattr(l, "material_map", None)
+        if mm is not None:
+            l.material_map = np.flip(mm, axis=ax).copy()
         src = getattr(l, "source", None)
         if src is not None:
             l.source = np.flip(src, axis=ax).copy()
@@ -3920,10 +5019,18 @@ class Document:
                   "tilt_x", "tilt_y",
                   "curve", "dome", "field", "field_mode", "field_strength",
                   "curve_axis", "locked", "relief", "optical",
+                  # which way is DOWN for this surface's wet paint
+                  "gravity", "gravity_angle",
                   "media_res", "media_time"):
             if k in props and props[k] is not None:
                 v = props[k]
-                if k == "thickness":
+                if k == "gravity":
+                    # zero is MEANINGFUL here (flat on a table) rather
+                    # than absent, so it must not be gated away
+                    v = float(np.clip(float(v), 0.0, 1.0))
+                elif k == "gravity_angle":
+                    v = float(v) % 360.0
+                elif k == "thickness":
                     v = max(float(v), 0.1)       # >= 0.01 mm, always
                 elif k in ("tilt_x", "tilt_y"):
                     # past +/-90 the slab faces away and reads as a
@@ -4735,6 +5842,11 @@ class Document:
                 # glitches were visible the moment transform met impasto
                 l.height_map = _affine(l.height_map, sx, sy, deg, dx, dy,
                                        pivot=pivot)
+            if getattr(l, "material_map", None) is not None:
+                # the stuff travels with its pigment for the same reason
+                l.material_map = _mat_resample(
+                    l.material_map,
+                    lambda a: _affine(a, sx, sy, deg, dx, dy, pivot=pivot))
         elif kind == "mask":
             m = self.mask_by_id(oid)
             m.data = _affine(m.data, sx, sy, deg, dx, dy, pivot=pivot)
@@ -4757,6 +5869,9 @@ class Document:
                 if getattr(l, "height_map", None) is not None:
                     l.height_map = _resize(l.height_map[..., None],
                                            height, width)[..., 0]
+                if getattr(l, "material_map", None) is not None:
+                    l.material_map = _mat_resample(
+                        l.material_map, lambda a: _resize(a, height, width))
             for m in self.masks:
                 shp = getattr(m, "shape", None)
                 if shp and shp.get("w") and shp.get("h"):
@@ -4843,6 +5958,8 @@ class Document:
                 l.pixels = fit(l.pixels)
                 if getattr(l, "height_map", None) is not None:
                     l.height_map = fit(l.height_map)
+                if getattr(l, "material_map", None) is not None:
+                    l.material_map = fit(l.material_map)
             for m in self.masks:
                 m.data = fit(m.data)
                 m.shape = None  # content was re-framed, not rescaled
@@ -4866,6 +5983,8 @@ class Document:
             l.pixels = l.pixels[y0:y1, x0:x1].copy()
             if getattr(l, "height_map", None) is not None:
                 l.height_map = l.height_map[y0:y1, x0:x1].copy()
+            if getattr(l, "material_map", None) is not None:
+                l.material_map = l.material_map[y0:y1, x0:x1].copy()
         for m in self.masks:
             m.data = m.data[y0:y1, x0:x1].copy()
             m.shape = None      # the stored geometry described the OLD frame
@@ -5390,6 +6509,7 @@ class Document:
         if first or not live or live.get("lid") != lid:
             self.record("Brush (live)", only=[lid])       # full snapshot: the
             hm = self.layer(lid).height_map
+            mm = getattr(self.layer(lid), "material_map", None)
             self._live_stroke = {                         # stroke can grow
                 "lid": lid,                               # anywhere from here
                 "before": self.layer(lid).pixels.copy(),
@@ -5397,6 +6517,19 @@ class Document:
                 # flush would re-deposit the whole stroke's height on top of
                 # the last flush's -- media strokes thickened with flush count
                 "before_h": None if hm is None else hm.copy(),
+                # the material map has the same flush-count failure mode:
+                # without a restore, coverage saturates and grain doubles
+                "before_m": None if mm is None else mm.copy(),
+                # the brush itself rewinds too: a live flush repaints the
+                # whole stroke, and without this the reservoir was spent once
+                # per flush instead of once per stroke
+                "before_charge": np.asarray(
+                    getattr(self, "brush_charges",
+                            np.full(_BRUSH_LANES, self.brush_charge,
+                                    np.float32)), np.float32).copy(),
+                "before_lanes": (None if getattr(self, "brush_lanes", None)
+                                 is None else np.asarray(
+                                     self.brush_lanes, np.float32).copy()),
                 "sid": None,
             }
         else:
@@ -5405,6 +6538,17 @@ class Document:
                 self.layer(lid).height_map[:] = live["before_h"]
             elif self.layer(lid).height_map is not None:
                 self.layer(lid).height_map[:] = 0.0
+            if live.get("before_m") is not None:
+                self.layer(lid).material_map[:] = live["before_m"]
+            elif getattr(self.layer(lid), "material_map", None) is not None:
+                self.layer(lid).material_map[:] = 0.0
+            if live.get("before_charge") is not None:
+                self.brush_charges = live["before_charge"].copy()
+                self.brush_charge = float(self.brush_charges.mean())
+            if live.get("before_lanes") is not None:
+                self.brush_lanes = live["before_lanes"].copy()
+                self.brush_color = tuple(
+                    float(v) for v in self.brush_lanes.mean(0))
             if live.get("sid"):
                 try:                       # gone already (undo mid-stroke): fine
                     self.strokes.remove(self.stroke_by_id(live["sid"]))
@@ -5472,12 +6616,16 @@ class Document:
         not a tool, it is a wait. Only strokes whose bounding box touches the
         region can affect it, and each is clipped to that region, so the cost
         follows the edit rather than the document."""
-        if any(k["layer"] == lid and k["brush"].get("media")
+        if any(k["layer"] == lid and (k["brush"].get("media")
+                                      or k["brush"].get("material")
+                                      or k["brush"].get("blend")
+                                      or k["brush"].get("knife"))
                for k in self.strokes):
             # a media stroke's gravity flow runs BELOW its own bbox and reads
             # accumulated height from earlier strokes; a rectangle replay
-            # cannot reproduce that. Decline, and the caller falls back to the
-            # full-layer rebuild, which can.
+            # cannot reproduce that. Material strokes share the same body
+            # physics AND accumulate per-pixel stuff. Decline, and the caller
+            # falls back to the full-layer rebuild, which can.
             return False
         base = getattr(self, "_replay_base", {}).get(lid)
         if base is None:
@@ -5530,20 +6678,66 @@ class Document:
             return None
         keep = self.layer(lid).pixels
         keep_h = self.layer(lid).height_map
+        keep_m = getattr(self.layer(lid), "material_map", None)
         self.layer(lid).pixels = base.copy() if into is None else into
-        if any(k["layer"] == lid and k["brush"].get("media")
+        if any(k["layer"] == lid and (k["brush"].get("media")
+                                      or k["brush"].get("material"))
                for k in self.strokes):
             self.layer(lid).height_map = np.zeros_like(
                 self.layer(lid).pixels[..., 0])
+        if any(k["layer"] == lid and k["brush"].get("material")
+               for k in self.strokes):
+            # material strokes rebuild their stuff from zero exactly like
+            # the paint body -- replaying over the live map would double it
+            self.layer(lid).material_map = np.zeros(
+                self.layer(lid).pixels.shape[:2] + (3,), np.float32)
+        # the stratum this layer spills into is DERIVED from these strokes, so
+        # it has to be cleared before a rebuild or each replay piles onto the
+        # last one
+        _nx = getattr(self.layer(lid), "stratum_next", None)
+        for _ in range(12):                       # the whole chain, not just one
+            if not _nx:
+                break
+            try:
+                _u = self.layer(_nx)
+            except KeyError:
+                break
+            _u.pixels[...] = 0.0
+            if _u.height_map is not None:
+                _u.height_map[...] = 0.0
+            _nx = getattr(_u, "stratum_next", None)
         if not hasattr(self, "_replay_height"):
             self._replay_height = {}
         self._replay_height.pop(lid, None)
+        if not hasattr(self, "_replay_material"):
+            self._replay_material = {}
+        self._replay_material.pop(lid, None)
         self._replaying = True
         try:
             for k in self.strokes:
                 if k["layer"] != lid:
                     continue
                 b = k["brush"]
+                if b.get("knife"):
+                    # the knife shapes existing paint, so like a blend it is a
+                    # mark in its own right and replays IN ORDER
+                    self.knife(lid, [tuple(p) for p in k["points"]],
+                               mode=str(b.get("knife", "smooth")),
+                               radius=float(b.get("radius", 26.0)),
+                               strength=float(b.get("strength", 0.7)),
+                               record=False, stroke_new=False)
+                    continue
+                if b.get("blend"):
+                    # a blend is a mark like any other and replays IN ORDER --
+                    # that ordering is what makes this non-destructive: paint,
+                    # paint, blend rebuilds exactly, and editing any of the
+                    # three re-derives the result
+                    self.blend_stroke(lid, [tuple(p) for p in k["points"]],
+                                      radius=float(b.get("radius", 18.0)),
+                                      strength=float(b.get("strength", 0.6)),
+                                      brush=b.get("brush"),
+                                      record=False, stroke_new=False)
+                    continue
                 self.paint(lid, [tuple(p) for p in k["points"]],
                            color=tuple(b.get("color", (0, 0, 0))),
                            radius=float(b.get("radius", 8.0)),
@@ -5552,16 +6746,24 @@ class Document:
                            hardness=float(b.get("hardness", 0.7)),
                            record=False,
                            media=b.get("media"),
+                           material=b.get("material"),
+                           mix=float(b.get("mix", 0.0)),
+                           real_brush=bool(b.get("real_brush", False)),
+                           charge0=b.get("charge0"),
+                           lanes0=b.get("lanes0"),
                            load=float(b.get("load", 0.6)),
                            alpha_lock=bool(b.get("alpha_lock", False)))
             out = self.layer(lid).pixels
             # the paint surface rebuilds with the pigment: strokes with media
             # re-deposit and re-flow into the fresh field set up above
             self._replay_height[lid] = self.layer(lid).height_map
+            self._replay_material[lid] = getattr(
+                self.layer(lid), "material_map", None)
         finally:
             self._replaying = False
             self.layer(lid).pixels = keep
             self.layer(lid).height_map = keep_h
+            self.layer(lid).material_map = keep_m
         return out
 
     def _layer_fingerprint(self, lid):
@@ -5587,6 +6789,61 @@ class Document:
             return False
         rev, fp = rec
         return rev == _MUT_REV[0] and fp == self._layer_fingerprint(lid)
+
+    def _stratum_for(self, lid):
+        """The layer that catches paint once `lid` is full -- find or create.
+
+        Linked both ways so a replay reuses the same stratum instead of
+        breeding a new one per rebuild, and so the base can clear its
+        stratum before replaying.
+        """
+        l = self.layer(lid)
+        nxt = getattr(l, "stratum_next", None)
+        if nxt:
+            try:
+                return self.layer(nxt)
+            except KeyError:
+                pass
+        # name from the ROOT of the chain, not from the layer we spilled off,
+        # or a deep build reads "p ~2 ~2 ~2 ~2 ~2 ~2"
+        root = getattr(l, "stratum_root", None)
+        base_name = root or re.sub(r" \u00b7 build-up \d+$", "",
+                                   getattr(l, "name", "paint"))
+        n = 2
+        # "p ~2" means nothing to a painter looking at their layer list -- it
+        # was the mystery layer in the first user report. Say what it is.
+        while any(x.name == "%s \u00b7 build-up %d" % (base_name, n)
+                  for x in self.layers):
+            n += 1
+        idx = [x.id for x in self.layers].index(lid)
+        above = (self.layers[idx + 1].id if idx + 1 < len(self.layers)
+                 else None)
+        nm = "%s \u00b7 build-up %d" % (base_name, n)
+        new = (self.add_layer(nm, record=False, below=above) if above
+               else self.add_layer(nm, record=False))
+        new = new if hasattr(new, "id") else self.layers[-1]   # USE THE RETURN VALUE
+        # it is the same paint, one stratum higher
+        new.paper = getattr(l, "paper", "canvas")
+        new.paint_media = getattr(l, "paint_media", None)
+        new.paint_gloss = getattr(l, "paint_gloss", 0.3)
+        new.relief = float(getattr(l, "relief", 1.0))
+        new.thickness = float(getattr(l, "thickness", 1.0))
+        new.z_off = float(getattr(l, "z_off", 0.0)) + _HEIGHT_CAP
+        new.gravity = getattr(l, "gravity", None)
+        new.gravity_angle = getattr(l, "gravity_angle", None)
+        # A stratum is the SAME MARK continued, so it must inherit how the
+        # layer relates to the picture. A clipped glaze that spilled produced
+        # unclipped strata, and the glaze escaped its base -- the exact
+        # workflow the clip is there to support. Same for the blend mode and
+        # opacity: the overflow of a multiply glaze is still multiply.
+        new.clip = bool(getattr(l, "clip", False))
+        new.blend = getattr(l, "blend", "normal")
+        new.opacity = float(getattr(l, "opacity", 1.0))
+        new.alpha_lock = bool(getattr(l, "alpha_lock", False))
+        new.stratum_of = lid
+        new.stratum_root = base_name
+        l.stratum_next = new.id
+        return new
 
     def _mark_replay_ok(self, lid):
         if not hasattr(self, "_replay_ok"):
@@ -5618,6 +6875,8 @@ class Document:
         self.layer(lid).pixels = rebuilt
         if getattr(self, '_replay_height', {}).get(lid) is not None:
             self.layer(lid).height_map = self._replay_height[lid]
+        if getattr(self, '_replay_material', {}).get(lid) is not None:
+            self.layer(lid).material_map = self._replay_material[lid]
         _MUT_REV[0] += 1
         return True
 
@@ -5719,6 +6978,8 @@ class Document:
                     self.layer(lid).pixels = rebuilt
                     if getattr(self, '_replay_height', {}).get(lid) is not None:
                         self.layer(lid).height_map = self._replay_height[lid]
+                    if getattr(self, '_replay_material', {}).get(lid) is not None:
+                        self.layer(lid).material_map = self._replay_material[lid]
             _MUT_REV[0] += 1
             self._mark_replay_ok(lid)      # the layer IS the replay right now
         self.last_nudge_added = added
@@ -5970,10 +7231,242 @@ class Document:
                 self.layer(lid).pixels = rebuilt
                 if getattr(self, '_replay_height', {}).get(lid) is not None:
                     self.layer(lid).height_map = self._replay_height[lid]
+                if getattr(self, '_replay_material', {}).get(lid) is not None:
+                    self.layer(lid).material_map = self._replay_material[lid]
         _MUT_REV[0] += 1
         for lid in {self.stroke_by_id(s)["layer"] for s in by}:
             self._mark_replay_ok(lid)
         return n
+
+    def palette_layer(self, create=True):
+        """The dedicated palette layer -- find or create.
+
+        Squeezing paint onto whatever layer happened to be active put the
+        mounds INTO the painting, where they had to be erased afterwards. A
+        palette is a separate surface you work beside the picture, so it gets
+        its own layer, marked and reusable. It sits on top so it is visible
+        and dippable, and it can be hidden or deleted like any other layer.
+        """
+        for l in self.layers:
+            if getattr(l, "palette", False):
+                return l
+        if not create:
+            return None
+        lay = self.add_layer("Palette", record=False)
+        lay = lay if hasattr(lay, "id") else self.layers[-1]
+        lay.palette = True
+        return lay
+
+    def palette_png(self, pad=14):
+        """The palette on its own, cropped to the paint, for the dock."""
+        l = self.palette_layer(create=False)
+        if l is None:
+            return None
+        a = l.pixels[..., 3]
+        ys, xs = np.nonzero(a > 0.02)
+        if not len(xs):
+            return None
+        x0, x1 = max(0, int(xs.min()) - pad), min(self.width, int(xs.max()) + pad)
+        y0, y1 = max(0, int(ys.min()) - pad), min(self.height, int(ys.max()) + pad)
+        # Widen the crop toward a strip-like shape. The dock draws this into a
+        # wide, short canvas, and a canvas cannot letterbox -- it stretches --
+        # so a crop of the wrong proportions rendered round mounds as ovals
+        # (measured up to 33% vertical stretch). Giving the image the shape it
+        # will be shown in is the only way to keep the paint looking like
+        # paint, since the client cannot fix it without distorting something.
+        want = 4.6
+        w, h = x1 - x0, y1 - y0
+        if w < h * want:
+            grow = int((h * want - w) / 2)
+            x0, x1 = max(0, x0 - grow), min(self.width, x1 + grow)
+            if x1 - x0 < (y1 - y0) * want:      # ran out of room sideways
+                shrink = int(((y1 - y0) - (x1 - x0) / want) / 2)
+                y0, y1 = y0 + shrink, y1 - shrink
+        sub = _shaded_pixels(l)[y0:y1, x0:x1]
+        out = np.zeros(sub.shape, np.float32)
+        out[..., :3] = 0.16          # the dock's own dark ground
+        out[..., 3] = 1.0
+        al = sub[..., 3:4]
+        out[..., :3] = sub[..., :3] * al + out[..., :3] * (1.0 - al)
+        return out, (x0, y0, x1, y1)
+
+    def lay_palette(self, lid=None, colors=(), x=None, y=None, size=None,
+                    media="oil", record=True):
+        """Squeeze mounds of thick paint out onto the canvas -- a PALETTE.
+
+        Deliberately not a new mechanism. A palette is just paint: piles thick
+        enough that a brush dragged through them picks colour up and reloads,
+        which is exactly what `real_brush` and `mix` already do with any thick
+        passage. So the mounds are laid with the ordinary brush at a heavy
+        load, and everything downstream -- dipping, gathering two colours on
+        one brush, scraping a mound thinner as you take from it -- falls out
+        of the physics that is already there. Dip, drag through a second
+        colour, and paint: the Bob Ross loop.
+
+        Returns the mound centres so a caller can aim at them.
+        """
+        if lid is None:
+            lid = self.palette_layer().id
+        # A palette must never spill into strata. The mounds are laid heavily
+        # on purpose (they have to be a pile you can dip into), so with
+        # `auto_stratum` on they overflowed and bred "Palette ~2 ~3 ~4..."
+        # layers -- junk in the layer list and baffling to look at.
+        _spill, self.auto_stratum = getattr(self, "auto_stratum", False), False
+        h, w = self.height, self.width
+        n = max(len(colors), 1)
+        r = float(size) if size else max(min(h, w) * 0.055, 10.0)
+        cx = float(x) if x is not None else r * 1.6
+        cy = float(y) if y is not None else r * 1.6
+        spots = []
+        for i, c in enumerate(colors):
+            px = cx + i * r * 2.7
+            # several short crossing passes build a genuine mound rather than
+            # one flat dab -- height has to clear the "this is a pile you can
+            # dip into" threshold the reload model uses
+            for k in range(5):
+                a = k * 0.62
+                pts = [(px + np.cos(a) * t * r * 0.5,
+                        cy + np.sin(a) * t * r * 0.5)
+                       for t in np.linspace(-1.0, 1.0, 9)]
+                self.paint(lid, pts, color=tuple(c), radius=r * 0.55,
+                           media=media, load=1.5, record=record and k == 0)
+            spots.append((px, cy))
+        self.auto_stratum = _spill
+        return spots
+
+    def set_paper(self, name):
+        """Choose the stock: canvas, rough, cold_press, hot_press, smooth,
+        linen. The substrate decides where thin paint catches, where a wash
+        pools, how hard dry-brush breaks up and how much watercolour
+        granulates -- one fixed field made every surface the same mid-grain
+        canvas."""
+        if name not in _PAPERS:
+            raise ValueError("unknown paper %r -- one of %s"
+                             % (name, ", ".join(sorted(_PAPERS))))
+        self.paper = name
+        for l in self.layers:
+            l.paper = name          # shading reads it off the layer
+        _MUT_REV[0] += 1
+        return name
+
+    def _res(self):
+        """Whose brush is this? A palette surface borrows its owner's, so a
+        dip on the palette loads the brush you then paint the picture with --
+        the alternative is two reservoirs that silently disagree."""
+        return getattr(self, "_brush_host", None) or self
+
+    def palette_doc(self, create=True):
+        """The palette surface: a small document of its own.
+
+        Not a layer of the picture. It never spills into strata (its own
+        `auto_stratum` stays off and it is deep enough for any mixing), it is
+        never exported, and it cannot be nudged out of place by editing the
+        painting. Mixing on it is ordinary painting, so blend, knife and
+        wet-on-wet all work there exactly as they do on the canvas.
+        """
+        host = self._res()
+        pd = getattr(host, "_palette_doc", None)
+        if pd is not None or not create:
+            return pd
+        pd = Document(560, 150, background=(0.13, 0.13, 0.15))
+        pd.name = "palette"
+        pd.auto_stratum = False
+        pd.paper = getattr(host, "paper", "canvas")
+        pd._brush_host = host          # dipping loads the OWNER's brush
+        host._palette_doc = pd
+        return pd
+
+    def load_brush(self, color=None, amount=1.0):
+        """Dip in the palette: fill the brush right back up.
+
+        The escape hatch from realism -- a real brush runs out, and sometimes
+        you just want to keep painting. Recharging from thick paint on the
+        canvas is the physical route; this is the palette."""
+        h = self._res()
+        h.brush_charge = float(np.clip(amount, 0.0, 1.0))
+        h.brush_charges = np.full(_BRUSH_LANES, h.brush_charge, np.float32)
+        if color is not None:
+            c = _f32(color)
+            if c.reshape(-1).size == 3:
+                h.brush_color = tuple(float(v) for v in c.reshape(3))
+                h.brush_lanes = np.repeat(
+                    np.asarray(h.brush_color, np.float32).reshape(1, 3),
+                    _BRUSH_LANES, 0)
+            else:
+                # a colour PER LANE: load one edge of the tuft differently
+                # from the other without having to go and dip for it
+                h.brush_lanes = _resize(c.reshape(1, -1, 3), 1,
+                                        _BRUSH_LANES)[0].astype(np.float32)
+                h.brush_color = tuple(
+                    float(v) for v in h.brush_lanes.mean(0))
+        return {"charge": h.brush_charge, "color": list(h.brush_color),
+                "lanes": [[float(v) for v in row]
+                          for row in getattr(h, "brush_lanes", [])]}
+
+    def brush_state(self):
+        """What is on the brush right now, for the UI's charge meter."""
+        h = self._res()
+        return {"charge": float(h.brush_charge),
+                "color": [float(v) for v in h.brush_color],
+                "lanes": [[float(v) for v in row]
+                          for row in getattr(h, "brush_lanes", [])]}
+
+    def group_strokes(self, ids, name=None, record=True):
+        """Bundle strokes (and/or existing groups) into one editable object."""
+        sids = self._expand_strokes(ids)
+        if not sids:
+            return None
+        if record:
+            self.record("Group strokes")
+        # a stroke belongs to at most one group, or "move the group" would be
+        # ambiguous the moment two groups overlapped
+        for g in self.stroke_groups:
+            g["strokes"] = [s for s in g["strokes"] if s not in sids]
+        self.stroke_groups = [g for g in self.stroke_groups if g["strokes"]]
+        gid = "G%d" % (len(self.stroke_groups) + 1)
+        while any(g["id"] == gid for g in self.stroke_groups):
+            gid += "x"
+        self.stroke_groups.append(
+            {"id": gid, "name": name or "Group", "strokes": list(sids)})
+        return gid
+
+    def ungroup_strokes(self, gid, record=True):
+        """Dissolve a group. The strokes themselves are untouched -- grouping
+        never rewrote them, it only said they belong together."""
+        g = next((x for x in self.stroke_groups if x["id"] == gid), None)
+        if g is None:
+            raise KeyError(gid)
+        if record:
+            self.record("Ungroup strokes")
+        self.stroke_groups.remove(g)
+        return list(g["strokes"])
+
+    def stroke_group_of(self, sid):
+        """Which group a stroke belongs to, or None -- so a click on any
+        member can select the whole passage."""
+        for g in self.stroke_groups:
+            if sid in g["strokes"]:
+                return g["id"]
+        return None
+
+    def _expand_strokes(self, ids):
+        """Resolve a mixed list of stroke ids and group ids to stroke ids.
+
+        Every stroke editor runs through this, so passing a group id anywhere
+        a stroke id is accepted moves the whole passage as one unit. Order is
+        preserved and duplicates dropped: a group and one of its own members
+        in the same selection must not transform that member twice.
+        """
+        out, seen = [], set()
+        live = {k["id"] for k in self.strokes}
+        for i in (ids or ()):
+            members = next((g["strokes"] for g in self.stroke_groups
+                            if g["id"] == i), None)
+            for sid in (members if members is not None else [i]):
+                if sid not in seen and sid in live:
+                    seen.add(sid)
+                    out.append(sid)
+        return out
 
     def transform_strokes(self, ids, sx=1.0, sy=1.0, deg=0.0, dx=0.0, dy=0.0,
                           cx=None, cy=None, record=True):
@@ -5982,7 +7475,7 @@ class Document:
         master, so the result re-renders as crisply as it was painted; scaling
         also scales the brush radius so ink weight stays proportional."""
         import math
-        ks = [self.stroke_by_id(s) for s in (ids or ())]
+        ks = [self.stroke_by_id(s) for s in self._expand_strokes(ids)]
         if not ks:
             return 0
         lids = {k["layer"] for k in ks}
@@ -6167,6 +7660,11 @@ class Document:
                                                  1e-4), 0, 1)
         l.height_map = hm
         l.pixels[..., 3] = l.pixels[..., 3] * (1.0 - overflow * 0.65)
+        if getattr(l, "material_map", None) is not None:
+            # the palette knife takes the STUFF with the body it scrapes:
+            # material coverage erodes with the same overflow that lifts the
+            # pigment, so a scraped-clean patch stops gleaming
+            l.material_map[..., 2] *= (1.0 - overflow * 0.65)
         _MUT_REV[0] += 1
 
     def delete_strokes(self, ids, record=True):
@@ -6611,6 +8109,8 @@ class Document:
             self.layer(lid).pixels = rebuilt
             if getattr(self, '_replay_height', {}).get(lid) is not None:
                 self.layer(lid).height_map = self._replay_height[lid]
+            if getattr(self, '_replay_material', {}).get(lid) is not None:
+                self.layer(lid).material_map = self._replay_material[lid]
         _MUT_REV[0] += 1
         self._mark_replay_ok(lid)
 
@@ -6701,8 +8201,37 @@ class Document:
               erase=False, hardness=0.7, record=True,
               selection=None, sel_invert=False, brush=None, target_mask=None,
               stroke_new=None, media=None, load=0.6, alpha_lock=None,
-              taper=0.0):
+              taper=0.0, material=None, mix=0.0, real_brush=False,
+              charge0=None, lanes0=None):
         self._locked_guard(lid)
+        self.layer(lid).paper = _paper_of(self)[0]   # stock this sits on
+        matdef = _resolve_material(material)   # raises on an unknown name
+        # FREEZE the reservoir HERE, at the top, before any branch. The brush
+        # carries a colour and a charge per band across its width; recording a
+        # single scalar meant a replay restarted every lane equal and diverged
+        # from the original, quietly changing the picture on rebuild. It has
+        # to happen before the deposit (which updates the live reservoir) and
+        # outside the media branch (a real-brush stroke with no medium never
+        # enters that branch but still writes a record).
+        _rb_c0, _rb_lanes = None, None
+        _host = self._res()          # a palette surface uses its owner's brush
+        if real_brush:
+            _c = charge0 if charge0 is not None else getattr(
+                _host, "brush_charges", None)
+            if _c is None:
+                _c = float(_host.brush_charge)
+            _rb_c0 = [float(v) for v in
+                      np.atleast_1d(np.asarray(_c, np.float32)).reshape(-1)]
+            if len(_rb_c0) != _BRUSH_LANES:
+                _rb_c0 = [_rb_c0[0]] * _BRUSH_LANES
+            _l = lanes0 if lanes0 is not None else getattr(
+                _host, "brush_lanes", None)
+            if _l is None or np.asarray(_l, np.float32).size < 3:
+                _l = np.repeat(_f32(color).reshape(1, 3), _BRUSH_LANES, 0)
+            _l = np.asarray(_l, np.float32).reshape(-1, 3)
+            if len(_l) != _BRUSH_LANES:
+                _l = np.repeat(_l[:1], _BRUSH_LANES, 0)
+            _rb_lanes = [[float(v) for v in row] for row in _l]
         rev_entry = _MUT_REV[0]      # cache-patch validity: pre-edit revision
         if taper and len(points) > 2 and not any(
                 len(p) > 2 for p in points):
@@ -6779,6 +8308,16 @@ class Document:
                 # media rides in the stroke record so a replay lays the same
                 # paint with the same body -- old records stay byte-identical
                 **({"media": str(media), "load": float(load)} if media else {}),
+                # the material rides AS GIVEN (name or dict) so a replay lays
+                # the same stuff -- resolved values would fossilise one
+                # build's preset table into every old stroke
+                **({"material": material, "load": float(load)}
+                   if matdef else {}),
+                **({"mix": float(mix)} if mix else {}),
+                # the charge the brush ACTUALLY had, frozen: a replay must
+                # not re-derive it from a reservoir that has moved on
+                **({"real_brush": True, "charge0": _rb_c0,
+                    "lanes0": _rb_lanes} if real_brush else {}),
                 **({"alpha_lock": True} if alpha_lock else {}),
             }, new=bool(record) if stroke_new is None else bool(stroke_new))
         l = self.layer(lid)
@@ -6792,19 +8331,48 @@ class Document:
         for p in (points or []):
             pts.append((float(p[0]), float(p[1])))
             widths.append(float(p[2]) if len(p) > 2 else 1.0)
+        # SPEED, derived from the RAW point spacing. The client samples the
+        # pointer at a roughly fixed rate, so the gap between consecutive raw
+        # points is how fast the hand was moving -- no timestamps to plumb
+        # through, no protocol change, and because the recorded points keep
+        # their spacing a replay re-derives exactly the same speed. Measured
+        # in brush-widths per sample so a flick means the same thing to a
+        # small brush as to a big one.
+        raw_sp = [0.0] * len(pts)
+        # ...but ONLY for a path that was actually sampled by a hand. Spacing
+        # means speed because the client polls the pointer at a fixed rate;
+        # it means nothing for a path that arrived some other way. A
+        # two-point straight line from the API has one enormous gap and was
+        # being read as a maximum-speed flick, so programmatic strokes came
+        # out three times too thin. Below a real gesture's worth of samples,
+        # speed is UNKNOWN, and unknown must mean neutral rather than fast.
+        if len(pts) >= 6:
+            for i in range(1, len(pts)):
+                raw_sp[i] = np.hypot(pts[i][0] - pts[i - 1][0],
+                                     pts[i][1] - pts[i - 1][1]) / max(radius, 1.0)
+            raw_sp[0] = raw_sp[1]
         dense = []
         dwid = []
+        dspd = []
         for i, p in enumerate(pts):
             if i:
                 q = pts[i - 1]
                 d = max(abs(p[0] - q[0]), abs(p[1] - q[1]))
-                n = int(d / max(radius * 0.35, 1)) + 1
+                # spacing must follow the LOCAL (pressure-scaled) dab, not
+                # the base radius: a light-pressure dab is a fraction of the
+                # size but was still stepped a full base-radius apart, so the
+                # thin end of a pressure ramp came out as a string of
+                # separated beads instead of a stroke
+                wmin = max(min(widths[i - 1], widths[i]), 0.05)
+                n = int(d / max(radius * wmin * 0.35, 1)) + 1
                 for t in np.linspace(0, 1, n + 1)[1:]:
                     dense.append((q[0] + (p[0] - q[0]) * t, q[1] + (p[1] - q[1]) * t))
                     dwid.append(widths[i - 1] + (widths[i] - widths[i - 1]) * float(t))
+                    dspd.append(raw_sp[i - 1] + (raw_sp[i] - raw_sp[i - 1]) * float(t))
             else:
                 dense.append(p)
                 dwid.append(widths[0])
+                dspd.append(raw_sp[0])
         mask = np.zeros((h, w), np.float32)
         r = float(radius)
         tip = None
@@ -6815,13 +8383,14 @@ class Document:
                 side = max(int(2 * r), 2)
                 tip = _resize(b.tip, side, side)
                 # re-space the stroke by the brush's own spacing
-                step = max(b.spacing * 2 * r, 1.0)
-                sp, spw, acc = [dense[0]], [dwid[0]], 0.0
+                step = max(b.spacing * 2 * r * max(min(widths), 0.05), 1.0)
+                sp, spw, sps, acc = [dense[0]], [dwid[0]], [dspd[0]], 0.0
                 for i in range(1, len(dense)):
                     acc += np.hypot(dense[i][0] - dense[i-1][0], dense[i][1] - dense[i-1][1])
                     if acc >= step:
-                        sp.append(dense[i]); spw.append(dwid[i]); acc = 0.0
-                dense, dwid = sp, spw
+                        sp.append(dense[i]); spw.append(dwid[i])
+                        sps.append(dspd[i]); acc = 0.0
+                dense, dwid, dspd = sp, spw, sps
             except KeyError:
                 tip = None
         # deterministic per-stroke rng: same stroke -> same jitter
@@ -6906,6 +8475,98 @@ class Document:
                                                0.0, 1.0).astype(np.float32)
             composite_patch(self, x0b, y0b, x1b, y1b, rev_entry)
             return
+        # The paint surface is decided BEFORE the pigment is laid: where the
+        # brush skips the weave or runs dry it lays less colour AND less
+        # body, so the deposit has to be known here rather than after the
+        # composite. `_dep_cache` hands the height to the media block below
+        # without computing the stroke frame twice.
+        _dep_cache = None
+        _wetcol = None
+        _had_relief = True          # only false on a layer's FIRST relief
+        if not erase and (matdef is not None or media in _MEDIA):
+            _med0 = matdef if matdef is not None else _MEDIA[media]
+            _walk = _lf = None
+            if real_brush:
+                # the load is whatever is LEFT on the brush. `charge0` is
+                # frozen into the record so a replay -- or nudging stroke
+                # three of forty -- cannot retroactively change how much
+                # paint stroke forty had. What happens WITHIN the stroke is
+                # recomputed from canvas state and stays deterministic.
+                c0 = np.asarray(_rb_c0, np.float32)
+                bc = np.asarray(_rb_lanes, np.float32)
+                _walk = _brush_walk(
+                    l, dense, bc, float(_med0.get("hold", 0.6)),
+                    mix * float(_med0.get("pickup", 0.6)), c0,
+                    radius=float(radius),
+                    spend_rate=float(radius) / (20.0 * 1400.0),
+                    # tuned so a few passes through a mound actually LOADS
+                    # the brush with that colour: at 0.0045 a full dip
+                    # exchanged ~23% and red dipped in white stayed red
+                    reload_rate=0.022 * float(_med0.get("pickup", 0.6)))
+            _fr = _stroke_frame(dense, dwid, float(radius),
+                                x0b, y0b, x1b, y1b) if _walk else None
+            if _walk is not None and _fr is not None:
+                _cols, _chg, _taken = _walk
+                _ix = np.clip((_fr[1] * (len(_chg) - 1)).astype(np.int32),
+                              0, len(_chg) - 1)
+                # look the brush up by BOTH arc position and cross-stroke
+                # lane: which part of the tuft is over this pixel decides
+                # what colour lands there, so a brush loaded blue on one
+                # edge and white on the other paints a variegated band in
+                # ONE stroke instead of a pre-averaged flat mix
+                _ln = np.clip(((_fr[0] * 0.5 + 0.5) * (_BRUSH_LANES - 1)
+                               ).astype(np.int32), 0, _BRUSH_LANES - 1)
+                _lf = _chg[_ix, _ln] * float(load)
+                _wetcol = _cols[_ix, _ln]
+            _dep_cache, _cover, _sv = _deposit(
+                self, l, _med0, mask, opacity, load, dense, dwid,
+                float(radius), x0b, y0b, x1b, y1b,
+                seed=int(hashlib.md5(
+                    np.asarray(pts, np.float32).tobytes()).hexdigest()[:8], 16),
+                load_field=_lf, dspd=dspd)
+            if _cover is not None:
+                mask = mask * _cover
+            if _walk is not None and _sv is not None:
+                _cols, _chg, _taken = _walk
+                if float(_taken.max()) > 1e-6 and l.height_map is not None:
+                    # paint is CONSERVED: what the brush lifted, the canvas
+                    # lost. Recharging from a thick passage has to leave a
+                    # scrape, or the brush is a paint printer, not a brush.
+                    ti = np.clip((_sv * (len(_taken) - 1)).astype(np.int32),
+                                 0, len(_taken) - 1)
+                    # scaled with the reload rate: the brush now fills from a
+                    # mound roughly five times faster, and if the scrape does
+                    # not keep pace the stroke deposits more than it lifts and
+                    # the mound never goes down -- paint stops being conserved
+                    # exactly where dipping happens
+                    _ln2 = np.clip(((_sv * 0 + (fr0 := _fr[0]) * 0.5 + 0.5)
+                                    * (_BRUSH_LANES - 1)).astype(np.int32),
+                                   0, _BRUSH_LANES - 1)
+                    scrape = np.clip(_taken[ti, _ln2] * 90.0 * mask, 0.0, 0.95)
+                    l.height_map[y0b:y1b, x0b:x1b] *= (1.0 - scrape)
+                # Painting ALWAYS changes what is on the brush. This used to
+                # be gated on `record`, which conflated "should this stroke be
+                # undoable" with "did the brush pick anything up" -- so a dab
+                # passed with record=False (the normal way to lay texture
+                # without a stroke record per dab) silently did not load the
+                # brush at all. Found by painting: dipping into a palette in a
+                # loop left the brush exactly the colour it started.
+                if charge0 is None and not getattr(self, "_replaying", False):
+                    _host.brush_lanes = _cols[-1].copy()
+                    _host.brush_charges = _chg[-1].copy()
+                    _host.brush_charge = float(_chg[-1].mean())
+                    _host.brush_color = tuple(
+                        float(v) for v in _cols[-1].mean(0))
+            elif _sv is not None and mix > 1e-3:
+                tbl = _wet_mix(l, dense, color, float(_med0.get("hold", 0.6)),
+                               mix * float(_med0.get("pickup", 0.6)), None)
+                if tbl is not None:
+                    # per-pixel brush colour by arc position: the stroke is
+                    # one colour at its start and whatever it has gathered by
+                    # its end
+                    ix = np.clip((_sv * (len(tbl) - 1)).astype(np.int32),
+                                 0, len(tbl) - 1)
+                    _wetcol = tbl[ix]
         px_win = l.pixels[y0b:y1b, x0b:x1b]
         a = (mask * float(opacity))[..., None]
         if alpha_lock:
@@ -6914,13 +8575,15 @@ class Document:
             # existing alpha) and the eraser cannot cut -- both leave the
             # alpha channel untouched.
             if not erase:
-                col = _f32(color).reshape(1, 1, 3)
+                col = (_wetcol if _wetcol is not None
+                       else _f32(color).reshape(1, 1, 3))
                 aw = a * px_win[..., 3:4]
                 px_win[..., :3] = col * aw + px_win[..., :3] * (1 - aw)
         elif erase:
             px_win[..., 3:4] = px_win[..., 3:4] * (1 - a)
         else:
-            col = _f32(color).reshape(1, 1, 3)
+            col = (_wetcol if _wetcol is not None
+                   else _f32(color).reshape(1, 1, 3))
             old_a = px_win[..., 3:4]
             new_a = a + old_a * (1 - a)
             px_win[..., :3] = np.where(new_a > 0,
@@ -6937,30 +8600,168 @@ class Document:
             # far cheaper than the full float pipeline it replaced.
             clear = l.pixels[..., 3] <= 0
             if clear.any():
-                l.pixels[..., :3][clear] = col.reshape(3)
+                l.pixels[..., :3][clear] = _f32(color).reshape(3)
         flow_bottom = y1b
         if erase and l.height_map is not None:
             # erasing removes the paint BODY too, whatever media is selected
             # right now -- leaving invisible ridges under later strokes was
             # wrong physically and looked haunted under the relief light
             l.height_map[y0b:y1b, x0b:x1b] *= (1.0 - mask * float(opacity))
-        elif not erase and media in _MEDIA:
-            med = _MEDIA[media]
+        if erase:
+            # THE STRATA ARE THE SAME PAINT. A passage that built past a
+            # layer's ceiling lives on several layers, so erasing only the
+            # base left the paint sitting on the strata above it -- you wiped
+            # a mark and it was still there. The eraser goes through the
+            # whole column, as it must, since the column is one body.
+            _up = getattr(l, "stratum_next", None)
+            _keep = 1.0 - mask * float(opacity)
+            for _ in range(12):
+                if not _up:
+                    break
+                try:
+                    _u = self.layer(_up)
+                except KeyError:
+                    break
+                _uw = _u.pixels[y0b:y1b, x0b:x1b]
+                _uw[..., 3:4] *= _keep[..., None]
+                if getattr(_u, "height_map", None) is not None:
+                    _u.height_map[y0b:y1b, x0b:x1b] *= _keep
+                if getattr(_u, "height_below", None) is not None:
+                    _u.height_below[y0b:y1b, x0b:x1b] *= _keep
+                if getattr(_u, "material_map", None) is not None:
+                    _u.material_map[y0b:y1b, x0b:x1b, 2] *= _keep
+                _up = getattr(_u, "stratum_next", None)
+        if erase and getattr(l, "material_map", None) is not None:
+            # the eraser takes the STUFF with the paint: leaving invisible
+            # gold coverage under a cleared area would make the next plain
+            # stroke there gleam for no visible reason
+            l.material_map[y0b:y1b, x0b:x1b, 2] *= (1.0 - mask * float(opacity))
+        if not erase and (matdef is not None or media in _MEDIA):
+            med = matdef if matdef is not None else _MEDIA[media]
             if l.height_map is None:
                 l.height_map = np.zeros((h, w), np.float32)
-            l.paint_gloss = med["gloss"]
-            l.paint_media = media
+            if matdef is None:
+                # the SCALAR look belongs to plain media ("last media wins");
+                # a material's look lives per-pixel in its map, so a gold
+                # stroke must not re-tune how the layer's existing oil shades
+                l.paint_gloss = med["gloss"]
+                l.paint_media = media
+            # Did this layer already carry relief? The FIRST height map changes
+            # how the WHOLE layer is lit -- canvas tooth starts applying to
+            # every painted pixel, not just this stroke -- so a window patch
+            # cannot represent it and the composite cache must be rebuilt in
+            # full. Baseline drifted 0.0015 here and got away with it; with
+            # deeper canvas relief the same gap is 0.127, which is visible.
+            _had_relief = getattr(l, "_shade_rev", None) is not None and \
+                getattr(l, "height_map", None) is not None and \
+                bool((l.height_map > 0.02).any())
             hw = l.height_map[y0b:y1b, x0b:x1b]
-            # the brush LAYS paint: coverage times how loaded the brush is.
+            # the brush LAYS paint: a real surface, not a rescaled alpha.
             # Height accumulates across strokes -- that is the build-up.
-            dep = mask * float(opacity) * float(load) * 1.6
+            dep = _dep_cache
             hw += dep
+            # SPILL: once this layer is full, the excess starts a new stratum
+            # instead of being clipped away. Clipping is what made a worked
+            # passage saturate after ~2 loaded passes and flatten to a
+            # plateau; a painter builds heavy impasto in campaigns, and each
+            # stratum begins again from zero.
+            # Spilling MUST happen during replay too. Suppressing it kept the
+            # overflow on the base instead of moving it up, so a rebuilt
+            # layer did not match what was painted -- strata were the only
+            # thing in the engine that broke replay determinism. It is safe
+            # because `replay_layer` clears the whole chain first and
+            # `_stratum_for` reuses the existing link rather than breeding a
+            # new layer per rebuild.
+            if (getattr(self, "auto_stratum", False)
+                    and not getattr(l, "palette", False)):
+                over = hw - _HEIGHT_CAP
+                np.clip(over, 0.0, None, out=over)
+                if float(over.max()) > 1e-3:
+                    np.clip(hw, 0.0, _HEIGHT_CAP, out=hw)
+                    ucol = (_wetcol if _wetcol is not None
+                            else _f32(color).reshape(1, 1, 3))
+                    src, cur = lid, over
+                    # CASCADE. Spilling once only defers the ceiling: the new
+                    # stratum filled and flattened in its turn (measured at
+                    # 28.9 units on a layer whose cap is 4). Keep spilling
+                    # upward until the excess is gone, so a passage can be
+                    # worked as heavily as the painter likes.
+                    for _ in range(12):
+                        up = self._stratum_for(src)
+                        if up.height_map is None:
+                            up.height_map = np.zeros((h, w), np.float32)
+                        uh = up.height_map[y0b:y1b, x0b:x1b]
+                        uh += cur
+                        frac = np.clip(cur / np.maximum(dep, 1e-6), 0.0, 1.0)
+                        ua = (mask * float(opacity) * frac)[..., None]
+                        uw = up.pixels[y0b:y1b, x0b:x1b]
+                        na = np.clip(ua + uw[..., 3:4] * (1.0 - ua), 0.0, 1.0)
+                        uw[..., :3] = np.where(
+                            na > 1e-6,
+                            (ucol * ua + uw[..., :3] * uw[..., 3:4] * (1.0 - ua))
+                            / np.maximum(na, 1e-6), uw[..., :3])
+                        uw[..., 3:4] = na
+                        # what this stratum SITS ON, so it can be lit as the
+                        # top of one continuous column rather than a slab
+                        if getattr(up, "height_below", None) is None or \
+                                up.height_below.shape != (h, w):
+                            up.height_below = np.zeros((h, w), np.float32)
+                        _sl = self.layer(src)
+                        _under = _sl.height_map[y0b:y1b, x0b:x1b]
+                        _sb = getattr(_sl, "height_below", None)
+                        up.height_below[y0b:y1b, x0b:x1b] = (
+                            _under + (_sb[y0b:y1b, x0b:x1b] if _sb is not None
+                                      and _sb.shape == (h, w) else 0.0))
+                        nxt = uh - _HEIGHT_CAP
+                        np.clip(nxt, 0.0, None, out=nxt)
+                        if float(nxt.max()) <= 1e-3:
+                            break
+                        np.clip(uh, 0.0, _HEIGHT_CAP, out=uh)
+                        src, cur = up.id, nxt.copy()
+            if matdef is not None:
+                # the stroke also lays the STUFF: rough/metal blend into the
+                # material map with the same unpremultiplied alpha-over as
+                # the pigment, so a gold stroke crossing chalk transitions
+                # exactly the way their colours do
+                if l.material_map is None:
+                    l.material_map = np.zeros((h, w, 3), np.float32)
+                ga = float(matdef.get("grain", 0.0))
+                if ga > 0.0:
+                    # micro-relief rides the deposit -- position-stable, so a
+                    # replay lays the identical tooth
+                    g = _material_grain(self, l, matdef.get("gscale", 2.0))
+                    hw += g[y0b:y1b, x0b:x1b] * ga * dep
+                    np.clip(hw, 0.0, None, out=hw)
+                mm = l.material_map[y0b:y1b, x0b:x1b]
+                a = np.clip(mask * float(opacity), 0.0, 1.0)
+                old_c = mm[..., 2]
+                new_c = a + old_c * (1.0 - a)
+                for ch, val in ((0, float(matdef["rough"])),
+                                (1, float(matdef["metal"]))):
+                    mm[..., ch] = np.where(
+                        new_c > 0,
+                        (val * a + mm[..., ch] * old_c * (1.0 - a))
+                        / np.maximum(new_c, 1e-6), val)
+                mm[..., 2] = new_c
             self._paint_flow(l, x0b, y0b, x1b, y1b, med, dep)
+            self._watercolour(l, x0b, y0b, x1b, y1b, med, dep)
             flow_bottom = min(h, y1b + int(med["iters"]) + 2)
         # realtime feedback: re-light and re-blend ONLY this stroke's window.
         # Validity is judged against the revision captured on entry, so the
         # record/announce bumps inside this very call don't invalidate it.
-        if not getattr(self, "_replaying", False):
+        if not getattr(self, "_replaying", False) and not _had_relief \
+                and getattr(l, "height_map", None) is not None:
+            # FIRST RELIEF ON THIS LAYER. Canvas tooth now lights every
+            # painted pixel, not just this stroke, so a window patch cannot
+            # describe it -- but skipping the patch outright left `_shade_rev`
+            # unset, so the layer never counted as "already relief" and EVERY
+            # later stroke fell back to a full rebuild (measured 1365 ms).
+            # Re-light the layer once, in full, and patch the composite over
+            # everything it covers; from here the window patch is valid again.
+            _shaded_pixels(l)
+            composite_patch(self, 0, 0, w, h, rev_entry)
+            self._last_paint_rect = (0, 0, w, h)
+        elif not getattr(self, "_replaying", False):
             _shade_patch(l, x0b, y0b, x1b, flow_bottom, rev_entry)
             # the composite (and the client's dirty window) must cover
             # the RE-LIT ring around the stroke, not just the pigment
@@ -7013,6 +8814,95 @@ class Document:
             # nudge skips its ~0.4 s full-replay safety check (profiled: the
             # check was 392 of nudge's 494 ms)
             self._mark_replay_ok(lid)
+        # hand back the stroke's id, as `knife` and `blend_stroke` do. The
+        # server was reaching into `strokes[-1]` for it, and a caller who
+        # wanted to group, move or delete what it had just painted had no way
+        # to name it.
+        return (self.strokes[-1]["id"]
+                if (record and self.strokes) else None)
+
+    def _watercolour(self, l, x0, y0, x1, y1, med, dep):
+        """Wet media in absorbent paper: wicking, edge darkening, granulation.
+
+        Curtis et al. (SIGGRAPH 97) name the effects that make watercolour
+        read as watercolour, and leStudio had none of them -- its "water" was
+        just oil with a low hold and more gravity, which is a runny film on a
+        surface rather than a fluid inside paper. Three of theirs are worth
+        the cost here:
+
+        WICKING: the paper drinks the wash sideways along its fibres, so the
+        mark is softer and larger than the brush that made it, with a feathery
+        boundary no stroke mask would give.
+
+        EDGE DARKENING: as the water evaporates it carries pigment to the
+        perimeter and leaves it there. That dark rim around a drying wash is
+        the single most recognisable watercolour signature, and the reason a
+        flat wash never reads as flat.
+
+        GRANULATION: pigment is heavier than water and settles into the
+        paper's valleys, strongest where the paper is wettest -- the grainy
+        texture that emphasises the weave. Note this is the OPPOSITE of how
+        stiff paint meets the tooth: dragged paint catches on the risen
+        threads, a wash pools in the dips between them.
+        """
+        absorb = float(med.get("absorb", 0.0))
+        if absorb <= 1e-3:
+            return
+        # rough rag drinks; sized hot-press holds the wash on top
+        absorb = float(np.clip(absorb * _paper_of(self)[1]["drink"],
+                               0.0, 1.0))
+        H, W = self.height, self.width
+        pad = int(np.clip(4.0 + absorb * 7.0, 4, 22))
+        ax0, ay0 = max(0, x0 - pad), max(0, y0 - pad)
+        ax1, ay1 = min(W, x1 + pad), min(H, y1 + pad)
+        if ax1 <= ax0 + 2 or ay1 <= ay0 + 2:
+            return
+        px = l.pixels[ay0:ay1, ax0:ax1]
+        wet = np.zeros(px.shape[:2], np.float32)
+        wet[y0 - ay0:y0 - ay0 + dep.shape[0],
+            x0 - ax0:x0 - ax0 + dep.shape[1]] = dep
+        wet = np.clip(wet * 2.2, 0.0, 1.0)
+        # where the paper is damp ENOUGH to move pigment -- the wash spreads
+        # into this, which is why the mark ends up bigger than the brush
+        damp = np.clip(_gauss_small(wet[..., None], 1.5 + absorb * 3.0)[..., 0]
+                       * 2.4, 0.0, 1.0)
+        # --- wicking, premultiplied so colour and coverage travel together
+        pm = px.copy()
+        pm[..., :3] *= pm[..., 3:4]
+        sp = _gauss_small(pm, 1.0 + absorb * 2.6)
+        w = (damp * absorb * 0.85)[..., None]
+        pm = pm * (1.0 - w) + sp * w
+        a = np.clip(pm[..., 3:4], 0.0, 1.0)
+        rgb = np.where(a > 1e-6, pm[..., :3] / np.maximum(a, 1e-6), px[..., :3])
+        # --- edge darkening: pigment stranded at the perimeter of the wash
+        ed = float(med.get("edge_dark", 0.0))
+        if ed > 1e-3:
+            gy, gx = np.gradient(damp)
+            rim = np.hypot(gx, gy)
+            # only where pigment actually is, or the rim lands on bare paper
+            # and haloes the mark instead of darkening it
+            rim = rim * (a[..., 0] > 0.10)
+            rs = float(rim.sum())
+            if rs > 1e-6:
+                # MOVE pigment, do not amplify it. The water carries pigment
+                # to the perimeter as it evaporates and strands it there, so
+                # the rim ends up darker than the middle -- which scaling a
+                # thin rim can never achieve against a thick centre. Taking
+                # from the interior and depositing on the rim conserves the
+                # pigment and produces the real effect.
+                take = a[..., 0] * ed * 0.45 * damp
+                moved = float(take.sum())
+                a = np.clip(a - take[..., None]
+                            + (rim / rs * moved)[..., None], 0.0, 1.0)
+        # --- granulation: the pigment is heavier than the water
+        gr = float(med.get("granulate", 0.0))
+        if gr > 1e-3:
+            tooth = _canvas_tooth(self)[ay0:ay1, ax0:ax1]
+            a = np.clip(a * (1.0 + gr * (0.5 - tooth) * 1.6 * damp)[..., None],
+                        0.0, 1.0)
+        px[..., :3] = np.clip(rgb, 0.0, 1.0)
+        px[..., 3:4] = a
+        _MUT_REV[0] += 1
 
     def _paint_flow(self, l, x0, y0, x1, y1, med, dep):
         """Gravity on WET paint only. `dep` is what this stroke just laid
@@ -7028,31 +8918,81 @@ class Document:
         rebuilds the same drips."""
         H, W = l.height_map.shape
         iters = int(med["iters"])
-        y1e = min(H, y1 + iters + 2)               # room to run downhill
-        hg = l.height_map[y0:y1e, x0:x1]
-        px = l.pixels[y0:y1e, x0:x1]
+        gstr, gdx, gdy = _flow_dir(self, l)
+        # the window has to open in the direction the paint will actually
+        # travel, not just downward
+        pad = iters + 2
+        y0e = max(0, y0 - (pad if gdy < 0 or gstr < 0.05 else 0))
+        y1e = min(H, y1 + (pad if gdy > 0 or gstr < 0.05 else 0))
+        x0e = max(0, x0 - (pad if gdx < 0 or gstr < 0.05 else 0))
+        x1e = min(W, x1 + (pad if gdx > 0 or gstr < 0.05 else 0))
+        hg = l.height_map[y0e:y1e, x0e:x1e]
+        px = l.pixels[y0e:y1e, x0e:x1e]
         wet = np.zeros_like(hg)
-        wet[:dep.shape[0], :dep.shape[1]] += dep
+        wet[y0 - y0e:y0 - y0e + dep.shape[0],
+            x0 - x0e:x0 - x0e + dep.shape[1]] += dep
         # work premultiplied: moving paint moves colour AND coverage together
         pm = px.copy()
         pm[..., :3] *= pm[..., 3:4]
         hold, fl = float(med["hold"]), float(med["flow"])
         touched = np.zeros(hg.shape, bool)
+        # Reused scratch: the loop runs up to 26 times for watercolour and
+        # every iteration was allocating four full-window arrays, one of them
+        # 4-channel. Allocation, not arithmetic, was most of the cost.
+        excess = np.empty_like(hg)
+        frac = np.empty_like(hg)
+        moved = np.empty_like(pm)
         for _ in range(iters):
-            excess = np.minimum(np.clip(hg - hold, 0.0, None), wet) * fl
+            np.subtract(hg, hold, out=excess)
+            np.clip(excess, 0.0, None, out=excess)
+            np.minimum(excess, wet, out=excess)
+            np.multiply(excess, fl, out=excess)
             if excess.max() <= 1e-4:
                 break
-            frac = np.clip(excess / np.maximum(hg, 1e-6), 0.0, 0.6)
-            moved = pm * frac[..., None]
+            np.maximum(hg, 1e-6, out=frac)
+            np.divide(excess, frac, out=frac)
+            np.clip(frac, 0.0, 0.6, out=frac)
+            np.multiply(pm, frac[..., None], out=moved)
             hg -= excess
             wet -= excess
             pm -= moved
-            hg[1:] += excess[:-1]
-            wet[1:] += excess[:-1]                 # it lands still wet
-            pm[1:] += moved[:-1]
             m = excess > 1e-6
             touched |= m
-            touched[1:] |= m[:-1]
+
+            def _push(dst_h, dst_w, dst_p, ex, mv, sy, sx, k):
+                # move a share `k` of the excess one pixel along (sy, sx)
+                if k <= 1e-6:
+                    return
+                e = ex if k == 1.0 else ex * k
+                v = mv if k == 1.0 else mv * k
+                ys_d = slice(1, None) if sy > 0 else (slice(None, -1)
+                                                      if sy < 0 else slice(None))
+                ys_s = slice(None, -1) if sy > 0 else (slice(1, None)
+                                                       if sy < 0 else slice(None))
+                xs_d = slice(1, None) if sx > 0 else (slice(None, -1)
+                                                      if sx < 0 else slice(None))
+                xs_s = slice(None, -1) if sx > 0 else (slice(1, None)
+                                                       if sx < 0 else slice(None))
+                dst_h[ys_d, xs_d] += e[ys_s, xs_s]
+                dst_w[ys_d, xs_d] += e[ys_s, xs_s]
+                dst_p[ys_d, xs_d] += v[ys_s, xs_s]
+                touched[ys_d, xs_d] |= m[ys_s, xs_s]
+
+            if gstr < 0.05:
+                # FLAT: no in-plane gravity. A puddle levels -- it spreads to
+                # every neighbour equally rather than running one way.
+                for sy, sx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    _push(hg, wet, pm, excess, moved, sy, sx, 0.25)
+            else:
+                # split the step between the two axes so the paint drifts
+                # along the real direction instead of snapping to 8 compass
+                # points, which would show as staircased drips
+                ax, ay = abs(gdx), abs(gdy)
+                tot = max(ax + ay, 1e-6)
+                _push(hg, wet, pm, excess, moved,
+                      int(np.sign(gdy)), 0, ay / tot)
+                _push(hg, wet, pm, excess, moved,
+                      0, int(np.sign(gdx)), ax / tot)
         a = pm[..., 3:4]
         # write back ONLY where paint actually moved: the unpremultiply
         # round-trip is float arithmetic, and rewriting untouched pixels
@@ -7063,7 +9003,7 @@ class Document:
         t3 = touched[..., None]
         px[..., 3:4] = np.where(t3, newa, px[..., 3:4])
         px[..., :3] = np.where(t3, newrgb, px[..., :3])
-        np.clip(hg, 0.0, 4.0, out=hg)
+        np.clip(hg, 0.0, _HEIGHT_CAP, out=hg)
 
     def _tip_for(self, brush, r, hardness=0.7):
         """The stamp footprint for any brush choice, as (side, side) alpha."""
@@ -7081,7 +9021,18 @@ class Document:
                                 1.0 - (d - core) / max(r - core, 1e-3)), 0, 1).astype(np.float32)
 
     def _dense_points(self, points, step):
-        pts = [tuple(map(float, p)) for p in points] or []
+        """A path resampled to `step`, ALWAYS as plain (x, y) pairs.
+
+        A point may arrive as (x, y, pressure) -- that is what a pen sends,
+        and `paint` uses the third component for stroke width. The tools that
+        walk this path (knife, blender, smudge, clone, heal) are path-only and
+        unpack `for (px, py) in ...`, so passing the pressure through blew up
+        with "too many values to unpack (expected 2)" ON THE FIRST POINT:
+        interpolated points were built as 2-tuples but the first was appended
+        whole. Every one of those tools was broken for anyone using a tablet.
+        Normalise here, at the one place they all share.
+        """
+        pts = [(float(p[0]), float(p[1])) for p in points] or []
         dense = []
         for i, p in enumerate(pts):
             if i:
@@ -7093,6 +9044,205 @@ class Document:
             else:
                 dense.append(p)
         return dense
+
+    def _stratum_chain(self, lid):
+        """The whole paint column from this layer upward, bottom first."""
+        out, seen = [], set()
+        try:
+            cur = self.layer(lid)
+        except KeyError:
+            return out
+        while cur is not None and cur.id not in seen:
+            seen.add(cur.id)
+            out.append(cur)
+            nxt = getattr(cur, "stratum_next", None)
+            try:
+                cur = self.layer(nxt) if nxt else None
+            except KeyError:
+                cur = None
+        return out
+
+    def _column(self, chain):
+        """Total paint depth over the chain, as one field."""
+        tot = None
+        for l in chain:
+            if l.height_map is None:
+                continue
+            tot = l.height_map.copy() if tot is None else tot + l.height_map
+        return tot
+
+    def _refill_column(self, chain, total):
+        """Pour `total` back down the chain, filling each layer to the cap
+        before starting the next. This is what removes the STEPPING: the
+        column is re-levelled as one body of paint rather than as a stack of
+        independent sheets, and any layer that ends up empty simply holds
+        nothing rather than leaving a shelf."""
+        rest = np.clip(total, 0.0, None)
+        below = np.zeros_like(rest)
+        for i, l in enumerate(chain):
+            cap = _HEIGHT_CAP if i < len(chain) - 1 else np.inf
+            take = np.minimum(rest, cap)
+            if l.height_map is None:
+                l.height_map = np.zeros_like(rest)
+            l.height_map[...] = take
+            if i:
+                l.height_below = below.copy()
+            below = below + take
+            rest = rest - take
+        _MUT_REV[0] += 1
+
+    def knife(self, lid, points, mode="smooth", radius=26.0, strength=0.7,
+              record=True, stroke_new=True):
+        """The PALETTE KNIFE: shape the paint itself rather than add more.
+
+        Paint on this canvas is a real depth that can span several strata, and
+        nothing could push it around. A knife works the COLUMN -- the total
+        across the whole stratum chain -- and the result is poured back down
+        through the layers, so the body stays one continuous mass instead of a
+        stack of sheets.
+
+        Modes:
+          smooth  -- level the surface toward its local average. This is also
+                     the cure for stepping between strata, because the column
+                     is re-levelled as one body.
+          push    -- shove the paint along the stroke, banking it up ahead the
+                     way a knife ploughs a ridge. Volume is conserved.
+          scrape  -- take the tops off and leave the hollows, the flat-bladed
+                     pull that reveals the colour underneath.
+          spread  -- drag paint outward into a thin even film.
+        """
+        self._locked_guard(lid)
+        chain = self._stratum_chain(lid)
+        if not chain:
+            raise KeyError(lid)
+        total = self._column(chain)
+        if total is None:
+            return None
+        if record:
+            self.record("Knife (%s)" % mode, only=[l.id for l in chain])
+        h, w = total.shape
+        tip = self._tip_for(None, float(radius))
+        side = tip.shape[0]
+        st = float(np.clip(strength, 0.0, 1.0))
+        pts = list(self._dense_points(points, max(radius * 0.3, 1)))
+        prev = None
+        for (px, py) in pts:
+            x0, y0 = int(round(px - side / 2)), int(round(py - side / 2))
+            dx0, dy0 = max(0, x0), max(0, y0)
+            dx1, dy1 = min(w, x0 + side), min(h, y0 + side)
+            if dx1 <= dx0 or dy1 <= dy0:
+                continue
+            t = tip[dy0 - y0:dy1 - y0, dx0 - x0:dx1 - x0] * st
+            reg = total[dy0:dy1, dx0:dx1]
+            if mode == "smooth":
+                avg = _gauss_small(reg, max(radius * 0.45, 1.0))
+                reg[...] = reg * (1 - t) + avg * t
+            elif mode == "scrape":
+                # take the tops off: everything above the local floor goes
+                floor = _gauss_small(reg, max(radius * 0.7, 1.0)) * 0.72
+                reg[...] = np.where(reg > floor, reg * (1 - t * 0.8)
+                                    + floor * (t * 0.8), reg)
+            elif mode == "spread":
+                avg = _gauss_small(reg, max(radius * 1.1, 1.0))
+                reg[...] = reg * (1 - t * 0.9) + avg * (t * 0.9)
+            else:                                   # push
+                if prev is not None:
+                    vx, vy = px - prev[0], py - prev[1]
+                    n = np.hypot(vx, vy)
+                    if n > 1e-6:
+                        sx = int(round(vx / n * max(radius * 0.22, 1)))
+                        sy = int(round(vy / n * max(radius * 0.22, 1)))
+                        moved = reg * t
+                        reg -= moved
+                        # bank it up AHEAD of the blade, volume conserved
+                        a0, a1 = max(0, dy0 + sy), min(h, dy1 + sy)
+                        b0, b1 = max(0, dx0 + sx), min(w, dx1 + sx)
+                        mh, mw = a1 - a0, b1 - b0
+                        if mh > 0 and mw > 0:
+                            total[a0:a1, b0:b1] += moved[:mh, :mw]
+            prev = (px, py)
+        np.clip(total, 0.0, None, out=total)
+        self._refill_column(chain, total)
+        if record or stroke_new:
+            self.record_stroke(lid, [(float(p[0]), float(p[1])) for p in points],
+                               {"knife": str(mode), "radius": float(radius),
+                                "strength": float(strength)}, stroke_new)
+        self._mark_replay_ok(lid)
+        return self.strokes[-1]["id"] if self.strokes else None
+
+    def blend_stroke(self, lid, points, radius=18.0, strength=0.6,
+                     brush=None, record=True, stroke_new=True):
+        """The BLENDER: a clean brush that carries no pigment and works the
+        paint already on the canvas -- Bob Ross's second brush, the one that
+        turns two bands of colour into a sky.
+
+        Unlike `smudge`, this is a RECORDED, REPLAYABLE stroke. That is the
+        whole point. `smudge` mutates pixels and is explicitly not recorded,
+        so any layer you smudged lost stroke editing entirely -- and a
+        blending gesture is exactly what you most want to be able to nudge,
+        because blending is where the picture actually gets made. A blend
+        stroke sits in the stroke list like any other mark; the layer rebuilds
+        by replaying paint, paint, blend, IN ORDER, so moving one of the
+        colours underneath re-blends the result automatically, and moving the
+        blend gesture itself moves where the softening happened.
+
+        Physically it does two things a smear does not: it is gated by the
+        paint BODY (thin or dry paint barely moves, thick wet paint moves a
+        lot -- you cannot blend what is not there), and it knocks the ridges
+        down as it goes, because dragging a soft brush through wet impasto
+        flattens the peaks.
+        """
+        self._locked_guard(lid)
+        _MUT_REV[0] += 1
+        if record:
+            self.record("Blend", only=[lid])
+        l = self.layer(lid)
+        h, w = self.height, self.width
+        hm = getattr(l, "height_map", None)
+        hold = 0.6
+        tip = self._tip_for(brush, float(radius))
+        side = tip.shape[0]
+        carry = None
+        st = float(np.clip(strength, 0.0, 1.0))
+        for (px, py) in self._dense_points(points, max(radius * 0.25, 1)):
+            x0 = int(round(px - side / 2)); y0 = int(round(py - side / 2))
+            dx0, dy0 = max(0, x0), max(0, y0)
+            dx1, dy1 = min(w, x0 + side), min(h, y0 + side)
+            if dx1 <= dx0 or dy1 <= dy0:
+                continue
+            sx0, sy0 = dx0 - x0, dy0 - y0
+            t = tip[sy0:sy0 + (dy1 - dy0), sx0:sx0 + (dx1 - dx0)]
+            reg = l.pixels[dy0:dy1, dx0:dx1]
+            # WETNESS gate: only paint with body blends. Blending bare canvas
+            # or a dry stain must do nothing, or the blender is just a smear
+            # tool and the physicality is gone.
+            if hm is not None:
+                body = np.clip(hm[dy0:dy1, dx0:dx1] / hold, 0.0, 1.0)
+            else:
+                body = np.ones(t.shape, np.float32)
+            a = (t * st * body)[..., None]
+            # soften toward the local average, so two colours meeting become a
+            # gradient rather than a seam
+            avg = _gauss_small(reg, max(radius * 0.5, 1.0))
+            reg[...] = reg * (1 - a * 0.55) + avg * (a * 0.55)
+            # and drag: the brush carries what it just passed over
+            if carry is not None and carry.shape == reg.shape:
+                reg[...] = reg * (1 - a * 0.45) + carry * (a * 0.45)
+            carry = reg.copy()
+            if hm is not None:
+                hreg = hm[dy0:dy1, dx0:dx1]
+                havg = _gauss_small(hreg[..., None], max(radius * 0.5, 1.0))[..., 0]
+                hm[dy0:dy1, dx0:dx1] = (hreg * (1 - a[..., 0] * 0.6)
+                                        + havg * (a[..., 0] * 0.6)) * (
+                                        1.0 - 0.10 * a[..., 0])
+        if record or stroke_new:
+            self.record_stroke(lid, [(float(p[0]), float(p[1])) for p in points],
+                               {"blend": True, "radius": float(radius),
+                                "strength": float(strength),
+                                **({"brush": brush} if brush else {})},
+                               stroke_new)
+        self._mark_replay_ok(lid)
+        return self.strokes[-1]["id"] if self.strokes else None
 
     def smudge(self, lid, points, radius=12.0, strength=0.6, brush=None, record=True):
         """Drag colour along the stroke: the tip picks paint up and lays it back down."""
@@ -7304,7 +9454,11 @@ class Document:
         ordinary tool works on it unchanged."""
         we = getattr(self, "wall_edit", None)
         return [l for l in self.layers
-                if getattr(l, "wall", None) in (None, we)]
+                if getattr(l, "wall", None) in (None, we)
+                # nor is the PALETTE: it is a surface you work beside the
+                # picture, drawn in its own dock, so it belongs in neither the
+                # canvas view nor an export
+                and not getattr(l, "palette", False)]
 
     def composite(self):
         return composite(self.canvas_layers(), self.height, self.width,
@@ -11724,6 +13878,22 @@ def _doc_section(d, g):
     arrays = {}
     dm = {"id": d.id, "name": d.name, "width": d.width, "height": d.height,
           "dpi": float(getattr(d, "dpi", 72.0)),
+          # the studio the picture was painted in: losing these on save meant
+          # a reopened painting sat on a different substrate and stopped
+          # building past the layer ceiling
+          "paper": str(getattr(d, "paper", "canvas")),
+          "auto_stratum": bool(getattr(d, "auto_stratum", False)),
+          "brush_charge": float(getattr(d, "brush_charge", 1.0)),
+          "brush_color": [float(v) for v in getattr(d, "brush_color", (0.0, 0.0, 0.0))],
+          "brush_lanes": ([[float(v) for v in row]
+                           for row in np.asarray(d.brush_lanes, np.float32)]
+                          if getattr(d, "brush_lanes", None) is not None else None),
+          "brush_charges": ([float(v) for v in np.asarray(d.brush_charges, np.float32)]
+                            if getattr(d, "brush_charges", None) is not None else None),
+          # the palette is a surface of its own, so it saves as one. Its
+          # pixel arrays go under a "pal_" prefix because BOTH documents
+          # number their layers from L1 and the keys would collide.
+          "palette_doc": None,
           "groups": [dict(g, layers=list(g["layers"])) for g in d.groups],
           "splines": [p.meta() for p in d.splines],
           # points are stored as a uniform (x, y) list with widths alongside:
@@ -11759,6 +13929,13 @@ def _doc_section(d, g):
                              "mask": l.mask, "mask_invert": l.mask_invert,
                              "alpha_lock": bool(getattr(l, "alpha_lock", False)),
                              "clip": bool(getattr(l, "clip", False)),
+                             # a palette is not part of the picture, and the
+                             # stratum chain is what makes a deep paint body
+                             # shade as ONE column instead of stepped slabs
+                             "palette": bool(getattr(l, "palette", False)),
+                             "stratum_of": getattr(l, "stratum_of", None),
+                             "stratum_next": getattr(l, "stratum_next", None),
+                             "stratum_root": getattr(l, "stratum_root", None),
                              "thickness": float(getattr(l, "thickness", 1.0)),
                              "vol_kind": getattr(l, "vol_kind", "none"),
                              "vol_ior": float(getattr(l, "vol_ior", 1.33)),
@@ -11782,6 +13959,20 @@ def _doc_section(d, g):
                                  getattr(l, "place", None))),
                              "locked": bool(getattr(l, "locked", False)),
                              "relief": float(getattr(l, "relief", 1.0)),
+                             # the UNDO snapshot is a separate path from
+                             # save/load: without these an undo turned the
+                             # palette back into an ordinary layer and broke
+                             # its dock, and severed the stratum chain
+                             "palette": bool(getattr(l, "palette", False)),
+                             "stratum_of": getattr(l, "stratum_of", None),
+                             "stratum_next": getattr(l, "stratum_next", None),
+                             "stratum_root": getattr(l, "stratum_root", None),
+                             # which way is DOWN for this surface's wet
+                             # paint -- an easel, a wall, or flat on a table
+                             "gravity": (None if getattr(l, "gravity", None) is None
+                                         else float(l.gravity)),
+                             "gravity_angle": (None if getattr(l, "gravity_angle", None) is None
+                                               else float(l.gravity_angle)),
                              "optical": bool(getattr(l, "optical", False)),
                              "media_res": str(getattr(l, "media_res", "normal")),
                              "media_time": str(getattr(l, "media_time", "timeline")),
@@ -11805,8 +13996,21 @@ def _doc_section(d, g):
             # flat and every later stroke flows over ridges that are not there
             arrays[f"height_{l.id}"] = l.height_map
             dm["layers"][-1]["has_height"] = True
+            hb = getattr(l, "height_below", None)
+            if hb is not None and hb.any():
+                # what this stratum sits on -- without it the column shades as
+                # a thin sheet on a plateau again
+                arrays[f"below_{l.id}"] = hb
+                dm["layers"][-1]["has_below"] = True
             dm["layers"][-1]["paint_gloss"] = float(getattr(l, "paint_gloss", 0.3))
             dm["layers"][-1]["paint_media"] = getattr(l, "paint_media", None)
+        mm = getattr(l, "material_map", None)
+        if mm is not None and (mm[..., 2] > 1e-3).any():
+            # the paint's STUFF: without it a reopened piece keeps its gold
+            # ridges but they shade as plain paint -- the material was the
+            # point of the strokes
+            arrays[f"material_{l.id}"] = mm
+            dm["layers"][-1]["has_material"] = True
         src = getattr(l, "source", None)
         if src is not None:
             # the file's own pixels, so a reopened document can still recover
@@ -11843,6 +14047,14 @@ def _doc_section(d, g):
                               "j_angle": b.j_angle, "j_size": b.j_size,
                               "j_scatter": b.j_scatter})
         arrays[f"brush_{b.id}"] = b.tip
+    # the palette surface saves WITH the picture, under a prefix because both
+    # documents number their layers from L1 and the array keys would collide
+    _pd = getattr(d, "_palette_doc", None)
+    if _pd is not None:
+        pdm, parr = _doc_section(_pd, None)
+        dm["palette_doc"] = pdm
+        for k, v in parr.items():
+            arrays["pal_" + k] = v
     return dm, arrays
 
 
@@ -11930,6 +14142,14 @@ def _doc_from_section(dm, arrays):
                 if lm.get("place") else None
             l.locked = bool(lm.get("locked", False))
             l.relief = float(lm.get("relief", 1.0))
+            l.palette = bool(lm.get("palette", False))
+            l.stratum_of = lm.get("stratum_of")
+            l.stratum_next = lm.get("stratum_next")
+            l.stratum_root = lm.get("stratum_root")
+            l.gravity = (None if lm.get("gravity") is None
+                         else float(lm["gravity"]))
+            l.gravity_angle = (None if lm.get("gravity_angle") is None
+                               else float(lm["gravity_angle"]))
             l.optical = bool(lm.get("optical", False))
             l.media_res = str(lm.get("media_res", "normal"))
             l.media_time = str(lm.get("media_time", "timeline"))
@@ -11953,11 +14173,16 @@ def _doc_from_section(dm, arrays):
                     d._replay_base = {}
                 d._replay_base[l.id] = np.asarray(
                     arrays[f"replaybase_{l.id}"], np.float32)
+            if lm.get("has_below") and f"below_{l.id}" in arrays:
+                l.height_below = np.asarray(arrays[f"below_{l.id}"], np.float32)
             if lm.get("has_height") and f"height_{l.id}" in arrays:
                 l.height_map = np.asarray(arrays[f"height_{l.id}"], np.float32)
                 l.paint_gloss = float(lm.get("paint_gloss", 0.3))
                 if lm.get("paint_media"):
                     l.paint_media = lm["paint_media"]
+            if lm.get("has_material") and f"material_{l.id}" in arrays:
+                l.material_map = np.asarray(arrays[f"material_{l.id}"],
+                                            np.float32)
         for mm in dm["masks"]:
             m = Mask(d.height, d.width, mm["name"], arrays[f"mask_{mm['id']}"])
             m.id = mm["id"]; bump(Mask, m.id)
@@ -11970,6 +14195,27 @@ def _doc_from_section(dm, arrays):
             p.id = pm["id"]; bump(Spline, p.id)
             d.splines.append(p)
         d.dpi = float(dm.get("dpi", 72.0))     # physical scale rides along too
+        # the studio comes back with the picture
+        d.paper = str(dm.get("paper", "canvas"))
+        d.auto_stratum = bool(dm.get("auto_stratum", False))
+        d.brush_charge = float(dm.get("brush_charge", 1.0))
+        bc = dm.get("brush_color")
+        if bc:
+            d.brush_color = tuple(float(v) for v in bc)
+        bl = dm.get("brush_lanes")
+        if bl:
+            d.brush_lanes = np.asarray(bl, np.float32)
+        bch = dm.get("brush_charges")
+        if bch:
+            d.brush_charges = np.asarray(bch, np.float32)
+        pdm = dm.get("palette_doc")
+        if pdm:
+            sub = {k[4:]: v for k, v in arrays.items() if k.startswith("pal_")}
+            pd, _pg = _doc_from_section(pdm, sub)
+            pd.name = "palette"
+            pd.auto_stratum = False
+            pd._brush_host = d           # it borrows THIS picture's brush
+            d._palette_doc = pd
         # remembered brush strokes ride along with the document
         d.strokes = []
         for k in dm.get("strokes", []):
