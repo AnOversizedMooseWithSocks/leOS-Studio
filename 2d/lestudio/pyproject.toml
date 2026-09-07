@@ -33,6 +33,9 @@ dependencies = [
     # _advect_walled to the facade -- so 0.2.7 still RUNS. It runs with
     # ink that wraps off one edge and reappears on the other, which is a
     # picture nobody wants; hence a floor rather than a soft check.
+    # R8: tested against leos-core 0.2.20 (the silly->main merge); the two
+    # 0.2.20-only features (sim: media clips, substance IOR presets) gate off
+    # cleanly on older builds via have()/hasattr, so the FLOOR stays 0.2.9.
     "leos-core>=0.2.9",
     "flask>=2.0",         # the browser UI
     "pillow>=9.0",        # image import/export

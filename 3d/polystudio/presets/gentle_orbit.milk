@@ -1,0 +1,22 @@
+[preset00]
+// Gentle Orbit -- slow drift, bass-breathing zoom, warm colour waves. Authentic per_frame ns-eel2.
+fRating=4.0
+fDecay=0.98
+zoom=1.0
+rot=0.0
+warp=0.15
+cx=0.5
+cy=0.5
+wave_r=0.65
+wave_g=0.55
+wave_b=0.45
+per_frame_init_1=q1 = 1;
+per_frame_1=q1 = q1*0.94 + bass*0.06;
+per_frame_2=zoom = 1.0 + 0.035*sin(time*0.35) + 0.06*(q1-1);
+per_frame_3=rot = 0.006*sin(time*0.22) + 0.010*(bass_att-1);
+per_frame_4=warp = 0.15 + 0.25*max(0,bass-1);
+per_frame_5=wave_r = 0.55 + 0.35*sin(time*0.53);
+per_frame_6=wave_g = 0.50 + 0.30*sin(time*0.41 + 2.1);
+per_frame_7=wave_b = 0.50 + 0.35*sin(time*0.31 + 4.2);
+per_frame_8=cx = 0.5 + 0.06*sin(time*0.17);
+per_frame_9=cy = 0.5 + 0.06*cos(time*0.13);

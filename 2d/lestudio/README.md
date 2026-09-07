@@ -76,7 +76,78 @@ a specific error) directly under its parameters.
 Press **● Live** to evaluate the graph continuously and publish
 `http://127.0.0.1:5050/api/stream.mjpg` — point OBS's browser/media source at it.
 
-## New in the latest leCore update
+## New in this release (R4): the colorist, the retoucher, and the memory
+
+Twelve new nodes plus two exporters, panel-driven and measured before adopted
+(the numbers live in `LECORE_SWEEP_R4.md`; the experiments in
+`experiments_r4.py`). The theme: everything Photoshop 2026 forgot while it
+chased AI — the classical pro workflow layer, deterministic and node-based.
+
+**The colorist's corner** (nothing else free ships this set):
+
+- **Color wheels** (Adjust) — lift / gamma / gain per shadows / mids /
+  highlights, the Resolve grammar; all-zero is the exact identity.
+- **LUT** (Color) — apply any `.cube` 3D LUT (trilinear; identity verified to
+  1e-16). And the reverse trip: **Export LUT (.cube)** bakes the selected
+  node's colour chain into a `.cube` for Resolve / Premiere / OBS — with an
+  honesty guard that detects position-dependent stages (a vignette in the
+  chain) and says so in the file header instead of baking a lie.
+- **Scope** (Values) — waveform, RGB parade, vectorscope, histogram *as a
+  node output*: wire it beside any node and grade with numbers. Scopes work
+  in exports and A/B setups because they are just images.
+- **Post FX** gained `pbr_neutral` and `agx` tonemaps (the scene-referred
+  transform darktable popularized), and **/api/export/glsl** compiles a
+  Post FX node's pointwise chain to a Shadertoy fragment via the engine's
+  `postfx_to_glsl` — multi-pass stages are `// skipped` comments, never
+  silently dropped.
+
+**The retoucher's ritual, automated:**
+
+- **Frequency split / Frequency merge** (Filter) — frequency separation as
+  two nodes; the untouched round-trip is exact (the Photoshop version is a
+  9-step manual recipe). Heal the low band, keep the pores.
+- **Clarity** (Adjust) — Lightroom's clarity + texture sliders on leCore's
+  guided filter: halo-free by construction (measured overshoot 0.23 vs 0.40
+  for unsharp masking). Negative clarity is the skin-smoothing direction.
+- **Dehaze** (Adjust) — dark-channel dehaze with a guided-refined
+  transmission map; rmse 0.202 → 0.119 on synthetic haze.
+- **Focus stack** (Combine) — Laplacian-energy sharpest-of across up to four
+  plates; the fused result measures sharper than every input.
+- **Content-aware scale** (Filter) — seam carving (Avidan–Shamir): squeeze a
+  picture 15% and the subjects keep their proportions while sky and water
+  quietly vanish.
+
+**The looks:**
+
+- **Film look** (FX) — the analog character stack in one node: halation
+  (96% of its energy stays inside the highlight glow, measured),
+  luminance-weighted grain that lives in the mids like real stock, print
+  fade, gate weave that animates on the timeline. Film picker: chrome /
+  noir / polaroid / technicolor, or drive the dials yourself.
+- **Dither** (Color) — Bayer / Floyd–Steinberg / nearest against retro
+  palettes (1-bit, Game Boy, CGA, 16-colour) or a median-cut palette of the
+  image itself. With Pixelize, the full pixel-art pipeline.
+- **Orbit trap** (Generate) — the signature Quilez fractal colouring,
+  native from the engine's raymarcher: rays remember their closest approach
+  to a trap and the surface is painted by it. Same SDF DSL as SDF render,
+  entirely different mood.
+
+**The memory** (no other editor has this):
+
+- **Remember** (Output) + **Dream** (Generate) — leCore's content-addressable
+  visual memory pointed at your document. Remember stores any node's output
+  under a label; Dream recalls matching memories, trains the engine's splat
+  media model on them, and generates something *new* in the same family —
+  deterministic, attributable, and honest: under two matching memories it
+  renders a told-you card instead of hallucinating. Dreams are greyscale by
+  design (the media model's domain) — wire through Palette map or Gradient
+  map to colour them.
+
+Kept negatives (documented, not deleted): NumPy PatchMatch lost to the
+harmonic Inpaint on quality-per-second, and liquify waits for a real pin UI
+rather than shipping as sliders. See `LECORE_SWEEP_R4.md`.
+
+## New in the previous leCore update
 
 Five new nodes, all fully composable with the rest of the graph:
 
@@ -148,6 +219,29 @@ drags it into a thin film.
 easel runs wet paint downward, one lying flat on a table lets a puddle level
 outward instead, and a layer standing on a wall runs down that wall.
 
+## Wet paint, living ink, and flipbook animation
+
+**Drips.** The Brush panel's **Drips** row holds a small gravity compass:
+drag from its centre to aim which way wet paint runs and how far (tap to
+reset to straight down), then press **⟱ Drip** — droplets spawn from the wet
+strokes and walk that direction, leaving tapering trails. The same verb sits
+in the layer's Actions menu as *⟱ Drip wet paint*.
+
+**Living ink.** Set a layer's **Type** to *Living ink*, *Smoke* or *Fire*
+and the layer runs a real fluid simulation. The stroke is the emitter: paint
+into it and the medium visibly takes the stroke at once. Press **▶ Live**
+(in the Cook row) to keep the simulation running while you watch and paint;
+*≈ Advance medium a little* in Actions steps it a short burst instead. The
+timeline remains the replayable clock — scrubbing reproduces exactly.
+
+**Flipbook animation.** Press **🎞 Animate** next to the frame bar: frames
+are ordinary layers in an "Animation" group, shown as a strip of thumbnails.
+Add blank or duplicated frames, reorder them, hold a drawing for several
+timeline frames, pick Loop / Ping-pong / Once and an FPS, and draw with
+onion skins (previous frame red, next green — on by default). Playback and
+*Export frame sequence…* ride the existing timeline, so the files are
+exactly what playback showed.
+
 ## Image menu
 
 **File ▸ Image** holds the document-wide operations: crop to selection, rotate
@@ -161,6 +255,12 @@ moves together.
 Open it and paint — there is a document, a layer and a brush already. **B** for
 brush, **E** for eraser, **Ctrl+Z** to undo; a one-line hint says so on first
 run and then never returns.
+
+**⚙ Layer options…** (Layers panel) opens a tabbed dialog holding everything
+else about the selected layer — *Shape & pose* (thickness, backing, placement,
+tilts, curve, dome), *Optics & material*, *Living media*, and *Walls*. Its
+header shows engine-rendered preview pictures of all 11 layer types: click one
+to change the layer's type — the picture is the explanation.
 
 The sidebar leads with Layers and Brush. Masks and splines sit under a
 collapsed **Advanced** heading: nothing is hidden or removed, it is one click
@@ -216,7 +316,9 @@ touch the workspace, so it fails while starting up.
 **Two things to know before hosting it.** The workspace is a **single shared
 studio**, not one canvas per visitor — that is deliberate, it is what the
 invite and presence features are for, but it means everyone who connects
-paints on the same picture. And it must run as **one worker**: the engine
+paints on the same picture. Kicks are advisory: a guest who resets their
+identity can rejoin — treat the link itself as the access boundary. And it
+must run as **one worker**: the engine
 keeps its state in memory in the process, so a second worker would hold a
 different painting. `run.sh` uses Flask's development server, which is right
 for one painter on one machine and not a production server.

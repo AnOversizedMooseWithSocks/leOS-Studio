@@ -32,6 +32,11 @@ def _install_pytest_shim():
     shim = types.ModuleType("pytest")
     shim.importorskip = importlib.import_module
 
+    class _Skip(Exception):
+        pass
+    shim.skip = lambda why="": (_ for _ in ()).throw(_Skip(why))
+    shim._Skip = _Skip
+
     @contextlib.contextmanager
     def raises(exc):
         try:
@@ -63,8 +68,8 @@ def _reset_workspace():
     SV.WS.graphs = {d.id: NodeGraph(d)}
     SV.WS.active = d.id
     SV.WS._wire()
-    for k in ("clients", "tabuser", "joined", "names"):
-        SV.SYNC[k].clear()
+    for k in ("clients", "tabuser", "joined", "names", "viewing", "activity"):
+        SV.SYNC.setdefault(k, {}).clear()
     SV.SYNC["kicked"].clear()
 
 
@@ -83,9 +88,18 @@ def main(argv=None):
     _install_pytest_shim()
     here = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, here)
-    mod = importlib.import_module("test_studio")
-
-    names = sorted(n for n in dir(mod) if n.startswith("test_"))
+    # test_studio is the suite; test_r4 carries the R4 sweep pins (kept
+    # separate so the sweep's fixtures stay next to its backlog doc)
+    # test_r5 carries the R5 sweep pins, same separation reasoning as test_r4
+    mods = [importlib.import_module(m)
+            for m in ("test_studio", "test_r4", "test_r5", "test_r6",
+                      "test_r7", "test_r8", "test_r9", "test_r10", "test_r16", "test_r17", "test_r18", "test_r19", "test_r20", "test_r21", "test_r22", "test_r23", "test_r24", "test_r25", "test_r26", "test_r27", "test_r28", "test_r29", "test_r30", "test_r31", "test_r32", "test_r33", "test_r34", "test_r35", "test_r36", "test_r37", "test_r47", "test_r48", "test_r49", "test_r50", "test_r53")]
+    by_name = {}
+    for m in mods:
+        for n in dir(m):
+            if n.startswith("test_"):
+                by_name[n] = m
+    names = sorted(by_name)
 
     # A test defined twice is silently lost: Python keeps only the last
     # definition, so the file claims more coverage than the suite runs. That
@@ -119,11 +133,15 @@ def main(argv=None):
         t0 = time.time()
         try:
             _reset_workspace()
-            getattr(mod, name)()
+            getattr(by_name[name], name)()
             ok = True
-        except Exception:
-            ok = False
-            failures.append((name, traceback.format_exc()))
+        except Exception as _e:
+            import pytest as _pt
+            if isinstance(_e, getattr(_pt, "_Skip", ())):
+                ok = True                     # pytest.skip in the shim: not a failure
+            else:
+                ok = False
+                failures.append((name, traceback.format_exc()))
         dt = time.time() - t0
         timings.append((dt, name))
         if not args.quiet:

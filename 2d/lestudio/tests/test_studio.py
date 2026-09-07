@@ -740,11 +740,27 @@ def test_every_node_parameter_has_effect():
             "Shadertoy", "Scatter", "Group",
             "Clouds", "Water", "Refract",
             "Depth fog",
+            # R5 #14: same reason as Depth fog -- the `detail` estimation cap
+            # only bites above the tiny audit size (96x128 < the 192 floor),
+            # so it is correctly inert here; method/near behaviour-verified
+            # in tests/test_r5.py (test_r5_depth_node_grey_and_polarity)
+            "Depth",
             "Stroke FX",
             # needs a layer with an impasto height field -- with the default
             # empty layerref every dial correctly yields the same empty card;
             # behaviour-verified in test_lecore_r4_fluid_lightdir_relief3d
-            "Paint relief 3D")   # slow/leCore-heavy/subgraph ops; behaviour-verified in their own
+            "Paint relief 3D",
+            # R4: LUT's intensity only bites with a real .cube on disk (empty
+            # file path = pass-through, correctly inert); Dream's variation
+            # only bites when >= 2 remembered images match its query (the
+            # honest-refusal card is deterministic). Both behaviour-verified
+            # in tests/test_r4.py with real fixtures.
+            "LUT", "Dream",
+            # R48: Shade outputs ink in ALPHA over transparency (rgb stays
+            # premultiplied black), and this audit compares RGB only -- every
+            # dial is correctly "dead" here. All params behaviour-verified on
+            # the alpha channel in tests/test_r48.py.
+            "Shade")   # slow/leCore-heavy/subgraph ops; behaviour-verified in their own
                            # tests (Depth fog's `detail` cap only bites above the tiny test
                            # size; Stroke FX needs a spline wired, so with the
                            # default empty splineref every dial is correctly inert)
@@ -1258,7 +1274,11 @@ def test_ux_sweep_regressions():
                         "Pixelize", "Sharpen", "Smart smooth",
                         "Spectral chain", "Transform", "Upscale 2x",
                         "Grain", "Chromatic aberration", "Refract",
-                        "Stroke FX"}
+                        "Stroke FX",
+                        # R4 nodes that filter/grade the RGB while leaving
+                        # the wired alpha intact
+                        "Clarity", "Dehaze", "Color wheels", "LUT",
+                        "Film look"}
     assert {n for n, m in OPS.items()
             if m.get("alpha") == "process"} == expected_process
     assert "Curves" in OPS["Levels"]["doc"]
@@ -3584,8 +3604,11 @@ def test_stroke_robustness_and_buffer_reuse():
     # undo history stays bounded so long sessions cannot grow without limit
     eng = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
                             "__init__.py")).read()
-    # history is bounded by BOTH a count and a memory budget now
-    assert "len(self._undo) > 24" in eng and "UNDO_BUDGET" in eng
+    # history is bounded by BOTH a count and a memory budget now; since
+    # R33 the count lives in UNDO_KEEP and evicted entries spool to disk
+    # for the history replay rather than vanishing
+    assert "len(self._undo) > self.UNDO_KEEP" in eng and "UNDO_BUDGET" in eng
+    assert "_spool_history(self._undo.pop(0))" in eng
 
 
 def test_perf_backlog_paint_and_composite():
@@ -4369,8 +4392,11 @@ def test_region_limited_undo_for_strokes():
     assert np.array_equal(d.layer(A).pixels, after)
 
     # opaque layer -> region snapshot, exact and much smaller
+    # (R33: clean layers now take the pixel-free path-delta path; this
+    # pins the region FALLBACK for replay-dirty layers)
     d2 = Document(400, 300)
     L = d2.layers[0].id
+    d2.layer(L)._replay_ok = False
     d2.layer(L).pixels[..., :3] = 0.4
     d2.layer(L).pixels[..., 3] = 1.0
     z = d2.layer(L).pixels.copy()
@@ -4612,7 +4638,11 @@ def test_all_strokes_are_remembered_paths():
     assert len(d.strokes) == 2                       # a new stroke separates
     assert d.strokes[0]["brush"]["radius"] == 6.0     # brush travels with it
 
-    # bounded: a long session cannot grow without limit
+    # bounded: a long session cannot grow without limit. The cap itself is
+    # session-sized (R9 raised it for playback), so exercise the TRIM with a
+    # small instance-level cap rather than painting 8k strokes -- each paint
+    # snapshots the stroke list for undo, and the full-cap loop is O(n^2).
+    d.MAX_STROKES = 120
     for _ in range(d.MAX_STROKES + 80):
         d.paint(lid, [(5, 5)], radius=2, record=True)
     assert len(d.strokes) == d.MAX_STROKES
@@ -5722,6 +5752,16 @@ def test_sweep_every_endpoint_is_reachable():
         "/api/schema": "self-description for external tooling",
         "/api/health": "liveness probe for a load balancer, not a user control",
         "/api/ready": "readiness probe for an orchestrator",
+        "/api/replay/timelapse.gif": "scripting: one-shot GIF for agents and "
+            "tests; the UI uses the /api/replay/render job for progress + "
+            "an explicit download",
+        "/api/paint_batch": "the agent/swarm fast path (R16): many strokes, "
+            "one round trip, one undo entry; a human's strokes arrive one at "
+            "a time through /api/paint",
+        "/api/scatter": "the swarm/scripting path to the R53 scatter "
+            "generator with ATOMIC inline poly gates (the selection-race "
+            "fix); the UI reaches scatter through the fill tool's Scatter "
+            "source via /api/fill",
     }
     unreached = []
     for rule in sorted({str(r.rule) for r in app.url_map.iter_rules()
@@ -6261,7 +6301,9 @@ def test_import_errors_and_replay_base_bound():
                                    "color": [1, 0, 0], "radius": 8,
                                    "opacity": 1, "record": True})
     d = WS.doc
-    held = sum(v.nbytes for v in d._replay_base.values())
+    # P2.1: fresh layers store the "empty" sentinel -- zero cost by design
+    held = sum(v.nbytes for v in d._replay_base.values()
+               if not isinstance(v, str))
     assert held <= d.REPLAY_BASE_BUDGET * 1.1, "%.0f MB retained" % (held / 1e6)
     assert len(d._replay_base) >= 1
 
@@ -6954,10 +6996,16 @@ def test_ux_sweep_discoverability():
     import re as _re
     ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
                            "static", "index.html")).read()
-    api_only = {"/api/analyze", "/api/graph/node/<nid>", "/api/histogram",
+    api_only = {"/api/scatter",
+                "/api/analyze", "/api/graph/node/<nid>", "/api/histogram",
                 "/api/mind", "/api/presence/name", "/api/schema", "/api/prefs",
                 # probes for a host's orchestrator: deliberately not controls
-                "/api/health", "/api/ready"}
+                "/api/health", "/api/ready",
+                # scripting door; the UI drives the /api/replay/render job
+                "/api/replay/timelapse.gif",
+                # the agent/swarm fast path (R16); humans paint one stroke
+                # at a time through /api/paint
+                "/api/paint_batch"}
     for rule in sorted({str(x.rule) for x in app.url_map.iter_rules()
                         if str(x.rule).startswith("/api")}):
         stem = rule.split("<")[0].rstrip("/")
@@ -8067,11 +8115,25 @@ def test_selected_strokes_have_a_full_verb_set():
     assert sum(abs(p[1] - 60) for p in pts) < rough * 0.7
     assert pts[0][:2] == zig[0] and pts[-1][:2] == zig[-1]
 
-    # the error paths speak: a dirty layer refuses with the layer's name
+    # R33 determinism backlog (P1.2): a parametric colour fill is a
+    # JOURNALED op now, so the layer stays stroke-editable -- deleting a
+    # stroke re-renders through the journal and the fill survives it
     c.post("/api/fill", json={"layer": lid, "x": 5, "y": 5, "tolerance": 0.05,
                               "source": {"type": "color",
                                          "color": [0, 1, 0]}})
-    r = c.post("/api/strokes/delete", json={"ids": [sz]})
+    assert c.post("/api/strokes/delete",
+                  json={"ids": [sz]}).json["deleted"] == 1
+    assert float(d.layer(lid).pixels[5, 5, 1]) > 0.5, \
+        "deleting a stroke must not eat the journaled fill"
+
+    # the error paths still speak: content replay CANNOT regenerate (a
+    # clone samples the composite) refuses with the layer's name
+    c.post("/api/paint", json={"layer": lid, "points": [[20, 20], [60, 20]],
+                               "color": [1, 1, 0], "radius": 4,
+                               "record": True})
+    s_err = d.strokes[-1]["id"]
+    d.clone(lid, [[40, 100], [80, 105]], source=(40, 20), radius=8.0)
+    r = c.post("/api/strokes/delete", json={"ids": [s_err]})
     assert r.status_code == 400 and "not painted as strokes" in r.json["error"]
 
     # and the UI wires every verb: buttons exist, keys route to strokes
@@ -10742,6 +10804,8 @@ def test_slab_geometry_and_volume_fields():
     assert xs.size and (xs.max() - xs.min()) < 130, "tilt prints one-sided"
     d4.undo()                              # pops the pressed print -> mid
     assert float(np.abs(d4.layer(lo4).pixels - mid).max()) < 1e-6
+    d4.undo()                              # pops the z_off edit (edit_layer
+                                           # records since R5 #9)
     d4.undo()                              # pops the grazing print -> before
     assert float(np.abs(d4.layer(lo4).pixels - before).max()) < 1e-6
 
@@ -12558,8 +12622,10 @@ def test_physical_sheets_thickness_backing_volume():
 
     ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
                            "static", "index.html")).read()
+    # R6 (WETMEDIA_ANIM_REDESIGN.md): the Volume select was renamed Type and
+    # its labels rewritten in plain words -- values unchanged for compat
     for frag in ('id="lThickMM"', 'id="lBgKind"', 'id="lBgTex"',
-                 'id="lVol"', "empty / normal space", "Living media",
+                 'id="lVol"', "Flat paint (no volume)", "Living media",
                  "1 canvas unit = 0.1 mm"):
         assert frag in ui, frag
 
@@ -13630,39 +13696,44 @@ def test_style_row_memory_and_density_round_two():
             assert pg.evaluate(
                 "(()=>{return $('lStyle').closest('.row')!=="
                 "$('lBlend').closest('.row');})()"), "own row"
-            pg.select_option("#lStyle", "vol_water")
+            # R6 (WETMEDIA_ANIM_REDESIGN.md): the persistent physical choice
+            # lives in the Type select now; Style is Effects-only
+            pg.select_option("#lVol", "water")
             pg.wait_for_timeout(1000)
             pg.evaluate("document.activeElement.blur(); refresh()")
             pg.wait_for_timeout(700)
-            assert pg.evaluate("$('lStyle').value") == "vol_water", \
-                "the chosen style stays selected"
+            assert pg.evaluate("$('lVol').value") == "water", \
+                "the chosen type stays selected"
             assert d.layer(lid).vol_kind == "water"
-            # reselecting the SAME layer later still shows its style
+            # reselecting the SAME layer later still shows its type
             pg.evaluate("sel='%s'; refresh()" % lid)
             pg.wait_for_timeout(600)
-            assert pg.evaluate("$('lStyle').value") == "vol_water"
+            assert pg.evaluate("$('lVol').value") == "water"
         finally:
             b.close()
 
 
 def test_collapsible_panel_subgroups():
-    """The better density lever after two metric rounds hit the 11px
-    legibility floor: show FEWER rows, not smaller ones.
+    """Panel density, round three (R7): after two metric rounds hit the
+    11px legibility floor the lever was collapsible subgroups; this
+    round the advanced groups left the panel entirely for the tabbed
+    Layer options dialog (#layerDlg), and the collapse machinery stays
+    for the groups that remain (Mask, Combine, the Select tab's
+    subheads).
 
-    Every .subh in the side panel is now a click-to-collapse header for
-    the rows that follow it (wrapped at runtime into a .subbody -- no
-    markup rewrite). State persists per group in localStorage
-    ('le_grp_<name>'); 'Shape & pose' and 'Material' start closed, so
-    the Selected-layer area's resting height drops by ~12 rows while
-    Mask and Combine stay at hand. Clicking expands and reveals live
-    controls; the choice survives a reload. window.expandLayerGroups()
-    opens everything -- used by the reachability audit so the
-    every-control-reachable guarantee still covers controls INSIDE
-    groups (a collapsed control reports 0x0 and would silently drop
-    out of the audit otherwise -- the same lesson as closed menus).
-    Tests that drive grouped controls with real pointer events (the
-    ramp strips) must expand first; evaluate+dispatchEvent works on
-    hidden elements and needs nothing."""
+    Pinned here:
+    - the collapse machinery survives (makeSubgroupsCollapsible,
+      localStorage persistence, expandLayerGroups);
+    - 'Shape & pose', 'Material' and 'Walls (the room)' are NO LONGER
+      panel subheads -- their rows live in the dialog, same DOM ids;
+    - the dialog opens via the full-width ⚙ button, reveals the moved
+      controls (lTiltX visible on Shape & pose, lIor after switching
+      to Optics & material), and Esc closes it (modal-scoped, the
+      miniForm way);
+    - expandLayerGroups() opens the dialog too, so the reachability
+      audit and the ramp-strip pointer tests still cover the moved
+      controls (a closed dialog reports 0x0 rects and would silently
+      drop them from every sweep -- the same lesson as closed menus)."""
     import warnings
     warnings.filterwarnings("ignore")
     ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
@@ -13693,25 +13764,34 @@ def test_collapsible_panel_subgroups():
                 "(()=>{const o={};document.querySelectorAll('#side .subh')"
                 ".forEach(h=>{o[h.dataset.grp]=h.classList"
                 ".contains('closed')});return o;})()")
-            assert states.get("Shape & pose") and states.get("Material"), \
-                states
-            assert not states.get("Mask") and not states.get("Combine")
-            assert pg.evaluate(
-                "document.querySelectorAll('.subbody.closed .row')"
-                ".length") >= 8, "the resting panel must actually shrink"
-            pg.evaluate(
-                "[...document.querySelectorAll('#side .subh')]"
-                ".find(h=>h.dataset.grp==='Shape & pose').click()")
-            pg.wait_for_timeout(300)
-            assert pg.evaluate("$('lTiltX').offsetParent!==null"), \
-                "expanding reveals the controls"
-            pg.reload()
-            pg.wait_for_timeout(1300)
-            assert pg.evaluate(
-                "[...document.querySelectorAll('#side .subh')]"
-                ".find(h=>h.dataset.grp==='Shape & pose')"
-                ".classList.contains('closed')") is False, \
-                "the choice persists across reload"
+            for gone in ("Shape & pose", "Material", "Walls (the room)"):
+                assert gone not in states, \
+                    "%r must live in the dialog, not the panel" % gone
+            assert "Mask" in states and "Combine" in states, states
+            # the moved controls are hidden until the dialog opens
+            assert pg.evaluate("$('lTiltX').offsetWidth===0")
+            pg.evaluate("$('layerDlgBtn').click()")
+            pg.wait_for_timeout(200)
+            assert pg.evaluate("$('layerDlgBack').style.display!=='none'")
+            assert pg.evaluate("$('lTiltX').offsetWidth>0"), \
+                "opening the dialog reveals Shape & pose"
+            assert pg.evaluate("$('lPaintGloss').offsetWidth===0"), \
+                "other tabs stay hidden"
+            pg.evaluate("[...document.querySelectorAll("
+                        "'#layerDlgTabs button')]"
+                        ".find(b=>b.dataset.ltab==='optics').click()")
+            pg.wait_for_timeout(120)
+            assert pg.evaluate("$('lPaintGloss').offsetWidth>0"), \
+                "the Optics & material tab reveals its rows"
+            pg.keyboard.press("Escape")
+            pg.wait_for_timeout(120)
+            assert pg.evaluate("$('layerDlgBack').style.display==='none'"), \
+                "Esc closes the dialog"
+            pg.evaluate("expandLayerGroups()")
+            pg.wait_for_timeout(150)
+            assert pg.evaluate("$('layerDlgBack').style.display!=='none'"
+                               "&&$('domeRamp').offsetWidth>0"), \
+                "expandLayerGroups() opens the dialog for the audits"
         finally:
             b.close()
 
@@ -14769,6 +14849,9 @@ def test_control_coverage_sweep():
                   re.S)
     props = set(re.findall(r'"([a-z_0-9]+)"', m.group(1)))
     props -= {"x", "y", "none", "axis"}
+    # R5 W1's validation code quotes a few non-property strings inside the
+    # edit_layer body (dunder/message text) -- not controls, drop them
+    props -= {"__iter__", "_sim_run", "edit_layer", "inf"}
     missing = [p for p in sorted(props)
                if not re.search(r"\b%s\b" % re.escape(p), ui)]
     assert not missing, \
@@ -15765,8 +15848,15 @@ def test_cook_and_live_media_clocks():
     assert cooked > raw * 1.3, "cooking advances the simulation"
     assert d.frame == 0.0, "cooking must NOT move the playhead"
     d.set_frame(10.0)
-    assert spread(d, l) > cooked, "the timeline evolves from the cooked state"
+    # R6 (WETMEDIA_ANIM_REDESIGN.md): inkwater was retuned -- less
+    # diffusion, more curl -- so once the injection impulse has dissipated
+    # the footprint no longer grows monotonically. "Evolves" is pinned as
+    # the field CHANGING from the cooked state, not as spreading.
+    a10 = d.layer(l).pixels[..., 3].copy()
+    assert spread(d, l) > raw * 1.2, "still well past the raw stamp"
     d.set_frame(0.0)
+    assert float(np.abs(a10 - d.layer(l).pixels[..., 3]).mean()) > 1e-4, \
+        "the timeline evolves from the cooked state"
     assert spread(d, l) > raw * 1.2, \
         "scrubbing back returns to the cooked start, not the raw stamp"
 

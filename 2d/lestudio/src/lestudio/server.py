@@ -45,10 +45,14 @@ class _WS:
         self._wire()
 
     def _wire(self):
-        for g in self.graphs.values():
+        for did, g in self.graphs.items():
             g.resolver = self.docs.get
             if "MEDIA" in globals():
-                g.media = MEDIA.hook
+                # media sources are keyed (doc_id, node_id): with a plain
+                # node id, doc A's N1 and doc B's N1 fought over ONE video
+                # slot (both graphs seed ids from the same counter, so the
+                # collision is the common case, not the corner)
+                g.media = _media_hook_for(did)
 
     @property
     def doc(self):
@@ -72,20 +76,66 @@ class _WS:
         self.graphs.pop(did, None)
         if self.active not in self.docs:
             self.active = next(iter(self.docs))
+        # A closed doc must not linger in presence or media bookkeeping:
+        # stale viewing entries made peers show "on another document" for a
+        # doc that no longer exists (and, worse, per-client doc resolution
+        # would have had to re-check liveness on every request).
+        if "SYNC" in globals():
+            vw = SYNC.get("viewing", {})
+            for uid in [u for u, v in vw.items() if v not in self.docs]:
+                vw.pop(uid, None)
+        if "MEDIA" in globals():
+            MEDIA.purge_doc(did)
         return True
 
 
 WS = _WS()
 
 
+def _media_hook_for(did):
+    """A media hook bound to one document id (see _WS._wire)."""
+    def hook(nid, params, want):
+        return MEDIA.hook((did, nid), params, want)
+    return hook
+
+
+def _viewing_doc_id():
+    """The document id THIS request operates on.
+
+    The active document used to be one global: any client switching docs
+    redirected everyone else's edits mid-stroke. Each user's choice now lives
+    in SYNC["viewing"] (keyed by user id); WS.active remains the DEFAULT for
+    clients that never activated anything themselves -- which is exactly the
+    old behaviour for a single user, so nothing single-user changes."""
+    try:
+        from flask import has_request_context
+        if not has_request_context():
+            return WS.active                  # background threads, tests
+        did = SYNC.get("viewing", {}).get(_req_uid())
+        if did and did in WS.docs:
+            return did
+    except Exception:
+        pass
+    return WS.active
+
+
 class _Active:
-    """A live proxy to the ACTIVE document or graph."""
+    """A live proxy to the requesting user's ACTIVE document or graph
+    (falling back to the workspace-global active outside request context)."""
 
     def __init__(self, attr):
         object.__setattr__(self, "_attr", attr)
 
+    def _target(self):
+        attr = self._attr
+        if attr == "doc":
+            return WS.docs[_viewing_doc_id()]
+        if attr == "graph":
+            return WS.graphs[_viewing_doc_id()]
+        return getattr(WS, attr)
+
     def __getattr__(self, name):
-        return getattr(getattr(WS, self._attr), name)
+        return getattr(self._target(), name)
 
     def __setattr__(self, name, value):
         # Without this, `DOC.dpi = 300` quietly created an attribute on the
@@ -95,7 +145,7 @@ class _Active:
         if name == "_attr":
             object.__setattr__(self, name, value)
         else:
-            setattr(getattr(WS, self._attr), name, value)
+            setattr(self._target(), name, value)
 
 
 class _Gone(Exception):
@@ -230,7 +280,11 @@ JOBS = {}
 # per-user and never reaped while the process lives: the host is the
 # earliest-seen user still present, so the role cannot flap during a reload.
 SYNC = {"rev": 0, "src": "", "clients": {}, "tabuser": {}, "names": {},
-        "joined": {}, "kicked": set(), "lock": threading.Lock()}
+        "joined": {}, "kicked": set(), "lock": threading.Lock(),
+        # per-USER id (never tab id -- mixing the two gave people their own
+        # ghost chip): viewing = which doc each user has active, activity =
+        # their latest {tool, layer} ping for the presence chips
+        "viewing": {}, "activity": {}}
 INVITES = {"pending": [], "joined": []}    # session-scoped guest bookkeeping
 
 
@@ -238,7 +292,12 @@ INVITES = {"pending": [], "joined": []}    # session-scoped guest bookkeeping
 def _bump_rev(resp):
     if request.method in ("POST", "PATCH") and request.path.startswith("/api/") \
             and request.path not in ("/api/graph/run", "/api/live",
-                                      "/api/autosave") \
+                                      "/api/autosave",
+                                      # an activity ping changes nothing in
+                                      # the workspace; bumping would make
+                                      # every client refresh on every ping
+                                      # (same reasoning as /api/autosave)
+                                      "/api/presence/activity") \
             and not request.path.startswith("/api/job/") \
             and resp.status_code < 400:
         with SYNC["lock"]:
@@ -314,7 +373,12 @@ def events():
                     active = [SYNC["names"].get(u2, "") for u2 in live_uids]
                     yield ("data: " + json.dumps(
                         {"rev": last, "src": SYNC["src"], "editors": editors,
-                         "names": sorted(n for n in active if n)})
+                         "names": sorted(n for n in active if n),
+                         # what each live user is doing (tool/layer pings
+                         # via /api/presence/activity), for presence chips
+                         "activity": {u2: SYNC["activity"][u2]
+                                      for u2 in live_uids
+                                      if u2 in SYNC["activity"]}})
                         + chr(10) + chr(10))
                 elif now - beat >= 2.0:
                     # THE GHOST FIX. This generator only wrote to the socket
@@ -358,6 +422,7 @@ def _editor_roster(me=""):
     host = live[0][1] if live else ""
     return [{"id": u2, "name": SYNC["names"].get(u2, ""),
              "tabs": tabs[u2],
+             "activity": SYNC["activity"].get(u2),
              "joined": round(now - j, 1), "you": u2 == me, "host": u2 == host}
             for j, u2 in live]
 
@@ -421,9 +486,20 @@ def paint_run():
     """Wet paint runs under gravity: {"layer": id, "steps": n,
     "gx","gy","gz"}. gz presses paint downhill along the layer's surface
     (tilt, curve, dome, relief); gx/gy pull it laterally."""
-    from . import run_paint
+    from . import drip_paint, run_paint
     d = request.json or {}
     try:
+        if d.get("mode", "drips") == "drips":
+            # R6 default: droplets that walk the gravity direction and
+            # leave trails -- what "make the paint run" means to a person.
+            # The old whole-sheet advection stays as mode="sheet".
+            made = drip_paint(DOC, d.get("layer", ""),
+                              direction_deg=float(d.get("direction", 90.0)),
+                              strength=float(d.get("strength", 1.0)),
+                              drops=int(d.get("drops", 24)),
+                              seed=int(d.get("seed", 0)))
+            GRAPH.commit_layer_outputs()
+            return jsonify(ok=True, drips=made)
         run_paint(DOC, d.get("layer", ""), steps=int(d.get("steps", 12)),
                   gx=float(d.get("gx", 0.0)), gy=float(d.get("gy", 0.0)),
                   gz=float(d.get("gz", 1.0)))
@@ -431,6 +507,59 @@ def paint_run():
         return jsonify(error="no such layer"), 404
     GRAPH.commit_layer_outputs()
     return jsonify(ok=True)
+
+
+@app.post("/api/anim/flipbook")
+def anim_flipbook():
+    """R6 flipbook: turn a layer GROUP into an animation by generating
+    hold-interpolated visibility keys -- frames are layers, exactly the
+    Procreate model, and playback/export ride the existing timeline.
+    Body: {"layers": [ids bottom-to-top = frame order], "fps"?: 12,
+    "mode"?: "loop"|"pingpong"|"once", "holds"?: {id: ticks}}.
+    Rebuilds the visibility tracks from scratch each call (the strip UI
+    calls it after every edit); sets the frame range to one cycle for
+    "once", leaves it for loop/pingpong (playback loops the range).
+    Returns {frames, range, fps}."""
+    d = request.json or {}
+    ids = [str(x) for x in (d.get("layers") or [])]
+    if not ids:
+        return jsonify(error="pass layers: the frame order"), 400
+    try:
+        for lid in ids:
+            DOC.layer(lid)
+    except KeyError as e:
+        return jsonify(error="no such layer: %s" % e), 400
+    holds = {str(k): max(1, int(v)) for k, v in (d.get("holds") or {}).items()}
+    mode = d.get("mode", "loop")
+    fps = float(d.get("fps", 12.0))
+    order = list(ids) if mode != "pingpong" else ids + ids[-2:0:-1]
+    # wipe previous visibility tracks for these layers, then lay hold keys
+    for lid in ids:
+        DOC.tracks.pop("layer:%s:visible" % lid, None)
+    t = 0.0
+    spans = []
+    for lid in order:
+        n = holds.get(lid, 1)
+        spans.append((lid, t, t + n))
+        t += n
+    total = t
+    for lid in ids:
+        keys = []
+        vis_spans = [(a, b) for (l2, a, b) in spans if l2 == lid]
+        cur = None
+        for f in range(int(total)):
+            on = any(a <= f < b for a, b in vis_spans)
+            if on != cur:
+                keys.append([float(f), 1.0 if on else 0.0, 1])
+                cur = on
+        DOC.tracks["layer:%s:visible" % lid] = keys
+    DOC.fps = fps
+    DOC.frame_range = [0.0, max(total - 1.0, 1.0)]
+    from . import _MUT_REV
+    _MUT_REV[0] += 1
+    DOC.set_frame(0.0)
+    return jsonify(ok=True, frames=len(order), range=DOC.frame_range,
+                   fps=fps)
 
 
 @app.get("/api/timeline")
@@ -461,8 +590,11 @@ def timeline_post():
             t = DOC.set_frame(float(d.get("t", 0.0)))
             return jsonify(ok=True, frame=t)
         if act == "key":
+            # R6: interp="hold" makes the value STEP at the next key --
+            # what a flipbook frame or a visibility switch needs
             ks = DOC.set_key(d["kind"], d["id"], d["prop"],
-                             t=d.get("t"), v=d.get("v"))
+                             t=d.get("t"), v=d.get("v"),
+                             interp=d.get("interp", "linear"))
             return jsonify(ok=True, keys=ks)
         if act == "delkey":
             DOC.del_key(d["kind"], d["id"], d["prop"], t=d.get("t"))
@@ -732,10 +864,51 @@ def media_step():
     if getattr(l, "vol_kind", "none") not in _MEDIA_KINDS:
         return jsonify(error="layer is not a dynamic medium "
                              "(vol_kind inkwater|smoke|fire)"), 400
-    DOC.record("Media step", only=[l.id])
-    _media_slab_step(DOC, l, int(d.get("steps", 12)))
+    DOC.media_step(l.id, int(d.get("steps", 12)),
+                   selection=d.get("selection"),
+                   sel_invert=bool(d.get("sel_invert")))
     GRAPH.commit_layer_outputs()
     return jsonify(ok=True)
+
+
+@app.get("/api/media/vectors")
+def media_vectors():
+    """R5 #20: the simulation's velocity field, coarsened for an overlay.
+    ?layer=<id> returns the layer's media velocity block-averaged onto a
+    ~24x18 grid ({vx, vy, gw, gh} as row-major lists, in canvas px/step),
+    so the client can draw sparse arrows instead of guessing what the
+    black box is doing. 404 when the layer has no living medium yet --
+    the read NEVER creates simulation state."""
+    import numpy as np
+    from . import _MEDIA_KINDS
+    try:
+        l = DOC.layer(request.args.get("layer", ""))
+    except KeyError:
+        return jsonify(error="no such layer"), 404
+    st = getattr(l, "_media", None)
+    if st is None or getattr(l, "vol_kind", "none") not in _MEDIA_KINDS:
+        return jsonify(error="layer has no living medium (vol_kind "
+                             "inkwater|smoke|fire, and it must have been "
+                             "painted or stepped at least once)"), 404
+    vx, vy = np.asarray(st["vx"]), np.asarray(st["vy"])
+    sh, sw = vx.shape
+    gw, gh = min(24, sw), min(18, sh)
+
+    def coarsen(a):
+        # deterministic block mean: trim to a multiple of the target grid,
+        # then average each block (the trim is at most one block's width)
+        ty, tx = (sh // gh) * gh, (sw // gw) * gw
+        b = a[:ty, :tx].reshape(gh, sh // gh, gw, sw // gw)
+        return b.mean(axis=(1, 3))
+
+    # velocities live on the sim grid; scale to CANVAS px per step so the
+    # arrows mean the same thing at every media_res
+    kx, ky = DOC.width / float(sw), DOC.height / float(sh)
+    return jsonify(ok=True, gw=gw, gh=gh,
+                   vx=[[round(float(v) * kx, 3) for v in row]
+                       for row in coarsen(vx)],
+                   vy=[[round(float(v) * ky, 3) for v in row]
+                       for row in coarsen(vy)])
 
 
 @app.post("/api/view3d")
@@ -820,6 +993,20 @@ def editors_name():
 
 
 @app.before_request
+def _stamp_author():
+    """Remember WHO is about to mutate the caller's active document: record()
+    copies this onto each undo entry, so a collaborator's Ctrl+Z can say
+    whose change it is about to revert instead of silently reverting it.
+    Cheap (one dict write); reads and unidentified callers cost nothing."""
+    if request.method in ("POST", "PATCH", "DELETE") \
+            and request.path.startswith("/api/"):
+        try:
+            WS.docs[_viewing_doc_id()]._last_author = _req_uid()
+        except Exception:
+            pass
+
+
+@app.before_request
 def _refuse_kicked():
     """A kicked USER's edits are refused server-side, not just hidden: the
     persistent user id rides on every POST (X-User, falling back to
@@ -871,6 +1058,14 @@ class _MediaSource(_CoreFrameSource):
         if source.startswith("test:"):
             self.kind = "test"
             self.status = "ok — built-in test signal"
+        elif source.startswith("sim:"):
+            # R8 (leCore 0.2.20): engine-simulated clips. sim:smoke and
+            # sim:particles render a deterministic frame list ONCE via the
+            # engine's smoke_animation / particle_animation and loop it --
+            # an animated source with no file and no network.
+            self.kind = "sim"
+            self._sim_frames = None
+            self.status = "rendering simulation…"
         elif os.path.splitext(source.split("?")[0])[1].lower() in self.IMG_EXT                 and "://" not in source:
             self.kind = "image"
         else:
@@ -993,7 +1188,45 @@ class _MediaSource(_CoreFrameSource):
             self.status = "ok — image (reloads on change)"
         return self.frame
 
+    def _tick_sim(self):
+        import numpy as np
+        if self._sim_frames is None:
+            what = self.source.split(":", 1)[1].strip() or "smoke"
+            try:
+                m = mind()
+                if what.startswith("particle"):
+                    if not hasattr(m, "particle_animation"):
+                        raise AttributeError("particle_animation")
+                    frames = m.particle_animation(n=400, steps=48,
+                                                  width=256, height=192)
+                else:
+                    if not hasattr(m, "smoke_animation"):
+                        raise AttributeError("smoke_animation")
+                    frames = m.smoke_animation(steps=48, shape=(96, 96))
+                self._sim_frames = [np.asarray(f, np.float32)[..., :3]
+                                    for f in frames]
+                self.status = ("ok — %d-frame engine simulation (loops)"
+                               % len(self._sim_frames))
+            except AttributeError as e:
+                self._sim_frames = []
+                self.status = ("error: this engine build has no %s — "
+                               "sim: sources need leCore >= 0.2.20" % e)
+            except Exception as e:
+                self._sim_frames = []
+                self.status = "error: simulation failed (%s)" % str(e)[:80]
+        if not self._sim_frames:
+            return self.frame
+        t = time.time()
+        seq = int(t * self.fps) if self.play else self.seq
+        idx = seq % len(self._sim_frames)
+        if seq != self.seq or self.frame is None:
+            self.frame = self._sim_frames[idx]
+            self.seq = seq
+        return self.frame
+
     def get(self):
+        if self.kind == "sim":
+            return self._tick_sim(), self.seq
         if self.kind == "test":
             return self._tick_test(), self.seq
         if self.kind == "image":
@@ -1006,7 +1239,10 @@ class _MediaSource(_CoreFrameSource):
 
 class _MediaManager:
     def __init__(self):
-        self.sources = {}          # node_id -> _MediaSource
+        # (doc_id, node_id) -> _MediaSource. Keying by node id alone made
+        # doc A's N1 and doc B's N1 share one video slot -- and node ids
+        # collide across docs by construction (every graph counts from N1).
+        self.sources = {}
 
     def hook(self, nid, params, want):
         p = params or {}
@@ -1029,9 +1265,27 @@ class _MediaManager:
         return seq if want == "seq" else frame
 
 
-    def statuses(self):
-        return {nid: {"status": s.status, "has_frame": s.frame is not None}
-                for nid, s in self.sources.items()}
+    def statuses(self, did=None):
+        """Per-node statuses, keyed by NODE id for the given doc (the UI
+        looks nodes up by their id in the visible graph; other docs' sources
+        are not its business). did=None returns everything, node-keyed, for
+        introspection."""
+        return {(nid[1] if isinstance(nid, tuple) else nid):
+                {"status": s.status, "has_frame": s.frame is not None}
+                for nid, s in self.sources.items()
+                if did is None
+                or (isinstance(nid, tuple) and nid[0] == did)}
+
+    def purge_doc(self, did):
+        """Stop and drop every source belonging to a closed document --
+        otherwise its capture threads keep pulling frames forever."""
+        for k in [k for k in self.sources
+                  if isinstance(k, tuple) and k[0] == did]:
+            try:
+                self.sources[k].close()
+            except Exception:
+                pass
+            self.sources.pop(k, None)
 
 
 MEDIA = _MediaManager()
@@ -1230,6 +1484,160 @@ def export_svg():
         return jsonify(error=str(e)), 400
     return app.response_class(svg, mimetype="image/svg+xml",
         headers={"Content-Disposition": "attachment; filename=lestudio.svg"})
+
+
+@app.post("/api/export/lut")
+def export_lut():
+    """Bake a node's COLOUR transform into a .cube 3D LUT (R4). Walks the
+    single-image-input chain upstream of the chosen node (each hop a colour
+    op), applies it to an identity lattice, and writes the mapped lattice as
+    a .cube -- so a look built from Wheels/Levels/Curves/Post FX travels to
+    Resolve/Premiere/OBS. HONESTY GUARD: the chain is run twice with the
+    lattice laid out in two different spatial arrangements; if the mapped
+    colours disagree, a stage is position-dependent (vignette, blur...) and
+    the header says so instead of silently baking one arrangement's answer.
+    Body: {node?, size? (17/33/65), stop? (node id to treat as source)}."""
+    d = request.json or {}
+    GRAPH.ensure_default()
+    nid = d.get("node") or GRAPH.output_node()
+    size = int(d.get("size", 33))
+    if size not in (17, 33, 65):
+        return jsonify(error="size must be 17, 33 or 65"), 400
+    stop = d.get("stop") or None
+
+    # collect the chain: nid up through single-image-input colour ops
+    chain = []
+    cur = nid
+    seen = set()
+    while cur and cur not in seen:
+        seen.add(cur)
+        n = GRAPH.nodes.get(cur)
+        if n is None:
+            break
+        meta = OPS.get(n["type"])
+        if meta is None or not meta["inputs"]:
+            break                          # a generator: the source, excluded
+        chain.append(n)
+        if cur == stop:
+            break
+        first = meta["inputs"][0]
+        src = (n.get("inputs") or {}).get(first)
+        if not src:
+            break
+        cur = str(src).split(".", 1)[0]
+    if not chain:
+        return jsonify(error="node has no image-input chain to bake"), 400
+    chain.reverse()
+
+    idx = np.linspace(0.0, 1.0, size)
+    lat = np.stack(np.meshgrid(idx, idx, idx, indexing="ij"), -1).reshape(-1, 3)
+
+    def run(pixels, h, w):
+        img = pixels.reshape(h, w, 3).astype(np.float32)
+        for n in chain:
+            meta = OPS[n["type"]]
+            params = {p["name"]: p["default"] for p in meta["params"]}
+            params.update(n.get("params") or {})
+            src_img = img
+            if meta.get("rgba"):
+                src_img = np.concatenate(
+                    [img, np.ones(img.shape[:2] + (1,), np.float32)], -1)
+            ins = {meta["inputs"][0]: src_img}
+            for extra in meta["inputs"][1:]:
+                ins[extra] = None
+            out = meta["fn"]((h, w), ins, params)
+            if isinstance(out, dict):
+                out = out.get("out")
+            img = np.asarray(out, np.float32)[..., :3]
+        return img.reshape(-1, 3)
+
+    h1, w1 = size, size * size
+    a = run(lat, h1, w1)
+    b = run(lat[::-1], h1, w1)[::-1]      # same colours, different positions
+    spatial = float(np.abs(a - b).max())
+    lines = ["# generated by leStudio /api/export/lut",
+             "# chain: " + " -> ".join(n["type"] for n in chain)]
+    if spatial > 1e-3:
+        lines.append("# WARNING: chain is position-dependent (max colour "
+                     "disagreement %.4f between two lattice layouts) -- a "
+                     "spatial stage (vignette/blur/grain?) is baked from ONE "
+                     "arrangement and will not travel faithfully" % spatial)
+    lines.append("LUT_3D_SIZE %d" % size)
+    out = np.clip((a + b) * 0.5, 0, 1).reshape(size, size, size, 3)
+    for bb in range(size):
+        for gg in range(size):
+            for rr in range(size):
+                v = out[rr, gg, bb]
+                lines.append("%.6f %.6f %.6f" % (v[0], v[1], v[2]))
+    body = "\n".join(lines) + "\n"
+    return app.response_class(body, mimetype="text/plain", headers={
+        "Content-Disposition": "attachment; filename=lestudio.cube"})
+
+
+@app.post("/api/export/glsl")
+def export_glsl():
+    """Compile a Post FX node's POINTWISE chain to a Shadertoy fragment via
+    leCore's postfx_to_glsl (R4). Non-pointwise stages (bloom, glare, grain,
+    chromatic aberration -- they need neighbours or multiple passes) are
+    emitted as '// skipped' comments, not silently dropped; agx is likewise
+    reported (the engine's GLSL algebra doesn't carry it yet).
+    Body: {node} -- must be a Post FX node."""
+    from . import _postfx_steps
+    d = request.json or {}
+    nid = d.get("node")
+    n = GRAPH.nodes.get(nid or "")
+    if n is None or n.get("type") != "Post FX":
+        return jsonify(error="pass the id of a Post FX node"), 400
+    meta = OPS["Post FX"]
+    params = {p["name"]: p["default"] for p in meta["params"]}
+    params.update(n.get("params") or {})
+    steps = _postfx_steps(params)
+    if params.get("tonemap") == "agx":
+        steps = steps + [("agx", {})]
+    if not steps:
+        return jsonify(error="this Post FX node is all defaults -- nothing "
+                             "to export"), 400
+    try:
+        import holographic.rendering.holographic_postfx as _pf
+        src = _pf.chain_to_glsl(steps, name="lestudio_grade",
+                                skip_unsupported=True)
+    except Exception as e:
+        return jsonify(error=str(e)), 400
+    return jsonify(ok=True, glsl=src,
+                   note="stages needing multi-pass are '// skipped' comments "
+                        "in the source; everything else matches the node to "
+                        "float precision")
+
+
+@app.get("/api/materials/substances")
+def materials_substances():
+    """R8 (leCore 0.2.20): the engine's physical-materials database, filtered
+    to entries with a REFRACTIVE INDEX -- the ones a layer's optics can
+    honestly imitate. The Layer options dialog offers them as one-click IOR
+    presets ("honey", "diamond", "seawater"...)."""
+    m = mind()
+    if not hasattr(m, "material_data"):
+        return jsonify(ok=True, substances=[],
+                       note="engine build has no material_data")
+    cats = ("liquid", "glass", "mineral", "polymer", "gas")
+    out = []
+    for cat in cats:
+        try:
+            listing = m.material_data(category=cat)
+        except Exception:
+            continue
+        for name in (listing or {}).get("materials", []):
+            try:
+                d = m.material_data(name)
+            except Exception:
+                continue
+            if not d or not d.get("found") or "refractive" not in d:
+                continue
+            out.append({"name": name, "category": cat,
+                        "refractive": float(d["refractive"]),
+                        "density": float(d.get("density", 0.0))})
+    out.sort(key=lambda x: (x["category"], x["name"]))
+    return jsonify(ok=True, substances=out)
 
 
 @app.get("/api/shader/presets")
@@ -1444,10 +1852,23 @@ def status():
 @app.post("/api/graph/run")
 def graph_run():
     """Evaluate a node (default: the Output node) as a background JOB with
-    progress reporting and cancellation."""
+    progress reporting and cancellation.
+
+    R5 #5: an optional `w` in the body renders at that WIDTH via render_at
+    instead of full canvas res (measured 473 ms vs 1618 ms full at 512^2 --
+    3.4x), for interactive param-commit previews; the PNG lands in the job's
+    result (/api/job/<id>/result). Reduced-res runs do NOT commit Layer out /
+    Mask out targets -- baking document pixels at preview resolution would
+    corrupt them; full-res (no `w`) keeps today's evaluate+commit behaviour."""
     d = request.json or {}
     GRAPH.ensure_default()
     nid = d.get("id") or GRAPH.output_node()
+    try:
+        want_w = int(d["w"]) if d.get("w") else None
+    except (TypeError, ValueError):
+        return jsonify(error="w must be an integer width"), 400
+    if want_w is not None and not (16 <= want_w <= 4096):
+        return jsonify(error="w must be between 16 and 4096"), 400
     jid = uuid.uuid4().hex[:10]
     total = max(len(GRAPH.upstream_ids(nid)), 1)
     job = {"progress": 0.0, "done": False, "error": None,
@@ -1461,8 +1882,24 @@ def graph_run():
         GRAPH.progress_cb = tick
         GRAPH.cancel_event = job["cancel"]
         try:
-            GRAPH.evaluate(nid)
-            GRAPH.commit_layer_outputs()
+            if want_w is not None:
+                h = max(int(round(want_w * DOC.height / max(DOC.width, 1))), 8)
+                img = _renderable(GRAPH.render_at(nid, want_w, h))
+                # encode here, not via _png(): this thread has no flask
+                # request context
+                import numpy as _np
+                from PIL import Image as _PImage
+                a = _np.clip(_np.asarray(img, _np.float32), 0, 1)
+                if a.ndim == 2:
+                    a = _np.stack([a] * 3, -1)
+                buf = io.BytesIO()
+                _PImage.fromarray((a * 255).astype("uint8")).save(buf, "PNG")
+                job["result"] = buf.getvalue()
+                job["mime"] = "image/png"
+                job["filename"] = "graph_preview.png"
+            else:
+                GRAPH.evaluate(nid)
+                GRAPH.commit_layer_outputs()
             job["progress"] = 1.0
         except Exception as e:
             job["error"] = str(e)
@@ -1639,27 +2076,46 @@ def job_cancel(jid):
     return jsonify(ok=True)
 
 
+def _doc_dirty(d):
+    """Unsaved-work signal. `bool(d._undo)` stayed True forever after the
+    first edit -- saving never cleared it, so every close warned. A save
+    (explicit download or autosave) records the undo length it saw; dirty is
+    'the history moved since then'. Undoing back TO the saved point also
+    reads clean, which is what people expect."""
+    return len(getattr(d, "_undo", []) or []) != \
+        int(getattr(d, "_saved_undo_len", 0))
+
+
+def _mark_saved():
+    """Every doc's current undo depth becomes the 'saved' waterline."""
+    for d in WS.docs.values():
+        d._saved_undo_len = len(getattr(d, "_undo", []) or [])
+
+
 @app.get("/api/state")
 def state():
     """THE complete truth: doc, layers (with alpha_lock/clip), masks, selections, splines, brushes, graph, ops catalog."""
+    active = _viewing_doc_id()               # the CALLER's active document
     return jsonify({
         "capabilities": _capabilities(),
         "docs": [{"id": d.id, "name": d.name,
                   # unsaved-work signal: closing a dirty document should warn
-                  "dirty": bool(getattr(d, "_undo", None)), "active": d.id == WS.active,
+                  "dirty": _doc_dirty(d), "active": d.id == active,
                   "layers": [{"id": l.id, "name": l.name} for l in d.layers],
                   "groups": [{"id": g["id"], "name": g["name"]} for g in d.groups],
                   "masks": [{"id": m.id, "name": m.name} for m in d.masks]}
                  for d in WS.docs.values()],
-        "active_doc": WS.active,
+        "active_doc": active,
         "dpi": float(getattr(DOC, "dpi", 72.0)),
-        # Who else is here, and what each client is looking at. Presence was
-        # tracked but never surfaced, so a collaborator was invisible until
-        # their edits appeared out of nowhere.
-        "peers": [{"id": cid, "name": nm or cid[:6],
-                   "doc": SYNC.get("viewing", {}).get(cid),
-                   "me": cid == request.headers.get("X-Client", "")}
-                  for cid, nm in sorted(SYNC.get("names", {}).items())],
+        # Who else is here, and what each USER is looking at. Everything here
+        # keys by user id -- names, viewing and the caller comparison. When
+        # `me` compared _req_uid-keyed names against the TAB id, users saw
+        # their own ghost chip and peers' docs showed wrongly.
+        "peers": [{"id": uid, "name": nm or uid[:6],
+                   "doc": SYNC["viewing"].get(uid),
+                   "activity": SYNC["activity"].get(uid),
+                   "me": uid == _req_uid()}
+                  for uid, nm in sorted(SYNC.get("names", {}).items())],
         "width": DOC.width, "height": DOC.height,
         "layers": [dict(l.meta(),
                         has_strokes=any(k["layer"] == l.id for k in DOC.strokes))
@@ -1683,9 +2139,12 @@ def state():
                      if k["points"] else None,
                      "erase": bool(k["brush"].get("erase"))}
                     for k in getattr(DOC, "strokes", [])][-64:],
-        "media_status": MEDIA.statuses(),
+        "media_status": MEDIA.statuses(active),
         "brushes": [b.meta() for b in DOC.brushes],
         "graph": list(GRAPH.ensure_default().values()),
+        # the graph's revision: clients echo it as base_rev on whole-graph
+        # POSTs so a stale write 409s instead of erasing someone's nodes
+        "grev": int(getattr(GRAPH, "grev", 0)),
         "output_node": GRAPH.output_node(),
         "ops": op_catalog(),
         "blend_modes": list(BLEND_MODES),
@@ -1747,8 +2206,37 @@ def _new_doc_locked():
         dpi = 72.0
     doc.dpi = min(2400.0, max(1.0, dpi))
     WS.active = doc.id
+    me = _req_uid()
+    if me:
+        # creating a document activates it FOR ITS CREATOR (and, via
+        # WS.active, for clients that never picked a doc) -- not for peers
+        # who have their own viewing entry
+        SYNC["viewing"][me] = doc.id
     return jsonify(ok=True, doc={"id": doc.id, "name": doc.name,
                                  "width": w, "height": h, "dpi": doc.dpi})
+
+
+def _recommit_foreign_bakes(did):
+    """Cross-doc Layer-out bakes go STALE while their source document is
+    edited elsewhere: the baked pixels only refresh when this graph commits.
+    Re-run the commit path when this doc becomes active, but only for graphs
+    that both READ a foreign doc and WRITE a bake target -- everything else
+    activates with zero extra work (and the commit path itself is signature-
+    cached, so an unchanged upstream costs one evaluation of small graphs)."""
+    g = WS.graphs.get(did)
+    if g is None:
+        return
+    reads_foreign = any(
+        n.get("type") in ("Layer", "Layer group", "Mask")
+        and (n.get("params") or {}).get("doc") not in ("", None, did)
+        for n in g.nodes.values())
+    writes_bake = any(n.get("type") in ("Layer out", "Mask out")
+                      for n in g.nodes.values())
+    if reads_foreign and writes_bake:
+        try:
+            g.commit_layer_outputs()
+        except Exception:
+            pass                    # a broken graph must not block activate
 
 
 @app.post("/api/doc")
@@ -1763,26 +2251,60 @@ def doc_ops():
 def _doc_ops_locked():
     d = request.json or {}
     act = d.get("action")
+    # every id-taking action shares one guard: a missing id is a client bug
+    # (400), an unknown id means the doc is gone (404) -- both used to 500
+    # (KeyError) or, worse, silently act on the WRONG document
+    if act in ("activate", "close", "rename"):
+        did = d.get("id")
+        if not did:
+            return jsonify(error="which document? '%s' needs an id" % act), 400
+        if did not in WS.docs:
+            return jsonify(error="no such document: %s (it may have been "
+                                 "closed)" % did), 404
     if act == "activate":
-        if d["id"] in WS.docs:
-            WS.active = d["id"]
-            # Remember who is looking at what, so the UI can say "Bob is on
-            # Second" instead of silently yanking everyone to the same doc.
-            cid = request.headers.get("X-Client", "")
-            if cid:
-                SYNC.setdefault("viewing", {})[cid] = d["id"]
+        # PER USER: only the caller's viewing entry moves. WS.active is kept
+        # as the default for clients that never activate anything (agents,
+        # old clients), so single-user behaviour is unchanged -- but one
+        # person switching docs no longer redirects everyone else's edits.
+        me = _req_uid()
+        if me:
+            SYNC["viewing"][me] = d["id"]
+        WS.active = d["id"]
+        _recommit_foreign_bakes(d["id"])
     elif act == "close":
-        doc = WS.docs.get(d["id"])
-        if doc is not None and getattr(doc, "_undo", None) and not d.get("force"):
+        doc = WS.docs[d["id"]]
+        if _doc_dirty(doc) and not d.get("force"):
             # Closing threw away every edit with no warning at all. Report it
             # and let the client confirm rather than deciding for the user.
             return jsonify(ok=False, needs_confirm=True,
                            name=doc.name, edits=len(doc._undo)), 409
-        WS.close(d["id"])
+        # cross-doc references: another doc's graph reading THIS doc turns
+        # into ':gone' transparent zeros the moment it closes -- warn first
+        refs = sorted({WS.docs[oid].name for oid, g in WS.graphs.items()
+                       if oid != d["id"] and oid in WS.docs
+                       and any((n.get("params") or {}).get("doc") == d["id"]
+                               for n in g.nodes.values())})
+        if refs and not d.get("force"):
+            return jsonify(ok=False, needs_confirm=True, name=doc.name,
+                           referrers=refs,
+                           error="other documents read this one through "
+                                 "their node graphs: %s -- closing blanks "
+                                 "those nodes (pass force to close anyway)"
+                                 % ", ".join(refs)), 409
+        if not WS.close(d["id"]):
+            # WS.close refuses to strand the app with zero documents; that
+            # used to be swallowed as ok:True
+            return jsonify(ok=False,
+                           error="cannot close the last document"), 200
     elif act == "rename":
         WS.docs[d["id"]].name = d.get("name") or WS.docs[d["id"]].name
     elif act == "settings":
-        doc = WS.docs.get(d.get("id"), WS.doc)
+        if d.get("id") and d["id"] not in WS.docs:
+            # a STALE id silently resized the ACTIVE document -- the exact
+            # wrong-target class of bug. Only fall back when no id was given.
+            return jsonify(error="no such document: %s (it may have been "
+                                 "closed)" % d["id"]), 404
+        doc = WS.docs[d["id"]] if d.get("id") else WS.docs[_viewing_doc_id()]
         if d.get("name"):
             doc.name = d["name"]
         try:
@@ -1888,14 +2410,53 @@ def text():
 @app.post("/api/fill")
 def fill():
     """Flood fill: {layer, x, y, tolerance, contiguous, source}. Source types:
-    color | gradient | pattern | node (any Fill-out node's image)."""
+    color | gradient | pattern | node (any Fill-out node's image) --
+    or a GENERATED source (R48): {"type": "generated", "style": "scribble"|
+    "line"|"hatch"|"both", ...generator params, "sample": "layer"|
+    "composite", "softness"} fills the bucket region with scribble/hatch
+    strokes instead of flat content (every stroke journaled as paint)."""
     d = request.json or {}
     try:
-        content = _fill_content(d.get("source"), DOC.height, DOC.width)
+        src = d.get("source") or {}
+        if src.get("type") == "generated":
+            kw = {}
+            for k in ("curl", "thickness", "density", "angle", "spacing",
+                      "opacity", "wobble", "hardness", "depth", "horizon",
+                      "perspective", "size", "size_jitter", "lean",
+                      "wind"):
+                if k in src:
+                    kw[k] = float(src[k])
+            if "weave" in src:
+                kw["weave"] = str(src["weave"])
+            if "element" in src:
+                kw["element"] = str(src["element"])
+            if "color2" in src:
+                kw["color2"] = tuple(src["color2"])
+            if "custom" in src:
+                kw["custom"] = src["custom"]
+            if "color" in src:
+                kw["color"] = tuple(src["color"])
+            n = DOC.fill_generated(
+                d["layer"], int(d["x"]), int(d["y"]),
+                style=str(src.get("style", "both")),
+                tolerance=float(d.get("tolerance", 0.12)),
+                contiguous=bool(d.get("contiguous", True)),
+                selection=d.get("selection") or None,
+                sel_invert=bool(d.get("sel_invert")),
+                softness=float(src.get("softness", 2.0)),
+                sample=str(src.get("sample", "layer")),
+                seed=src.get("seed"), **kw)
+            GRAPH.commit_layer_outputs()
+            return jsonify(ok=True, filled=0, strokes=int(n))
+        content = _fill_content(src or None, DOC.height, DOC.width)
         n = DOC.flood_fill(d["layer"], int(d["x"]), int(d["y"]), content,
                            tolerance=float(d.get("tolerance", 0.12)),
                            contiguous=bool(d.get("contiguous", True)),
-                           selection=d.get("selection") or None)
+                           selection=d.get("selection") or None,
+                           sel_invert=bool(d.get("sel_invert")),
+                           spec=(d.get("source") or {"type": "color"})
+                           if (d.get("source") or {}).get("type", "color")
+                           in ("color", "gradient", "pattern") else None)
         GRAPH.commit_layer_outputs()
         return jsonify(ok=True, filled=n)
     except Exception as e:
@@ -2033,13 +2594,34 @@ def join():
 
 @app.post("/api/presence/name")
 def presence_name():
-    """Set the display name for this client (no invite needed on the host side)."""
+    """Set the display name for this USER (alias of /api/editors/name; no
+    invite needed on the host side)."""
+    # This route used to key names AND viewing by the TAB id while the
+    # roster and /api/editors/name keyed by USER id -- so a person who set
+    # their name here saw a ghost chip of themselves (their uid row unnamed,
+    # their tab id row named). One map, one key: the user id.
     d = request.json or {}
-    cid = request.headers.get("X-Client", "")
-    if not cid:
-        return jsonify(error="send an X-Client header"), 400
-    SYNC["names"][cid] = str(d.get("name", "")).strip()[:24]
-    SYNC.setdefault("viewing", {}).setdefault(cid, WS.active)
+    me = _req_uid()
+    if not me:
+        return jsonify(error="send an X-User (or X-Client) header"), 400
+    SYNC["names"][me] = str(d.get("name", "")).strip()[:24]
+    SYNC["viewing"].setdefault(me, WS.active)
+    return jsonify(ok=True)
+
+
+@app.post("/api/presence/activity")
+def presence_activity():
+    """What the requesting user is doing right now: {"tool", "layer"}.
+    Stored per user and echoed in the SSE feed and /api/editors so presence
+    chips can say 'painting on Leaves' instead of just a name. Excluded from
+    the rev bump (see _bump_rev): a ping changes nothing in the workspace."""
+    d = request.json or {}
+    me = _req_uid()
+    if not me:
+        return jsonify(error="send an X-User (or X-Client) header"), 400
+    SYNC["activity"][me] = {"tool": str(d.get("tool", ""))[:24],
+                            "layer": str(d.get("layer", ""))[:24],
+                            "at": time.time()}
     return jsonify(ok=True)
 
 
@@ -2157,6 +2739,176 @@ def transform():
                       layer=d.get("layer") or None)
         GRAPH.commit_layer_outputs()
         return jsonify(ok=True)
+    except Exception as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.post("/api/scribble")
+def scribble():
+    """R47 scribble brush: {"layer", "x", "y", "radius", "curl" 0..1,
+    "thickness", "color", "opacity", "hardness", "density", "length",
+    "seed"?, "selection"?, "sel_invert"?, "feather"?, "record"}. Curl-noise
+    strands painted as ordinary journaled strokes; a (feathered) selection
+    shapes and fades the scribble. Returns {ok, strokes}."""
+    d = request.json or {}
+    try:
+        n = DOC.scribble(
+            d["layer"], float(d["x"]), float(d["y"]),
+            radius=float(d.get("radius", 60)),
+            curl=float(d.get("curl", 0.5)),
+            thickness=float(d.get("thickness", 1.6)),
+            color=tuple(d.get("color", (0, 0, 0))),
+            opacity=float(d.get("opacity", 0.85)),
+            hardness=float(d.get("hardness", 0.7)),
+            density=float(d.get("density", 1.0)),
+            length=float(d.get("length", 1.0)),
+            seed=d.get("seed"),
+            selection=d.get("selection") or None,
+            sel_invert=bool(d.get("sel_invert")),
+            feather=float(d.get("feather", 0.0)),
+            poly=d.get("poly"),
+            record=bool(d.get("record", True)))
+        GRAPH.commit_layer_outputs()
+        return jsonify(ok=True, strokes=int(n))
+    except Exception as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.post("/api/hatchfill")
+def hatchfill():
+    """R47 line/hatch shading brush: {"layer", "x"?, "y"?, "radius",
+    "angle", "spacing", "thickness", "mode": "line"|"hatch"|"both"|
+    "weave"|"cross"|"stitch" (R49 textile modes; "weave" also takes a
+    "weave": "plain"|"twill"|"satin"|"basket" interlacement),
+    "color", "opacity", "hardness", "wobble", "cross_angle"?, "seed"?,
+    "selection"?, "sel_invert"?, "feather"?, "area": "brush"|"selection",
+    "record"}. 'both' is value-aware: composite darks cross-hatch, lights
+    fade to sparse broken lines. area='selection' shades the whole
+    (feathered) gate. Returns {ok, strokes}."""
+    d = request.json or {}
+    try:
+        n = DOC.hatch_fill(
+            d["layer"], x=d.get("x"), y=d.get("y"),
+            radius=float(d.get("radius", 80)),
+            angle=float(d.get("angle", 45)),
+            spacing=float(d.get("spacing", 7)),
+            thickness=float(d.get("thickness", 1.2)),
+            mode=d.get("mode", "both"),
+            color=tuple(d.get("color", (0, 0, 0))),
+            opacity=float(d.get("opacity", 0.9)),
+            hardness=float(d.get("hardness", 0.75)),
+            wobble=float(d.get("wobble", 0.6)),
+            cross_angle=d.get("cross_angle"),
+            weave=d.get("weave", "twill"),
+            depth=float(d.get("depth", 0.0)),
+            poly=d.get("poly"),
+            seed=d.get("seed"),
+            selection=d.get("selection") or None,
+            sel_invert=bool(d.get("sel_invert")),
+            feather=float(d.get("feather", 0.0)),
+            area=d.get("area", "brush"),
+            record=bool(d.get("record", True)))
+        GRAPH.commit_layer_outputs()
+        return jsonify(ok=True, strokes=int(n))
+    except Exception as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.post("/api/scatter")
+def scatter():
+    """R53 perspective scatter: populate a region with vegetation, rocks,
+    water ripples, or custom elements. {"layer", element: "grass"|
+    "flowers"|"rocks"|"pebbles"|"reeds"|"ripples", or "custom": [unit-
+    space strokes], region via "poly": [[x,y]..] (+"feather") -- the
+    ATOMIC, race-free way -- or "selection"/"x","y","radius";
+    "horizon" (screen y), "perspective" 0..1 (0 = top-down: fewer,
+    uniform; 1 = across a field: many small far, few large near),
+    "density", "size", "size_jitter", "color", "color2", "opacity",
+    "lean", "wind", "depth", "seed"}. Returns {ok, strokes}."""
+    d = request.json or {}
+    try:
+        kw = {}
+        for k in ("horizon", "perspective", "density", "size",
+                  "size_jitter", "opacity", "lean", "wind", "depth",
+                  "feather", "radius"):
+            if d.get(k) is not None:
+                kw[k] = float(d[k])
+        n = DOC.scatter_fill(
+            d["layer"], x=d.get("x"), y=d.get("y"),
+            element=d.get("element", "grass"),
+            area=d.get("area", "selection" if (d.get("poly")
+                                               or d.get("selection"))
+                       else "brush"),
+            selection=d.get("selection") or None,
+            sel_invert=bool(d.get("sel_invert")),
+            poly=d.get("poly"),
+            color=tuple(d.get("color", (0.30, 0.40, 0.24))),
+            color2=(tuple(d["color2"]) if d.get("color2") else None),
+            custom=d.get("custom"),
+            seed=d.get("seed"), record=bool(d.get("record", True)), **kw)
+        GRAPH.commit_layer_outputs()
+        return jsonify(ok=True, strokes=int(n))
+    except Exception as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.get("/api/textile/preview.png")
+def textile_preview():
+    """Live swatch for the textile tool (R50): renders the current thread/
+    pattern settings on a scratch document with the REAL generators --
+    what you see is exactly what a click will lay down. Query params:
+    mode, weave, angle, spacing, thickness, depth, color (rrggbb hex),
+    seed. Never touches the workspace or the journal."""
+    import io as _io
+    from PIL import Image as _Img
+    q = request.args
+    d = Document(190, 140)
+    d.layers[0].pixels[..., :3] = np.float32(0.955)
+    d.layers[0].pixels[..., 3] = 1.0
+    l = d.add_layer("swatch")
+    cx = q.get("color", "26243f")
+    col = tuple(int(cx[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+    depth = float(q.get("depth", 0))
+    try:
+        d.hatch_fill(l.id, 95, 70, radius=62,
+                     mode=q.get("mode", "weave"),
+                     weave=q.get("weave", "twill"),
+                     angle=float(q.get("angle", 0)),
+                     spacing=float(q.get("spacing", 7)),
+                     thickness=float(q.get("thickness", 1.4)),
+                     depth=depth, color=col,
+                     opacity=float(q.get("opacity", 0.95)),
+                     seed=int(q.get("seed", 7)), record=False)
+    except Exception as e:
+        return jsonify(error=str(e)), 400
+    if depth > 0:
+        l.relief = 0.5 + depth
+    comp = np.clip(d.composite(), 0, 1)
+    im = _Img.fromarray((comp[..., :3] * 255).astype(np.uint8))
+    buf = _io.BytesIO()
+    im.save(buf, "PNG")
+    resp = app.response_class(buf.getvalue(), mimetype="image/png")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.post("/api/pwarp")
+def pwarp():
+    """R47 perspective warp: {"layer", "quad": [[x,y] TL,TR,BR,BL],
+    "bbox"?: [x0,y0,x1,y1] (default: selection bbox, else layer content),
+    "selection"?, "sel_invert"?, "feather"?}. Cuts the (gated) source
+    region and re-projects it so its corners land on the quad — a
+    journaled pixel-free op, replayed by the same applier."""
+    d = request.json or {}
+    try:
+        ok = DOC.warp_perspective(
+            d["layer"], d["quad"], bbox=d.get("bbox"),
+            selection=d.get("selection") or None,
+            sel_invert=bool(d.get("sel_invert")),
+            feather=float(d.get("feather", 0.0)),
+            record=bool(d.get("record", True)))
+        GRAPH.commit_layer_outputs()
+        return jsonify(ok=bool(ok))
     except Exception as e:
         return jsonify(error=str(e)), 400
 
@@ -2467,6 +3219,34 @@ def strokes_join():
     return jsonify(ok=True, id=sid)
 
 
+@app.post("/api/strokes/restyle")
+def strokes_restyle():
+    """Edit past strokes' recorded brush and re-render them.
+
+    Body: {ids, media?: "oil"|"acrylic"|"water"|"none", material?: name or
+    dict or "none", color?: [r,g,b], radius?, opacity?, load?, mix?}. The
+    medium is PER STROKE (changing the brush panel never touches what is
+    already painted); this is the one door for changing it after the fact."""
+    d = request.json or {}
+    ids = list(d.get("ids") or [])
+    unknown = [s for s in ids if not any(k["id"] == s for k in DOC.strokes)]
+    if unknown:
+        # name the ids rather than KeyError-ing on the first: a stale panel
+        # selection after an undo is the normal way to get here
+        return jsonify(error="no such stroke(s): %s"
+                       % ", ".join(unknown)), 400
+    try:
+        r = DOC.restyle_strokes(ids,
+                                **{k: d.get(k) for k in DOC.RESTYLE_KEYS
+                                   if d.get(k) is not None})
+    except (ValueError, KeyError) as e:
+        # ValueError carries the engine's own wording -- including the
+        # faithfulness gate's "content that was not painted as strokes"
+        return jsonify(error=str(e)), 400
+    GRAPH.commit_layer_outputs()
+    return jsonify(ok=True, **r)
+
+
 @app.post("/api/nudge")
 def nudge():
     """Push recorded stroke PATHS around instead of smearing pixels.
@@ -2480,7 +3260,9 @@ def nudge():
         n = DOC.nudge_strokes(d["layer"], d.get("points") or [],
                               radius=float(d.get("radius", 40)),
                               strength=float(d.get("strength", 1.0)),
-                              record=bool(d.get("record", True)))
+                              record=bool(d.get("record", True)),
+                              selection=d.get("selection"),
+                              sel_invert=bool(d.get("sel_invert")))
     except Exception as e:
         return jsonify(error=str(e)), 400
     GRAPH.commit_layer_outputs()
@@ -2653,7 +3435,11 @@ def workspace_save():
                    "arrays": {"data": np.frombuffer(a["data"], np.uint8)}}
                   for k, a in ASSETS.items()]
     data = save_workspace(WS.docs, WS.graphs, WS.active,
-                          extras=list(WS.extras) + asset_secs)
+                          extras=list(WS.extras) + asset_secs,
+                          # P3.1: ?light=1 -> journal-first file (pixels of
+                          # replay-faithful layers are rebuilt on open)
+                          cache_pixels=not request.args.get("light"))
+    _mark_saved()                # everything on disk: docs read clean now
     return send_file(io.BytesIO(data), mimetype="application/octet-stream",
                      as_attachment=True, download_name="workspace.lews")
 
@@ -2666,6 +3452,7 @@ def _load_workspace_bytes(data):
     for sec in extras:
         (ours if sec.get("kind") == "lestudio.asset" else foreign).append(sec)
     WS.docs, WS.graphs, WS.active, WS.extras = docs, graphs, active, foreign
+    SYNC["viewing"].clear()      # every per-user doc choice is now stale
     for sec in ours:                                # uploaded models ride along
         register_asset(sec["meta"]["name"], sec["arrays"]["data"].tobytes(),
                        sec["meta"]["ext"], aid=sec.get("id"))
@@ -2712,6 +3499,7 @@ def autosave_write():
     with open(tmp, "wb") as f:
         f.write(data)
     os.replace(tmp, _AUTOSAVE_PATH)                 # atomic: never half a file
+    _mark_saved()                # the crash net holds this state: docs clean
     return jsonify(ok=True, bytes=len(data))
 
 
@@ -2949,6 +3737,23 @@ def layer_edit():
     """Layer ops: {"action": "add"|"delete"|"edit"|"duplicate"|"merge_down"|"move", "id"?, plus edit props: name, visible, opacity, blend, mask, mask_invert, alpha_lock, clip}."""
     d = request.json or {}
     act = d.get("action")
+    # ONE guard for every id-taking action. Before this, each action failed
+    # its own way: delete of an unknown id silently no-opped (after burning
+    # an undo snapshot), move KeyError'd to a 500, edit had a private check.
+    if act in ("duplicate", "merge_down", "clear", "remove", "delete",
+               "fill", "flip", "move", "edit"):
+        lid = d.get("id")
+        if not lid:
+            return jsonify(error="which layer? '%s' needs a layer id"
+                                 % act), 400
+        try:
+            DOC.layer(lid)
+        except KeyError:
+            return jsonify(error="no such layer: %s - pick another in the "
+                                 "layer list" % lid), 400
+    if act == "move" and d.get("index") is None:
+        return jsonify(error="move needs an index (0 = bottom of the "
+                             "stack)"), 400
     if act == "add":
         _nl = DOC.add_layer(d.get("name"), below=d.get("below"))
         GRAPH.commit_layer_outputs()
@@ -3004,20 +3809,19 @@ def layer_edit():
                                        "tilt_x", "tilt_y", "curve", "dome",
                                        "field",
                                        "field_mode", "field_strength", "curve_axis", "curve_profile", "dome_profile", "locked", "relief", "gravity", "gravity_angle", "optical", "media_res",
-                                  "media_time")}
+                                  "media_time", "paint_gloss")}
         if "mask" in d:
             props["mask"] = d.get("mask")
         if "bg" in d:                    # None -> transparent sheet
             props["bg"] = d.get("bg")
-        if not d.get("id"):
-            # a missing id 500'd with "no such item: None"
-            return jsonify(error="which layer? this needs a layer id"), 400
+        # id existence is covered by the shared guard above
         try:
-            DOC.layer(d["id"])
-        except KeyError:
-            return jsonify(error="layer %s is gone - pick another in the "
-                                 "layer list" % d["id"]), 400
-        DOC.edit_layer(d["id"], **props)
+            DOC.edit_layer(d["id"], **props)
+        except ValueError as e:
+            # a string opacity used to return ok, poison every composite
+            # with a 500 AND save into the .lews -- the model now validates
+            # and this surfaces its (helpful) message as a client error
+            return jsonify(error=str(e)), 400
         GRAPH.commit_layer_outputs()
     elif act:
         return jsonify(error="unknown layer action: %r" % act), 400
@@ -3029,8 +3833,19 @@ def group_edit():
     """Layer group ops: {"action": "add"|"delete"|"edit"|"assign", ...}."""
     d = request.json or {}
     act = d.get("action")
+    if act in ("remove", "edit"):
+        gid = d.get("id")
+        if not gid or not any(g["id"] == gid for g in DOC.groups):
+            return jsonify(error="no such group: %s" % gid), 400
     if act == "add":
-        g = DOC.add_group(d.get("name"), d.get("layers", []))
+        want = d.get("layers", []) or []
+        known = {l.id for l in DOC.layers}
+        if want and not any(x in known for x in want):
+            # a group of only unknown layer ids is an empty group nobody
+            # asked for -- the ids are stale (undo, another user's delete)
+            return jsonify(error="none of those layers exist any more: %s"
+                                 % ", ".join(map(str, want))), 400
+        g = DOC.add_group(d.get("name"), want)
         GRAPH.commit_layer_outputs()
         return jsonify(ok=True, group=g)
     if act == "remove":
@@ -3046,6 +3861,18 @@ def mask_edit():
     """Mask ops: {"action": "add"|"delete"|"edit"|"from_selection", ...}. Attach to a layer via /api/layer edit {mask: id}."""
     d = request.json or {}
     act = d.get("action")
+    # same shared guard as /api/layer: unknown ids answered plainly, not 500
+    if act in ("duplicate", "remove", "edit", "move"):
+        mid = d.get("id")
+        if not mid:
+            return jsonify(error="which mask? '%s' needs a mask id"
+                                 % act), 400
+        try:
+            DOC.mask_by_id(mid)
+        except KeyError:
+            return jsonify(error="no such mask: %s" % mid), 400
+    if act == "move" and d.get("index") is None:
+        return jsonify(error="move needs an index"), 400
     if act == "add":
         m = DOC.add_mask(d.get("name"))
         return jsonify(ok=True, mask=m.meta())
@@ -3230,6 +4057,26 @@ def paint():
                 warn = ("this layer clips onto %r, which is empty here — "
                         "the paint shows only where the base has pixels"
                         % base.name)
+        if warn is None:
+            # STROKES UNDER OPAQUE PAINT (R11, found swarm-painting a
+            # portrait): a fix painted on a layer BELOW the flaw looks like
+            # a silent no-op — the stroke succeeds, the picture does not
+            # change, and nothing says why. If some visible, normal-blend
+            # layer above covers the whole stroke area opaquely, say so.
+            _idx = next((i for i, x in enumerate(DOC.layers)
+                         if x.id == _l.id), -1)
+            for _up in DOC.layers[_idx + 1:]:
+                if (not _up.visible
+                        or float(getattr(_up, "opacity", 1.0)) < 0.98
+                        or str(getattr(_up, "blend", "normal")) != "normal"):
+                    continue        # translucent / blended layers show through
+                _a = _up.pixels[y0:y1:4, x0:x1:4, 3]
+                if _a.size and float(_a.min(initial=1.0)) > 0.92:
+                    warn = ("that landed UNDER %r, which covers this area "
+                            "opaquely — the stroke is saved but hidden; "
+                            "paint on %r or a layer above it to see it"
+                            % (_up.name, _up.name))
+                    break
     try:
         try:
             resp = _paint_dispatch(d, mode)
@@ -3278,7 +4125,9 @@ def _paint_dispatch(d, mode):
                   radius=float(d.get("radius", 26)),
                   strength=float(d.get("opacity", 0.7)),
                   record=bool(d.get("record", True)),
-                  stroke_new=bool(d.get("record", True)))
+                  stroke_new=bool(d.get("record", True)),
+                  selection=d.get("selection"),
+                  sel_invert=bool(d.get("sel_invert")))
     elif mode == "blend":
         # the BLENDER: no pigment, works the wet paint already there. Unlike
         # smudge this is a recorded stroke, so the layer keeps stroke editing
@@ -3287,11 +4136,15 @@ def _paint_dispatch(d, mode):
                          strength=float(d.get("opacity", 0.6)),
                          brush=d.get("brush"),
                          record=bool(d.get("record", True)),
-                         stroke_new=bool(d.get("record", True)))
+                         stroke_new=bool(d.get("record", True)),
+                         selection=d.get("selection"),
+                         sel_invert=bool(d.get("sel_invert")))
     elif mode == "smudge":
         DOC.smudge(d["layer"], d["points"], radius=float(d.get("radius", 12)),
                    strength=float(d.get("opacity", 0.6)), brush=d.get("brush"),
-                   record=bool(d.get("record", True)))
+                   record=bool(d.get("record", True)),
+                   selection=d.get("selection"),
+                   sel_invert=bool(d.get("sel_invert")))
     elif mode in ("erase_strokes", "erase_top"):
         n = DOC.erase_strokes(d["layer"], d["points"],
                               radius=float(d.get("radius", 12)),
@@ -3309,7 +4162,9 @@ def _paint_dispatch(d, mode):
                         record=bool(d.get("record", True)))
     elif mode == "heal":
         DOC.heal(d["layer"], d["points"], radius=float(d.get("radius", 14)),
-                 record=bool(d.get("record", True)))
+                 record=bool(d.get("record", True)),
+                 selection=d.get("selection"),
+                 sel_invert=bool(d.get("sel_invert")))
     elif mode == "clone":
         DOC.clone(d["layer"], d["points"], d["source"],
                   radius=float(d.get("radius", 12)),
@@ -3393,6 +4248,989 @@ def _paint_dispatch(d, mode):
     return jsonify(ok=True, sid=sid, patch=patch)
 
 
+# --------------------------------------------------------------------------
+# R17: the leCore bridge -- style transfer, dream seeds, the studio sage,
+# and a GLSL export of the grade chain. All lazy: leStudio runs fine
+# without leCore on the path; these endpoints then answer 503 honestly.
+
+def composite_png_array():
+    """The flattened picture as float RGBA (white ground), shared by the
+    leCore bridge endpoints."""
+    c = DOC.composite()
+    flat = c[..., :3] * c[..., 3:4] + 1.0 * (1 - c[..., 3:4])
+    return np.dstack([np.clip(flat, 0, 1).astype(np.float32),
+                      np.ones(flat.shape[:2], np.float32)])
+
+
+_LECORE = {"tried": False}
+_LECORE_LOCK = threading.Lock()
+
+
+def _lecore():
+    """Import the leCore pieces once; None (with a reason) if unavailable."""
+    with _LECORE_LOCK:
+        if not _LECORE["tried"]:
+            _LECORE["tried"] = True
+            try:
+                from holographic.materials_and_texture.holographic_colortransfer \
+                    import color_transfer
+                from holographic.rendering.holographic_postfx import chain_to_glsl
+                from holographic.sampling_and_signal.holographic_hdrift \
+                    import train_image_drift, generate_images
+                _LECORE.update(ct=color_transfer, glsl=chain_to_glsl,
+                               train=train_image_drift, gen=generate_images)
+            except Exception as e:                      # not installed: honest 503
+                _LECORE["err"] = str(e)
+        return _LECORE
+
+
+def _sage():
+    """The studio's own leCore mind, sharing the SAME memory store the
+    painting sessions teach ('lecore_memory') -- so every law learned while
+    dogfooding is on tap for agents (/api/advise) and the Sage panel."""
+    with _LECORE_LOCK:
+        if "mind" not in _LECORE and "mind_err" not in _LECORE:
+            try:
+                import os as _os
+                from lecore import autoboot
+                # the store is found by PARTITION (an absolute path wins over
+                # whatever directory the server happens to run from): env,
+                # then ./lecore_memory, then the house partition
+                part = _os.environ.get("LECORE_PARTITION")
+                if not part:
+                    for cand in ("lecore_memory", "/root/work/lecore_memory"):
+                        if _os.path.isdir(cand):
+                            part = _os.path.abspath(cand)
+                            break
+                _LECORE["mind"] = autoboot(partition=part)
+                _LECORE["mind_part"] = part
+            except Exception as e:
+                _LECORE["mind_err"] = str(e)
+        return _LECORE.get("mind")
+
+
+def _ref_image_from(d):
+    """A reference image as float RGB HxWx3 from one of: image_b64 (data
+    URL or raw base64 PNG), path (server-side file), layer (a layer id)."""
+    import base64 as _b64
+    import io as _io
+    from PIL import Image as _PImage
+    if d.get("image_b64"):
+        raw = _b64.b64decode(d["image_b64"].split(",")[-1])
+        im = _PImage.open(_io.BytesIO(raw)).convert("RGB")
+        return np.asarray(im, np.float32) / 255.0
+    if d.get("path"):
+        im = _PImage.open(d["path"]).convert("RGB")
+        return np.asarray(im, np.float32) / 255.0
+    if d.get("layer"):
+        l = DOC.layer(d["layer"])
+        a = l.pixels
+        return (a[..., :3] * a[..., 3:4]).astype(np.float32)
+    raise ValueError("give a reference: image_b64, path, or layer")
+
+
+@app.post("/api/style/match")
+def style_match():
+    """MATCH THE MOOD: grade this painting toward a reference image's colour
+    statistics (leCore colour transfer, Reinhard/covariance) and land the
+    result as a NEW top layer, so the original stays untouched underneath.
+    {"image_b64"|"path"|"layer", "mode": "covariance"|"meanstd",
+    "strength": 0..1, "name"?}. Moves colour, never content."""
+    lc = _lecore()
+    if "ct" not in lc:
+        return jsonify(error="leCore is not available here: %s"
+                             % lc.get("err", "not on PYTHONPATH")), 503
+    d = request.json or {}
+    try:
+        ref = _ref_image_from(d)
+    except (ValueError, KeyError, OSError) as e:
+        return jsonify(error=str(e)), 400
+    comp = composite_png_array()
+    graded = lc["ct"](comp[..., :3], ref,
+                      mode=str(d.get("mode", "covariance")),
+                      strength=float(d.get("strength", 1.0)))
+    out = np.dstack([np.clip(graded, 0, 1).astype(np.float32),
+                     np.ones(graded.shape[:2], np.float32)])
+    l = DOC.add_layer(d.get("name") or "Match",
+                      pixels=_gated_output(out, d), asset=True)
+    return jsonify(ok=True, id=l.id)
+
+
+_DREAMS = []
+_DREAM_PTS = []        # raw-space feature vectors of the last batch (R21)
+
+
+def _taste_path():
+    import os as _os
+    part = _LECORE.get("mind_part") or "/root/work/lecore_memory"
+    return _os.path.join(part, "lestudio_taste.json")
+
+
+def _taste_load():
+    import json as _json
+    import os as _os
+    try:
+        if _os.path.exists(_taste_path()):
+            return _json.load(open(_taste_path()))
+    except Exception:
+        pass
+    return []
+
+
+def _taste_save(vecs):
+    import json as _json
+    try:
+        _json.dump(vecs, open(_taste_path(), "w"))
+    except Exception:
+        pass                                   # taste is best-effort
+
+
+@app.post("/api/dream/fave")
+def dream_fave():
+    """TASTE (R21): star dream #i from the last /api/dream. The dream's
+    raw splat-feature vector is recorded as a SUCCESS (the semantic-compass
+    pattern: remember what worked, bias future candidates toward it) and
+    persisted with the leCore partition, so future /api/dream batches lean
+    toward the starred look -- across sessions, for humans and agents
+    alike. {"i"}."""
+    d = request.json or {}
+    try:
+        vec = _DREAM_PTS[int(d.get("i", 0))]
+    except (IndexError, ValueError, TypeError):
+        return jsonify(error="no such dream -- run /api/dream first"), 400
+    taste = _taste_load()
+    taste.append([round(float(v), 5) for v in vec])
+    _taste_save(taste[-64:])                   # keep the last 64 stars
+    return jsonify(ok=True, stars=len(taste))
+
+
+
+def _splat_code(img, K):
+    """The compact splat code of a color image (R18): K luminance-placed
+    Gaussians (matching pursuit + joint refit) with PER-CHANNEL amplitudes
+    solved jointly against the shared basis. ~7 floats per splat instead of
+    a pixel buffer -- Devin's 'generate instead of store': the code is small
+    enough to pass around, and rendering it is deterministic anywhere.
+
+    R20: placement is COLOUR-AWARE adaptively. Luminance placement is blind
+    to passages where colour differs at equal brightness, so after the
+    first solve a share of the budget goes to splats placed on the COLOUR
+    residual -- sized by how much of the remaining error actually lives in colour
+    (measured: +1.6 dB on a portrait, and the adaptive share avoids the
+    -0.5 dB a fixed share cost on a luminance-dominant abstract).
+    Returns (splats [(cy,cx,amp,sigma)...], A (K,3) channel amps)."""
+    from holographic.rendering.holographic_splat import splat_fit, _gaussian
+    K = int(K)
+    lum = img.mean(-1).astype(float)
+    H, W = lum.shape
+
+    def basis(ss):
+        return np.stack([_gaussian((H, W), cy, cx, sg).ravel()
+                         for (cy, cx, _, sg) in ss], axis=1)
+
+    k1 = max(8, int(K * 0.8))
+    s = splat_fit(lum, k1, refit=True)
+    G = basis(s)
+    A = np.linalg.lstsq(G, img.reshape(-1, 3), rcond=None)[0]
+    if K > k1:
+        R = img.reshape(-1, 3) - G @ A
+        # how much of the remaining error is COLOUR (not luminance)?
+        lum_res = np.abs(R.mean(1)).sum()
+        col_res = np.abs(R - R.mean(1, keepdims=True)).sum()
+        share = float(col_res / max(col_res + lum_res, 1e-9))
+        k_col = int(round((K - k1) * min(1.0, share * 1.6)))
+        extra = []
+        if k_col > 0:
+            rfield = np.abs(R).max(1).reshape(H, W)
+            extra += splat_fit(rfield, k_col, refit=False)
+        if (K - k1 - k_col) > 0:
+            lfield = np.abs(R.mean(1)).reshape(H, W)
+            extra += splat_fit(lfield, K - k1 - k_col, refit=False)
+        s = s + extra
+        G = basis(s)
+        A = np.linalg.lstsq(G, img.reshape(-1, 3), rcond=None)[0]
+    return s, A
+
+
+def _splat_render_color(splats, A, shape):
+    from holographic.rendering.holographic_splat import _gaussian
+    out = np.zeros(shape + (3,))
+    for j, (cy, cx, _, sg) in enumerate(splats):
+        out += _gaussian(shape, cy, cx, sg)[..., None] * A[j][None, None, :]
+    return np.clip(out, 0, 1)
+
+
+
+
+def _gated_output(out, d):
+    """Phase G3: an active selection FOCUSES a generated layer -- output
+    alpha multiplies by the gate, so generation lands only inside the
+    boundary the artist chose (and the baked asset is born gated)."""
+    sel = d.get("selection")
+    if not sel:
+        return out
+    g = DOC._resolve_gate(sel, bool(d.get("sel_invert")),
+                          feather=float(d.get("sel_feather", 0.0)))
+    if g is None:
+        return out
+    out = out.copy()
+    out[..., 3] = out[..., 3] * g
+    return out
+
+@app.post("/api/splatify")
+def splatify():
+    """SPLATIFY (R18): re-render this painting as K colour Gaussian splats
+    -- an abstraction dial (K=32 pointillist mood, K=160 dreamy, K=400
+    mosaic-faithful; audited leCore splat suite, matching pursuit + joint
+    per-channel refit). Lands as a NEW top layer and returns the COMPACT
+    SPLAT CODE ({splats, colors}, ~7 floats each), which regenerates the
+    layer deterministically anywhere -- pass the code, not the pixels.
+    {"k": 16..600, "name"?, "opacity"?}."""
+    lc = _lecore()
+    if "ct" not in lc:
+        return jsonify(error="leCore is not available here: %s"
+                             % lc.get("err", "not on PYTHONPATH")), 503
+    from PIL import Image as _PImage
+    d = request.json or {}
+    K = max(8, min(600, int(d.get("k", 160))))
+    comp = composite_png_array()[..., :3]
+    sw = 180
+    sh = max(2, int(round(DOC.height * sw / max(DOC.width, 1))))
+    small = np.asarray(_PImage.fromarray(
+        (comp * 255).astype(np.uint8)).resize((sw, sh)), np.float32) / 255.0
+    splats, A = _splat_code(small.astype(float), K)
+    r = _splat_render_color(splats, A, (sh, sw))
+    up = np.asarray(_PImage.fromarray((r * 255).astype(np.uint8)).resize(
+        (DOC.width, DOC.height), _PImage.LANCZOS), np.float32) / 255.0
+    out = np.dstack([up, np.ones(up.shape[:2], np.float32)])
+    l = DOC.add_layer(d.get("name") or ("Splats x%d" % K),
+                      pixels=_gated_output(out, d), asset=True)
+    if d.get("opacity") is not None:
+        DOC.edit_layer(l.id, opacity=float(d["opacity"]))
+    return jsonify(ok=True, id=l.id, k=K, code={
+        "shape": [sh, sw],
+        "splats": [[round(float(cy), 3), round(float(cx), 3),
+                    round(float(sg), 3)] for (cy, cx, _, sg) in splats],
+        "colors": [[round(float(v), 5) for v in row] for row in A]})
+
+
+@app.post("/api/splats/morph")
+def splats_morph():
+    """SPLAT MORPH (R20): the painting flows into a reference image and
+    back, as Gaussian splats in motion. Both pictures become K-splat codes
+    at the same grid; splats are matched greedily (nearest centre, largest
+    energies first) and interpolated with an ease curve; every frame is
+    the same closed form the browser parity-renders, so the whole
+    animation is DETERMINISTIC and could be regenerated client-side from
+    the two codes alone. {"image_b64"|"path", "k"?, "frames"?, "fps"?,
+    "boomerang"?: true}. Returns the GIF."""
+    lc = _lecore()
+    if "ct" not in lc:
+        return jsonify(error="leCore is not available here: %s"
+                             % lc.get("err", "not on PYTHONPATH")), 503
+    from PIL import Image as _PImage
+    d = request.json or {}
+    K = max(16, min(300, int(d.get("k", 120))))
+    frames = max(6, min(72, int(d.get("frames", 30))))
+    fps = max(4, min(30, int(d.get("fps", 14))))
+    try:
+        ref = _ref_image_from(d)
+    except (ValueError, KeyError, OSError) as e:
+        return jsonify(error=str(e)), 400
+    sw = 200
+    sh = max(2, int(round(DOC.height * sw / max(DOC.width, 1))))
+    comp = composite_png_array()[..., :3]
+    a_img = np.asarray(_PImage.fromarray((comp * 255).astype(np.uint8))
+                       .resize((sw, sh)), np.float32) / 255.0
+    b_img = np.asarray(_PImage.fromarray(
+        (np.clip(ref, 0, 1) * 255).astype(np.uint8)).resize((sw, sh)),
+        np.float32) / 255.0
+    sa, Aa = _splat_code(a_img.astype(float), K)
+    sb, Ab = _splat_code(b_img.astype(float), K)
+    # peak-space parameters (the closed form both ends share)
+    ys, xs = np.mgrid[0:sh, 0:sw].astype(float)
+
+    def peaks(ss, A):
+        out = []
+        for j, (cy, cx, _, sg) in enumerate(ss):
+            g = np.exp(-0.5 * ((ys - cy) ** 2 + (xs - cx) ** 2) / (sg * sg))
+            nrm = float(np.sqrt((g * g).sum())) + 1e-12
+            out.append((float(cy), float(cx), float(sg), A[j] / nrm))
+        return out
+    pa, pb = peaks(sa, Aa), peaks(sb, Ab)
+    # match: biggest energies first, each takes its nearest unused partner
+    order = np.argsort([-float(np.abs(p[3]).sum()) for p in pa])
+    usedb = np.zeros(len(pb), bool)
+    pairs = []
+    for i in order:
+        cy, cx = pa[i][0], pa[i][1]
+        dists = [((pb[j][0] - cy) ** 2 + (pb[j][1] - cx) ** 2)
+                 if not usedb[j] else 1e18 for j in range(len(pb))]
+        j = int(np.argmin(dists))
+        usedb[j] = True
+        pairs.append((pa[i], pb[j]))
+    seq = list(range(frames))
+    if d.get("boomerang", True):
+        seq = seq + seq[-2:0:-1]
+    ims = []
+    for f in seq:
+        t = f / max(frames - 1, 1)
+        t = t * t * (3 - 2 * t)                       # smoothstep ease
+        out = np.zeros((sh, sw, 3))
+        for (a, b) in pairs:
+            cy = a[0] + (b[0] - a[0]) * t
+            cx = a[1] + (b[1] - a[1]) * t
+            sg = max(a[2] + (b[2] - a[2]) * t, 0.5)
+            col = a[3] + (b[3] - a[3]) * t
+            e = np.exp(-0.5 * ((ys - cy) ** 2 + (xs - cx) ** 2) / (sg * sg))
+            out += e[..., None] * col[None, None, :]
+        ims.append(_PImage.fromarray(
+            (np.clip(out, 0, 1) * 255).astype(np.uint8)).resize(
+            (sw * 2, sh * 2), _PImage.LANCZOS))
+    import io as _io2
+    buf = _io2.BytesIO()
+    ims[0].save(buf, "GIF", save_all=True, append_images=ims[1:],
+                duration=int(1000 / fps), loop=0)
+    from flask import Response
+    return Response(buf.getvalue(), mimetype="image/gif")
+
+
+@app.get("/api/splatify/code")
+def splatify_code():
+    """The COMPACT SPLAT CODE of the current painting, no layer created
+    (R19): ?k= splats (default 160). Alongside the unit-norm-basis
+    `colors`, the response carries `peak` colours -- closed-form
+    per-splat peak amplitudes, so ANY client can regenerate the picture
+    with pixel(x,y) = sum_j peak_j * exp(-0.5*((x-cx)^2+(y-cy)^2)/sigma^2)
+    at `shape` resolution: the front end renders exactly what the back end
+    authored, and only the ~4 KB code crosses the wire."""
+    lc = _lecore()
+    if "ct" not in lc:
+        return jsonify(error="leCore is not available here: %s"
+                             % lc.get("err", "not on PYTHONPATH")), 503
+    from PIL import Image as _PImage
+    K = max(8, min(600, int(request.args.get("k", 160))))
+    comp = composite_png_array()[..., :3]
+    sw = 180
+    sh = max(2, int(round(DOC.height * sw / max(DOC.width, 1))))
+    small = np.asarray(_PImage.fromarray(
+        (comp * 255).astype(np.uint8)).resize((sw, sh)), np.float32) / 255.0
+    splats, A = _splat_code(small.astype(float), K)
+    # peak-space colours: A is per unit-L2-norm basis; the closed form a
+    # client evaluates has peak 1, so divide by the numeric L2 norm of the
+    # RAW gaussian (edge-truncated splats included -- computed, not the
+    # sqrt(pi sigma^2) interior approximation)
+    ys, xs = np.mgrid[0:sh, 0:sw].astype(float)
+    peak = []
+    for j, (cy, cx, _, sg) in enumerate(splats):
+        g = np.exp(-0.5 * ((ys - cy) ** 2 + (xs - cx) ** 2) / (sg * sg))
+        nrm = float(np.sqrt((g * g).sum())) + 1e-12
+        peak.append([float(v) / nrm for v in A[j]])
+    return jsonify(ok=True, k=K, code={
+        "shape": [sh, sw],
+        "splats": [[round(float(cy), 4), round(float(cx), 4),
+                    round(float(sg), 4)] for (cy, cx, _, sg) in splats],
+        "colors": [[round(float(v), 6) for v in row] for row in A],
+        "peak": [[round(float(v), 8) for v in row] for row in peak]})
+
+
+def _splats_export_layers(K):
+    """R22: DEPTH-AWARE splat export. Each visible painted layer becomes
+    its own splat code (fit on its alpha-weighted content), lifted to that
+    pane's real depth (accumulated thickness + z_off, scaled by ?z_scale,
+    default 10) -- a layered glass painting leaves as a TRUE 3D splat
+    sculpture: parallax between panes survives in any 3DGS viewer.
+    ?fmt=json returns three.js records with per-splat z instead."""
+    import tempfile
+    from PIL import Image as _PImage
+    m = _sage()
+    if m is None:
+        return jsonify(error="sage unavailable: %s"
+                             % _LECORE.get("mind_err", "")), 503
+    try:
+        z_scale = float(request.args.get("z_scale", 10.0))
+    except ValueError:
+        return jsonify(error="z_scale must be a number"), 400
+    sw = 180
+    sh = max(2, int(round(DOC.height * sw / max(DOC.width, 1))))
+    painted = [l for l in DOC.layers
+               if l.visible and float(l.pixels[..., 3].max()) > 0]
+    if not painted:
+        return jsonify(error="nothing painted to export"), 400
+    per = max(12, K // len(painted))
+    records, colors = [], []
+    depth = 0.0
+    from holographic.rendering.holographic_splat import splat_fit, _gaussian
+    for l in painted:
+        z = (depth + float(getattr(l, "z_off", 0.0))) * z_scale
+        depth += float(getattr(l, "thickness", 1.0) or 1.0)
+        rgba = np.asarray(_PImage.fromarray(
+            (np.clip(l.pixels, 0, 1) * 255).astype(np.uint8)).resize(
+            (sw, sh)), np.float32) / 255.0
+        a = rgba[..., 3]
+        if float(a.max()) <= 0:
+            continue
+        field = (rgba[..., :3].mean(-1) * a).astype(float)
+        s = splat_fit(field, per, refit=True)
+        G = np.stack([_gaussian((sh, sw), cy, cx, sg).ravel()
+                      for (cy, cx, _, sg) in s], axis=1)
+        A = np.linalg.lstsq(G, (rgba[..., :3] * a[..., None]
+                                ).reshape(-1, 3), rcond=None)[0]
+        cols = np.clip(np.abs(A) / (np.abs(A).max(axis=1, keepdims=True)
+                                    + 1e-9), 0, 1)
+        for j, (cy, cx, amp, sg) in enumerate(s):
+            L3 = np.eye(3) / max(float(sg), 0.5)
+            records.append((np.array([float(cx), float(cy), z]),
+                            float(abs(amp)) + 1e-4, L3))
+            colors.append([float(v) for v in cols[j]])
+    if not records:
+        return jsonify(error="nothing painted to export"), 400
+    if request.args.get("fmt") == "json":
+        js = m.export_splats(records, fmt="json", colors=colors)
+        from flask import Response
+        return Response(js, mimetype="application/json")
+    with tempfile.NamedTemporaryFile(suffix=".ply", delete=False) as f:
+        pth = f.name
+    m.export_splats(records, path=pth, fmt="ply", colors=colors)
+    from flask import send_file
+    return send_file(pth, mimetype="application/octet-stream",
+                     as_attachment=True,
+                     download_name="painting_splats_3d.ply")
+
+
+@app.get("/api/splats/export.ply")
+def splats_export_ply():
+    """Export this painting as a STANDARD 3D-Gaussian-Splatting .ply
+    (?k=, default 300) -- opens in any 3DGS viewer. 2-D splats lifted to
+    the z=0 plane by leCore's exporter; colours are the per-splat channel
+    amplitudes, normalised. ?fmt=json returns the three.js billboard JSON
+    instead (the seed of a GPU front end that renders what the back end
+    authored -- same code, same picture)."""
+    lc = _lecore()
+    if "ct" not in lc:
+        return jsonify(error="leCore is not available here: %s"
+                             % lc.get("err", "not on PYTHONPATH")), 503
+    from PIL import Image as _PImage
+    K = max(8, min(800, int(request.args.get("k", 300))))
+    if request.args.get("scope") == "layers":
+        return _splats_export_layers(K)
+    comp = composite_png_array()[..., :3]
+    sw = 180
+    sh = max(2, int(round(DOC.height * sw / max(DOC.width, 1))))
+    small = np.asarray(_PImage.fromarray(
+        (comp * 255).astype(np.uint8)).resize((sw, sh)), np.float32) / 255.0
+    splats, A = _splat_code(small.astype(float), K)
+    cols = np.clip(np.abs(A) / (np.abs(A).max(axis=1, keepdims=True) + 1e-9),
+                   0, 1)
+    import tempfile
+    if request.args.get("fmt") == "json":
+        from lecore import autoboot as _ab           # exporter lives on the mind
+        m = _sage()
+        if m is None:
+            return jsonify(error="sage unavailable: %s"
+                                 % _LECORE.get("mind_err", "")), 503
+        js = m.export_splats_2d(splats, fmt="json", colors=cols.tolist())
+        from flask import Response
+        return Response(js, mimetype="application/json")
+    m = _sage()
+    if m is None:
+        return jsonify(error="sage unavailable: %s"
+                             % _LECORE.get("mind_err", "")), 503
+    with tempfile.NamedTemporaryFile(suffix=".ply", delete=False) as f:
+        pth = f.name
+    m.export_splats_2d(splats, path=pth, fmt="ply", colors=cols.tolist())
+    from flask import send_file
+    return send_file(pth, mimetype="application/octet-stream",
+                     as_attachment=True,
+                     download_name="painting_splats.ply")
+
+
+@app.post("/api/dream")
+def dream():
+    """DREAM SEEDS: train leCore's holographic drift model (HDRIFT) on this
+    painting -- the composite plus each visible layer as its own view -- and
+    generate soft light-and-colour compositions in its mood. Honest scope:
+    HDRIFT v1 drifts in splat space, so dreams are bokeh-soft mood fields,
+    not pictures -- underpaintings, colour studies, backdrops. {"n": <=8,
+    "seed"?, "k"? splats}. Returns thumbnails; /api/dream/place lands one
+    as a layer."""
+    lc = _lecore()
+    if "train" not in lc:
+        return jsonify(error="leCore is not available here: %s"
+                             % lc.get("err", "not on PYTHONPATH")), 503
+    import base64 as _b64
+    import io as _io
+    from PIL import Image as _PImage
+    d = request.json or {}
+    n = max(1, min(8, int(d.get("n", 6))))
+    seed = int(d.get("seed", 0) or 0)
+    k = max(4, min(24, int(d.get("k", 12))))
+    comp = composite_png_array()[..., :3]
+    views = []
+    from PIL import Image as _PI2
+    for pth in (d.get("paths") or [])[:8]:
+        try:
+            views.append(np.asarray(_PI2.open(pth).convert("RGB"),
+                                    np.float32) / 255.0)
+        except OSError as e:
+            return jsonify(error="could not read %s: %s" % (pth, e)), 400
+    views.append(comp)
+    for l in DOC.layers:
+        if not l.visible:
+            continue
+        a = l.pixels
+        if float(a[..., 3].max()) <= 0:
+            continue
+        views.append(np.clip(a[..., :3] * a[..., 3:4]
+                             + comp * (1 - a[..., 3:4]), 0, 1))
+    small = []
+    for v in views[:8]:
+        im = _PImage.fromarray((np.clip(v, 0, 1) * 255).astype(np.uint8))
+        small.append(np.asarray(im.resize((96, 64)), np.float32) / 255.0)
+    if len(small) < 2:
+        small = small * 2
+    # R18, after the splat audit: dreams drift in COLOUR SPLAT space now.
+    # Per view: K luminance splats (matching pursuit + joint refit) with
+    # per-channel amplitudes -- (cy, cx, sigma, aR, aG, aB) x K, whitened
+    # (mixed units drift badly raw), and generated points are clamped to
+    # the training range (off-manifold amplitudes blow out: measured).
+    # Decode tone-maps (Reinhard) so overlap keeps drama without clipping
+    # to white. Deterministic in seed -- pass the seed around, not pixels.
+    from holographic.sampling_and_signal.holographic_hdrift import (
+        build_drift_model, drift_sample)
+    dshape = (64, 96)
+    # kk is FIXED at 48 by default so taste vectors recorded today still
+    # match tomorrow's feature space; an explicit k changes it (and taste
+    # steering silently skips when dimensions disagree)
+    kk = 48 if int(d.get("k", 12)) == 12 else max(16, min(96, k * 4))
+    feats = []
+    for v in small:
+        s2, A2 = _splat_code(v.astype(float), kk)
+        row = [(s2[j][0], s2[j][1], s2[j][3],
+                A2[j, 0], A2[j, 1], A2[j, 2]) for j in range(kk)]
+        row.sort(key=lambda f: (round(f[0], 3), round(f[1], 3)))
+        feats.append(np.asarray(row, float).ravel())
+    raw = np.stack(feats)
+    mu, sd = raw.mean(0), raw.std(0) + 1e-6
+    lo, hi = raw.min(0), raw.max(0)
+    try:
+        model = build_drift_model((raw - mu) / sd, dim=1024, seed=seed)
+    except ValueError as e:
+        # leCore REFUSES degenerate data rather than generating the mean --
+        # relay that honestly instead of a 500
+        return jsonify(error="not enough distinct views to dream from: %s "
+                             "-- paint more layers, or pass paths of other "
+                             "images" % e), 400
+    X = drift_sample(model, n=n, seed=seed or 1, steps=60)
+    # R21 TASTE: starred dreams (see /api/dream/fave) pull new candidates
+    # toward what the user loved -- a scale-preserving centroid blend in
+    # the stable RAW feature space (compass.steer renormalises to unit
+    # length, which would crush these mixed-unit vectors -- measured), then
+    # the usual clamp keeps everything on-manifold. Deterministic: same
+    # views + seed + stars = same dreams.
+    _sv = d.get("steer", 0.35)
+    steer_step = (0.35 if _sv is True else 0.0 if _sv in (False, None)
+                  else float(_sv))
+    taste = [t for t in _taste_load() if len(t) == raw.shape[1]] \
+        if steer_step > 0 else []
+    centroid = np.mean(np.asarray(taste, float), axis=0) if taste else None
+    del _DREAMS[:]
+    del _DREAM_PTS[:]
+    thumbs = []
+    from holographic.rendering.holographic_splat import _gaussian
+    for x in X:
+        raw_pt = np.asarray(x) * sd + mu
+        if centroid is not None:
+            raw_pt = (1.0 - steer_step) * raw_pt + steer_step * centroid
+        p = np.clip(raw_pt, lo, hi)
+        _DREAM_PTS.append([float(v) for v in p])
+        p = p.reshape(-1, 6)
+        out = np.zeros(dshape + (3,))
+        for row in p:
+            g = _gaussian(dshape, row[0], row[1], max(row[2], 0.6))
+            out += g[..., None] * row[3:6][None, None, :]
+        out = np.maximum(out, 0.0)
+        out = np.clip(out / (1.0 + out * 0.55), 0, 1)
+        _DREAMS.append(out.astype(np.float32))
+        im = _PImage.fromarray((out * 255).astype(np.uint8)).resize(
+            (240, 160), _PImage.LANCZOS)
+        buf = _io.BytesIO()
+        im.save(buf, "PNG")
+        thumbs.append(_b64.b64encode(buf.getvalue()).decode("ascii"))
+    return jsonify(ok=True, count=len(thumbs), thumbs=thumbs,
+                   seed=int(seed or 1),
+                   note="deterministic in seed: the same views + seed "
+                        "regenerate these exact dreams")
+
+
+@app.post("/api/dream2")
+def dream2():
+    """DREAM v2 (R28): high-capacity anisotropic COLOUR-splat drift.
+
+    The v1 dream drifts 48 isotropic splats -- bokeh by construction.
+    v2 fits each view with K anisotropic colour splats (coarse-to-fine
+    matching pursuit + ridge-refit, lestudio.hdrift_aniso), whitens the
+    codes, PCA-projects to m components and drifts THERE with leCore --
+    samples stay on the collection's manifold, so they decode into
+    tangible structured compositions, not dots. {"n"<=8, "seed",
+    "k"?=160, "m"?=10, "steps"?=30, "noise0"?=0.35, "latitude"?=0.12,
+    "paths": [>=3 reference images]}. The doc composite is always the
+    first view. Results land in the same cache as /api/dream, so
+    /api/dream/place places them."""
+    lc = _lecore()
+    if "train" not in lc:
+        return jsonify(error="leCore is not available here: %s"
+                             % lc.get("err", "not on PYTHONPATH")), 503
+    import base64 as _b64
+    import io as _io
+    from PIL import Image as _PImage
+    from .hdrift_aniso import fit_color_splats, render_splats
+    d = request.json or {}
+    n = max(1, min(8, int(d.get("n", 6))))
+    seed = int(d.get("seed", 1) or 1)
+    K = max(48, min(320, int(d.get("k", 160))))
+    m = max(3, min(40, int(d.get("m", 10))))
+    steps = max(5, min(120, int(d.get("steps", 30))))
+    noise0 = float(d.get("noise0", 0.35))
+    lat = float(d.get("latitude", 0.12))
+    comp = composite_png_array()[..., :3]
+    views = [comp]
+    for pth in (d.get("paths") or [])[:12]:
+        try:
+            views.append(np.asarray(_PImage.open(pth).convert("RGB"),
+                                    np.float32) / 255.0)
+        except OSError as e:
+            return jsonify(error="could not read %s: %s" % (pth, e)), 400
+    if len(views) < 4:
+        return jsonify(error="dream2 needs at least 3 reference paths "
+                             "(the composite is the 4th view) -- its PCA "
+                             "manifold is meaningless with fewer"), 400
+    # common working size, portrait/landscape aware, ~97k px
+    ar = comp.shape[0] / comp.shape[1]
+    ww = int(round((97000 / ar) ** 0.5))
+    hh = int(round(ww * ar))
+    small = []
+    for v in views:
+        im = _PImage.fromarray((np.clip(v, 0, 1) * 255).astype(np.uint8))
+        small.append(np.asarray(im.resize((ww, hh), _PImage.LANCZOS),
+                                np.float32) / 255.0)
+    rows = []
+    for i, v in enumerate(small):
+        F, _ = fit_color_splats(v, K=K,
+                                jitter=np.random.RandomState(seed + i))
+        rows.append(F.ravel())
+    raw = np.stack(rows)
+    mu, sd = raw.mean(0), raw.std(0) + 1e-6
+    lo, hi = raw.min(0), raw.max(0)
+    Z = (raw - mu) / sd
+    zm = Z.mean(0)
+    U, S, Vt = np.linalg.svd(Z - zm, full_matrices=False)
+    m = min(m, len(small) - 1)
+    C = U[:, :m] * S[:m]
+    from holographic.sampling_and_signal.holographic_hdrift import (
+        build_drift_model, drift_sample)
+    try:
+        model = build_drift_model(C, dim=512, seed=seed)
+    except ValueError as e:
+        return jsonify(error="not enough distinct views to dream from: "
+                             "%s" % e), 400
+    X = drift_sample(model, n=n, seed=seed, steps=steps, noise0=noise0)
+    lo_c, hi_c = C.min(0), C.max(0)
+    span_c = np.where(hi_c - lo_c < 1e-9, 1.0, hi_c - lo_c)
+    del _DREAMS[:]
+    del _DREAM_PTS[:]
+    thumbs = []
+    for x in X:
+        c = np.clip(np.asarray(x), lo_c - lat * span_c, hi_c + lat * span_c)
+        p = np.clip((zm + c @ Vt[:m]) * sd + mu, lo, hi)
+        _DREAM_PTS.append([float(v) for v in p])
+        out = np.clip(render_splats(p.reshape(-1, 8), (hh, ww)), 0, 1)
+        _DREAMS.append(out.astype(np.float32))
+        im = _PImage.fromarray((out * 255).astype(np.uint8)).resize(
+            (240, int(240 * ar)), _PImage.LANCZOS)
+        buf = _io.BytesIO()
+        im.save(buf, "PNG")
+        thumbs.append(_b64.b64encode(buf.getvalue()).decode("ascii"))
+    return jsonify(ok=True, count=len(thumbs), thumbs=thumbs, seed=seed,
+                   k=K, m=int(m),
+                   note="dream2: anisotropic colour-splat PCA drift; "
+                        "deterministic in (views, seed); place with "
+                        "/api/dream/place")
+
+
+@app.post("/api/dream/place")
+def dream_place():
+    """Land dream #i from the last /api/dream as a new layer, scaled to the
+    canvas. {"i", "name"?, "opacity"?}"""
+    from PIL import Image as _PImage
+    d = request.json or {}
+    try:
+        arr = _DREAMS[int(d.get("i", 0))]
+    except (IndexError, ValueError, TypeError):
+        return jsonify(error="no such dream -- run /api/dream first"), 400
+    im = _PImage.fromarray((arr * 255).astype(np.uint8)).resize(
+        (DOC.width, DOC.height), _PImage.LANCZOS)
+    rgb = np.asarray(im, np.float32) / 255.0
+    out = np.dstack([rgb, np.ones(rgb.shape[:2], np.float32)])
+    l = DOC.add_layer(d.get("name") or "Dream",
+                      pixels=_gated_output(out, d), asset=True)
+    if d.get("opacity") is not None:
+        DOC.edit_layer(l.id, opacity=float(d["opacity"]))
+    return jsonify(ok=True, id=l.id)
+
+
+@app.post("/api/advise")
+def advise():
+    """THE STUDIO SAGE: ask the leCore memory that every painting session
+    has been teaching ('hair is a mass before strands', the banding cure,
+    the replay laws...). {"q": question} -> {answer, tier, via}; or
+    {"teach": {"q", "a"}} adds a lesson and saves the store -- the swarm's
+    blackboard, productised. Agents and the Sage panel share one mind."""
+    m = _sage()
+    if m is None:
+        return jsonify(error="leCore is not available here: %s"
+                             % _LECORE.get("mind_err", "unknown")), 503
+    d = request.json or {}
+    t = d.get("teach")
+    if t:
+        if not (t.get("q") and t.get("a")):
+            return jsonify(error="teach needs q and a"), 400
+        with _LECORE_LOCK:
+            m.teach(str(t["q"]), str(t["a"]))
+            try:
+                m.learning_save(_LECORE.get("mind_part") or "lecore_memory")
+            except Exception:
+                pass
+        return jsonify(ok=True, taught=True)
+    q = str(d.get("q") or "").strip()
+    if not q:
+        return jsonify(error="ask something: {\"q\": ...}"), 400
+    with _LECORE_LOCK:
+        r = m.ask(q) or {}
+        # R54: the ladder's exact tiers miss any PARAPHRASE of a taught
+        # lesson (an audit found 723 taught pairs and every reworded
+        # question coming back empty). Fall back to the mind's own
+        # rare-token-weighted search over the taught log and serve the
+        # best hit -- with the matched question, so the caller can see
+        # what the sage actually recalled.
+        if not (r.get("answer") or "").strip():
+            try:
+                got = m.session_search(q, sessions="all", k=6)
+                qn = " ".join(q.lower().split())
+                hits = [h for h in (got or {}).get("hits", [])
+                        if h.get("score", 0) >= 0.18
+                        and (h.get("answer") or "").strip()
+                        and " ".join(str(h.get("question", ""))
+                                     .lower().split()) != qn][:3]
+            except Exception:
+                hits = []
+            if hits:
+                top = hits[0]
+                return jsonify(ok=True, answer=top["answer"],
+                               tier="T1s", via="taught-log search",
+                               matched=top["question"],
+                               score=top["score"],
+                               also=[{"q": h["question"],
+                                      "score": h["score"]}
+                                     for h in hits[1:]])
+    return jsonify(ok=True, answer=r.get("answer") or "",
+                   tier=r.get("tier"), via=r.get("via"))
+
+
+@app.get("/api/graph/export.glsl")
+def graph_export_glsl():
+    """Take your grade to the GPU: compile this document's pointwise grade
+    nodes (grade / colour wheels / vignette) to a Shadertoy-style fragment
+    shader via leCore's postfx emitter. Neighbourhood nodes (glow, clarity,
+    grain) cannot be a single-pass fragment and are listed as skipped in
+    the header comment. The mapping is an approximation, and says so."""
+    lc = _lecore()
+    if "glsl" not in lc:
+        return jsonify(error="leCore is not available here: %s"
+                             % lc.get("err", "not on PYTHONPATH")), 503
+    nodes = {nd["id"]: nd for nd in GRAPH.to_list()}
+    steps, skipped = [], []
+    # walk the chain from the output backwards, then reverse
+    out = next((nd for nd in nodes.values()
+                if nd.get("type") in ("output", "Output")), None)
+    chain = []
+    seen = set()
+    cur = out
+    while cur is not None and cur["id"] not in seen:
+        seen.add(cur["id"])
+        chain.append(cur)
+        ins = cur.get("inputs") or {}
+        nxt = None
+        for v in ins.values():
+            key = v[0] if isinstance(v, (list, tuple)) else str(v).split(".")[0]
+            if key in nodes:
+                nxt = nodes[key]
+                break
+        cur = nxt
+    _ALIAS = {"Grade": "grade", "Color wheels": "color_wheels",
+              "Vignette": "vignette", "Media in": "media",
+              "Output": "output", "Clarity": "clarity", "Glow": "glow",
+              "Grain": "grain"}
+    for nd in reversed(chain):
+        t, p = nd.get("type"), nd.get("params") or {}
+        t = _ALIAS.get(t, t)
+        if t == "grade":
+            bp = float(p.get("blackpoint", 0.0))
+            wp = float(p.get("whitepoint", 1.0))
+            g = float(p.get("gamma", 1.0))
+            steps.append(("color_grade",
+                          {"lift": -bp,
+                           "contrast": 1.0 / max(wp - bp, 1e-3)}))
+            if abs(g - 1.0) > 1e-6:
+                steps.append(("gamma", {"g": 2.2 * g}))
+        elif t == "color_wheels":
+            steps.append(("color_grade", {
+                "temperature": float(p.get("gain_r", 0.0))
+                               - float(p.get("gain_b", 0.0)),
+                "tint": float(p.get("gain_g", 0.0)),
+                "saturation": 1.0}))
+        elif t == "vignette":
+            steps.append(("vignette",
+                          {"strength": float(p.get("amount", 0.4)),
+                           "radius": float(p.get("radius", 1.0))}))
+        elif t in ("media", "output", None):
+            pass
+        else:
+            skipped.append(t)
+    if not steps:
+        return jsonify(error="no pointwise grade nodes (grade, color "
+                             "wheels, vignette) in this graph"), 400
+    try:
+        sh = lc["glsl"](steps, name="lestudio_grade")
+    except Exception as e:
+        return jsonify(error="GLSL emit failed: %s" % e), 500
+    head = ("// exported from leStudio -- APPROXIMATE mapping of the "
+            "document grade chain\n")
+    if skipped:
+        head += ("// skipped (multi-pass, not fragment-emittable): %s\n"
+                 % ", ".join(sorted(set(skipped))))
+    from flask import Response
+    return Response(head + sh, mimetype="text/plain")
+
+
+@app.post("/api/paint_batch")
+def paint_batch():
+    """Many strokes in ONE request -- the agent/swarm fast path (R16).
+
+    {"strokes": [<same payload as /api/paint>...]} -- modes "brush"
+    (default), "knife" and "blend"; masks/selections/live are not batchable.
+    The whole batch applies atomically under the document lock, records ONE
+    undo entry ("Brush xN" -- ctrl+Z reverts the batch), and every stroke is
+    still its own replay record, so the timelapse shows each mark. Per-stroke
+    diagnosis warnings are skipped: a script wants throughput, and can probe
+    with a single /api/paint when it cares. Returns {ok, count, sids}.
+
+    Why it exists: a swarm painting a portrait made ~8000 /api/paint calls;
+    HTTP + JSON + per-stroke undo bookkeeping dominated wall time. One batch
+    of 50 strokes costs one round trip and one snapshot."""
+    d = request.json or {}
+    items = d.get("strokes")
+    if not isinstance(items, list) or not items:
+        return jsonify(error="strokes must be a non-empty list of "
+                             "/api/paint payloads"), 400
+    if len(items) > 512:
+        return jsonify(error="at most 512 strokes per batch -- split it"), 400
+    cleaned = []
+    for i, it in enumerate(items):
+        if not isinstance(it, dict):
+            return jsonify(error="stroke %d is not an object" % i), 400
+        mode = it.get("mode", "brush")
+        if mode not in ("brush", "knife", "blend"):
+            return jsonify(error="stroke %d: mode %r is not batchable -- "
+                                 "use /api/paint for it" % (i, mode)), 400
+        if it.get("target_mask") or it.get("live"):
+            return jsonify(error="stroke %d: mask/live strokes are not "
+                                 "batchable" % i), 400
+        try:
+            cleaned.append((_clean_paint(dict(it)), mode))
+        except _Gone as e:
+            return jsonify(error="stroke %d: %s" % (i, e)), 400
+    with _DOC_LOCK:
+        DOC._edited_palette_last = False
+        lids = []
+        for it, _m in cleaned:
+            lid = it.get("layer")
+            try:
+                DOC.layer(lid)
+            except KeyError:
+                return jsonify(error="no such layer: %r" % lid), 400
+            if lid not in lids:
+                lids.append(lid)
+        # one undo record for the batch: region = union box when every
+        # target layer has had its first (layer-wide hygiene) stroke
+        reg = None
+        if all(getattr(DOC.layer(l), "_hyg_filled", False) for l in lids):
+            xs, ys, pad = [], [], 3.0
+            for it, _m in cleaned:
+                r = float(it.get("radius", 8)) + pad
+                for pt in (it.get("points") or []):
+                    xs += [float(pt[0]) - r, float(pt[0]) + r]
+                    ys += [float(pt[1]) - r, float(pt[1]) + r]
+            if xs:
+                rx0, ry0 = max(0, int(min(xs))), max(0, int(min(ys)))
+                rx1 = min(DOC.width, int(max(xs)) + 1)
+                ry1 = min(DOC.height, int(max(ys)) + 1)
+                if rx1 > rx0 and ry1 > ry0:
+                    reg = (rx0, ry0, rx1, ry1)
+        DOC.record("Brush x%d" % len(cleaned), only=lids, region=reg)
+        sids = []
+        try:
+            for it, mode in cleaned:
+                if mode == "knife":
+                    sid = DOC.knife(it["layer"], it["points"],
+                                    mode=str(it.get("knife", "smooth")),
+                                    radius=float(it.get("radius", 26)),
+                                    strength=float(it.get("opacity", 0.7)),
+                                    record=False, stroke_new=True)
+                elif mode == "blend":
+                    sid = DOC.blend_stroke(
+                        it["layer"], it["points"],
+                        radius=float(it.get("radius", 18)),
+                        strength=float(it.get("opacity", 0.6)),
+                        brush=it.get("brush"),
+                        record=False, stroke_new=True)
+                else:
+                    sid = DOC.paint(
+                        it["layer"], it["points"],
+                        color=it.get("color", [0, 0, 0]),
+                        radius=float(it.get("radius", 8)),
+                        opacity=float(it.get("opacity", 1)),
+                        erase=bool(it.get("erase")),
+                        hardness=float(it.get("hardness", 0.7)),
+                        record=False, stroke_new=True,
+                        selection=it.get("selection"),
+                        sel_invert=bool(it.get("sel_invert")),
+                        brush=it.get("brush"),
+                        media=(it.get("media") or None),
+                        material=(it.get("material") or None),
+                        mix=float(it.get("mix", 0.0)),
+                        real_brush=bool(it.get("real_brush", False)),
+                        load=float(it.get("load", 0.6)),
+                        taper=float(it.get("stroke_taper", 0.0)))
+                if sid is None and DOC.strokes:
+                    # paint() only hands back the id for record=True; the
+                    # replay record exists either way, so name it honestly
+                    sid = DOC.strokes[-1]["id"]
+                sids.append(sid)
+        except ValueError as e:
+            return jsonify(error=str(e), applied=len(sids),
+                           sids=sids), 400
+        # a recorded stroke would stamp replay-ok forward itself; these are
+        # record=False (one undo entry for the batch) but every stroke IS
+        # recorded in the replay log, so the layers stay faithful by
+        # construction -- stamp them like paint() would have
+        for lid in lids:
+            if DOC._replay_ok_cached(lid):
+                DOC._mark_replay_ok(lid)
+        GRAPH.commit_layer_outputs()
+    return jsonify(ok=True, count=len(sids), sids=sids)
+
+
 def _last_surface():
     """Where the last edit happened -- the picture, or the palette.
 
@@ -3406,11 +5244,35 @@ def _last_surface():
     return DOC
 
 
+def _foreign_top_entry(stack):
+    """(author, display_name) of the stack's top entry when it belongs to a
+    DIFFERENT identified user than the caller, else None. Entries recorded
+    outside a request (tests, scripts) carry author '' and are unowned."""
+    if not stack:
+        return None
+    ent = stack[-1]
+    author = ent[2] if len(ent) > 2 else ""
+    me = _req_uid()
+    if author and me and author != me:
+        return author, (SYNC["names"].get(author) or author[:6])
+    return None
+
+
 @app.post("/api/undo")
 def undo():
     """Undo the last operation, on the picture or the palette -- whichever was
-    edited last. Includes impasto height."""
+    edited last. Includes impasto height. If the last change belongs to a
+    DIFFERENT user this refuses with 409 (pass force:true to override):
+    silently reverting a collaborator's stroke reads as data loss to them."""
+    # a body-less POST (older clients, scripts) must still work:
+    # request.json raises 415 without a JSON content-type
+    d = request.get_json(silent=True) or {}
     with _DOC_LOCK:
+        foreign = _foreign_top_entry(DOC._undo)
+        if foreign and not d.get("force"):
+            return jsonify(error="the last change is %s's -- pass force to "
+                                 "undo it anyway" % foreign[1],
+                           author=foreign[0]), 409
         surf = _last_surface()
         ok = surf.undo()
         if not ok and surf is not DOC:
@@ -3421,8 +5283,18 @@ def undo():
 
 @app.post("/api/redo")
 def redo():
-    """Redo, on whichever surface was edited last."""
+    """Redo, on whichever surface was edited last. Refuses (409) when the
+    entry to redo is another user's, unless force:true -- symmetric with
+    /api/undo."""
+    # a body-less POST (older clients, scripts) must still work:
+    # request.json raises 415 without a JSON content-type
+    d = request.get_json(silent=True) or {}
     with _DOC_LOCK:
+        foreign = _foreign_top_entry(DOC._redo)
+        if foreign and not d.get("force"):
+            return jsonify(error="that change is %s's -- pass force to "
+                                 "redo it anyway" % foreign[1],
+                           author=foreign[0]), 409
         surf = _last_surface()
         ok = surf.redo()
         if not ok and surf is not DOC:
@@ -3432,12 +5304,54 @@ def redo():
 
 @app.post("/api/graph")
 def set_graph():
-    """Replace the node graph: {"nodes": [{id, type, params, inputs, x, y}]}. Inputs: "NID", "NID.socket", or [id, socket]; "param:<name>" keys wire values into parameters. Commits Layer out nodes."""
-    GRAPH.set_graph((request.json or {}).get("nodes", []))
+    """Replace the node graph: {"nodes": [{id, type, params, inputs, x, y}], "base_rev"?, "force"?}. Inputs: "NID", "NID.socket", or [id, socket]; "param:<name>" keys wire values into parameters. Commits Layer out nodes. With base_rev (the grev you loaded), a concurrent edit 409s with the current nodes so you can rebase instead of erasing it."""
+    d = request.json or {}
+    base = d.get("base_rev")
+    cur = int(getattr(GRAPH, "grev", 0))
+    if base is not None and not d.get("force") and int(base) != cur:
+        # Whole-graph POST was last-write-wins: two editors, and whoever
+        # saved second silently DELETED the other's new nodes (probe: an
+        # added node vanished). The 409 carries the live nodes so the client
+        # can rebase its one local op and re-post. No base_rev (older
+        # clients, agents) keeps the old unconditional behaviour.
+        return jsonify(error="the graph changed under you (rev %d, yours "
+                             "was %s) -- rebase onto the returned nodes and "
+                             "re-post, or pass force to overwrite"
+                             % (cur, base),
+                       grev=cur, nodes=GRAPH.to_list()), 409
+    GRAPH.set_graph(d.get("nodes", []))
     n = GRAPH.commit_layer_outputs()
-    return jsonify(ok=True, committed=n,
-                   conflicts=[DOC.layer(c).name for c in getattr(GRAPH, "last_conflicts", [])
-                              if any(l.id == c for l in DOC.layers)])
+    # R24 (found grading a painting): a node with an unknown TYPE evaluates
+    # to an error, and output.png used to silently fall back to the raw
+    # composite -- three rounds of "graded" finals were never graded. Name
+    # the strangers at the door.
+    from . import OPS as _OPS
+    unknown = sorted({nd.get("type") for nd in d.get("nodes", [])
+                      if nd.get("type") and nd.get("type") not in _OPS})
+    body = dict(ok=True, committed=n, grev=int(getattr(GRAPH, "grev", 0)),
+                conflicts=[DOC.layer(c).name for c in getattr(GRAPH, "last_conflicts", [])
+                           if any(l.id == c for l in DOC.layers)])
+    if unknown:
+        body["warning"] = ("unknown node type(s) %s -- the graph cannot "
+                           "evaluate them; valid types are capitalised "
+                           "(Grade, Glow, Media in...); see /api/mind"
+                           % ", ".join(repr(u) for u in unknown))
+        body["unknown"] = unknown
+    # R26 (found grading a painting): a client sent wiring as a separate
+    # 'wires' list, which this API does not read -- every node sat
+    # unreachable, and output.png served the raw composite behind an
+    # ok:true. Wires live in each node's 'inputs' {socket: "nid"}; name
+    # the orphans so the caller notices before trusting the render.
+    orphans = GRAPH.unreachable_nodes()
+    if orphans:
+        body["warning"] = (body.get("warning", "") + (" " if unknown else "")
+                          + "node(s) %s cannot reach the Output node -- "
+                            "wire nodes with per-node inputs "
+                            "{\"image\": \"<node id>\"}; a separate "
+                            "'wires' list is not read"
+                          % ", ".join(repr(o) for o in orphans))
+        body["unreachable"] = orphans
+    return jsonify(**body)
 
 
 @app.patch("/api/graph/node/<nid>")
@@ -3453,7 +5367,7 @@ def patch_graph_node(nid):
     except KeyError:
         return jsonify(error="no node '%s' in the graph" % nid), 404
     GRAPH.commit_layer_outputs()
-    return jsonify(ok=True, node=node)
+    return jsonify(ok=True, node=node, grev=int(getattr(GRAPH, "grev", 0)))
 
 
 @app.get("/api/graph/output.png")
@@ -3465,8 +5379,22 @@ def graph_output():
     GRAPH.ensure_default()
     nid = GRAPH.output_node()
     try:
+        wq = request.args.get("w")
+        if wq:
+            # R5 #5: cap the EVALUATION, not just the encode -- render_at at
+            # display width is the 3.4x interactive path
+            w = max(16, min(int(wq), 4096))
+            h = max(int(round(w * DOC.height / max(DOC.width, 1))), 8)
+            return _png(_renderable(GRAPH.render_at(nid, w, h)))
         return _png(_renderable(GRAPH.evaluate(nid)))
-    except Exception:
+    except Exception as e:
+        # R24: this fallback used to be SILENT for every failure, so a graph
+        # full of unknown node types served the raw composite and the caller
+        # believed their grade applied (three rounds of finals, ungraded).
+        # An explicitly-built graph now fails honestly; only the untouched
+        # default graph keeps the composite convenience.
+        if len(GRAPH.nodes) > 1:
+            return jsonify(error="the graph did not evaluate: %s" % e), 409
         c = DOC.composite()
         return _png(c[..., :3] * c[..., 3:4])
 
@@ -3529,9 +5457,17 @@ def graph_timings():
 
 @app.get("/api/graph/preview/<nid>.png")
 def graph_preview(nid):
-    """One node's render as PNG (memoised per signature)."""
+    """One node's render as PNG (memoised per signature). R5 #5: `?w=` EVALUATES
+    at that width via render_at (before, w only downscaled the encode of a
+    full-res evaluate -- all the compute, none of the savings)."""
     try:
-        return _png(_renderable(GRAPH.evaluate(nid, request.args.get("sock", "out"))))
+        sock = request.args.get("sock", "out")
+        wq = request.args.get("w")
+        if wq:
+            w = max(16, min(int(wq), 4096))
+            h = max(int(round(w * DOC.height / max(DOC.width, 1))), 8)
+            return _png(_renderable(GRAPH.render_at(nid, w, h, sock)))
+        return _png(_renderable(GRAPH.evaluate(nid, sock)))
     except Exception as e:
         return jsonify(error=str(e)), 400
 
@@ -3708,7 +5644,10 @@ def graph_apply():
     """Bake a node's output into a layer: {"node", "layer"}."""
     d = request.json or {}
     try:
-        l = GRAPH.apply_to_layer(d["id"], d.get("name"), d.get("layer"))
+        l = GRAPH.apply_to_layer(d["id"], d.get("name"), d.get("layer"),
+                                 selection=d.get("selection"),
+                                 sel_invert=bool(d.get("sel_invert")),
+                                 sel_feather=float(d.get("sel_feather", 0)))
         return jsonify(ok=True, layer=l.meta())
     except Exception as e:
         return jsonify(error=str(e)), 400
@@ -3993,6 +5932,191 @@ def export():
     c = DOC.composite()
     flat = c[..., :3] * c[..., 3:4] + 1.0 * (1 - c[..., 3:4])
     return _png(np.clip(flat, 0, 1))
+
+
+@app.get("/api/replay/info")
+def replay_info():
+    """How much of the painting can PLAY BACK: recorded stroke count and,
+    per painted layer, whether a replay base exists (a layer with no base
+    starts fully formed in the timelapse instead of growing)."""
+    with _DOC_LOCK:
+        bases = getattr(DOC, "_replay_base", {})
+        per = {}
+        for k in DOC.strokes:
+            per[k["layer"]] = per.get(k["layer"], 0) + 1
+        return jsonify(ok=True, strokes=len(DOC.strokes),
+                       history=DOC.history_len(),
+                       history_spooled=len(getattr(DOC, "_history_spool",
+                                                   []) or []),
+                       layers=[{"id": lid, "strokes": n,
+                                "from_base": lid in bases}
+                               for lid, n in per.items()])
+
+
+@app.get("/api/replay/timelapse.gif")
+def replay_timelapse():
+    """WATCH THE PAINTING BEING PAINTED: an animated GIF of the document
+    rebuilt stroke by stroke, in the order the marks were actually made
+    (globally chronological, not layer by layer). ?frames= snapshots
+    (default 60, max 240), ?w= output width (default 640), ?fps=
+    (default 12), ?hold= extra copies of the final frame (default 10) so
+    the loop rests on the finished picture. The last frame is always the
+    TRUE current composite -- unrecorded touch-ups appear there rather
+    than being pretended into the history."""
+    from PIL import Image as PImage
+    frames = max(2, min(240, int(request.args.get("frames", 60))))
+    w = max(64, min(DOC.width, int(request.args.get("w", 640))))
+    fps = max(1, min(50, int(request.args.get("fps", 12))))
+    hold = max(0, min(100, int(request.args.get("hold", 10))))
+    imgs = []
+    with _DOC_LOCK:                 # the rebuild borrows the live layers
+        h = max(1, round(DOC.height * w / DOC.width))
+        for c in DOC.timelapse_frames(frames):
+            flat = c[..., :3] * c[..., 3:4] + 1.0 * (1 - c[..., 3:4])
+            im = PImage.fromarray(
+                (np.clip(flat, 0, 1) * 255).astype("uint8"))
+            if w < DOC.width:
+                im = im.resize((w, h), PImage.LANCZOS)
+            imgs.append(im)
+    if hold:
+        imgs += [imgs[-1]] * hold
+    buf = io.BytesIO()
+    imgs[0].save(buf, "GIF", save_all=True, append_images=imgs[1:],
+                 duration=int(1000 / fps), loop=0)
+    buf.seek(0)
+    return send_file(buf, mimetype="image/gif",
+                     download_name="timelapse.gif")
+
+
+_REPLAY_JOB = {"state": "idle"}
+
+
+def _replay_render_worker(frames, w, fps, hold, mode="strokes"):
+    """Background GIF render. Holds the document lock while rebuilding (the
+    timelapse borrows the live layers), so the job reports stroke-level
+    progress the UI can show instead of a silent frozen canvas. GIF encoding
+    happens after the lock is released.
+
+    mode "history" (R33): frames come from Document.history_frames -- the
+    undo history walked back to the beginning, newest-first -- then the
+    captured frames are REVERSED so the film progresses forward in time.
+    That covers pastes, fills, clears and layer ops, which the stroke
+    replay showed fully formed at frame one."""
+    from PIL import Image as PImage
+    J = _REPLAY_JOB
+    gen = None
+    try:
+        imgs = []
+        with _DOC_LOCK:
+            if mode == "history":
+                total = max(1, DOC.history_len())
+                step = 1                  # the generator subsamples itself
+                gen = DOC.history_frames(frames)
+            else:
+                total = max(1, len([k for k in DOC.strokes if k["points"]]))
+                step = max(1, -(-total // frames))
+                gen = DOC.timelapse_frames(frames)
+            J["total"] = total
+            h = max(1, round(DOC.height * w / DOC.width))
+            done = 0
+            for c in gen:
+                if J.get("cancel"):
+                    # close() raises GeneratorExit inside the generator, so
+                    # its finally block restores the live layers before we
+                    # let go of the lock
+                    gen.close()
+                    J["state"] = "cancelled"
+                    return
+                flat = c[..., :3] * c[..., 3:4] + 1.0 * (1 - c[..., 3:4])
+                im = PImage.fromarray(
+                    (np.clip(flat, 0, 1) * 255).astype("uint8"))
+                if w < DOC.width:
+                    im = im.resize((w, h), PImage.LANCZOS)
+                imgs.append(im)
+                done = min(total, done + step)
+                J["done"] = done
+        if mode == "history":
+            imgs.reverse()                # backward walk -> forward film
+        if hold:
+            imgs += [imgs[-1]] * hold
+        buf = io.BytesIO()
+        imgs[0].save(buf, "GIF", save_all=True, append_images=imgs[1:],
+                     duration=int(1000 / max(1, fps)), loop=0)
+        J["gif"] = buf.getvalue()
+        J["state"] = "done"
+    except Exception as e:                          # pragma: no cover
+        if gen is not None:
+            try:
+                gen.close()
+            except Exception:
+                pass
+        J["state"] = "error"
+        J["err"] = str(e)
+
+
+@app.post("/api/replay/render")
+def replay_render_start():
+    """Start rendering the painting timelapse as a background job:
+    {"frames"?: 110, "w"?: 720, "fps"?: 12, "hold"?: 14}. One at a time --
+    a second start while one runs returns 409. Poll
+    /api/replay/render/status, then download /api/replay/render/result.gif.
+    The rebuild holds the document while it runs (it borrows the live
+    layers), which is exactly why it reports progress."""
+    d = request.json or {}
+    if _REPLAY_JOB.get("state") == "running":
+        return jsonify(error="a replay render is already running"), 409
+    mode = str(d.get("mode", "auto"))
+    if mode not in ("auto", "history", "strokes"):
+        return jsonify(error="mode must be auto|history|strokes"), 400
+    if mode == "auto":
+        # R33: the undo-history replay is the truthful one (it carries
+        # pastes, fills and layer ops); fall back to strokes only when
+        # there is no retained history at all
+        mode = "history" if DOC.history_len() > 0 else "strokes"
+    if mode == "history" and DOC.history_len() == 0:
+        return jsonify(error="no retained history to replay yet"), 400
+    if mode == "strokes" and not DOC.strokes:
+        return jsonify(error="nothing recorded to replay yet"), 400
+    frames = max(2, min(240, int(d.get("frames", 110))))
+    w = max(64, min(DOC.width, int(d.get("w", 720))))
+    fps = max(1, min(50, int(d.get("fps", 12))))
+    hold = max(0, min(100, int(d.get("hold", 14))))
+    _REPLAY_JOB.clear()
+    _REPLAY_JOB.update(state="running", done=0, total=1, cancel=False,
+                       mode=mode)
+    threading.Thread(target=_replay_render_worker,
+                     args=(frames, w, fps, hold, mode), daemon=True).start()
+    return jsonify(ok=True)
+
+
+@app.get("/api/replay/render/status")
+def replay_render_status():
+    """{state: idle|running|done|cancelled|error, done, total, err?}.
+    Lock-free on purpose: it must answer while the render holds the
+    document."""
+    J = _REPLAY_JOB
+    return jsonify(state=J.get("state", "idle"), done=J.get("done", 0),
+                   total=J.get("total", 0), err=J.get("err"))
+
+
+@app.post("/api/replay/render/cancel")
+def replay_render_cancel():
+    """Ask the running render to stop at the next frame boundary."""
+    if _REPLAY_JOB.get("state") != "running":
+        return jsonify(error="no render running"), 400
+    _REPLAY_JOB["cancel"] = True
+    return jsonify(ok=True)
+
+
+@app.get("/api/replay/render/result.gif")
+def replay_render_result():
+    """The finished timelapse GIF (kept until the next render starts)."""
+    if _REPLAY_JOB.get("state") != "done" or not _REPLAY_JOB.get("gif"):
+        return jsonify(error="no finished render -- start one and poll "
+                             "status until it is done"), 404
+    return send_file(io.BytesIO(_REPLAY_JOB["gif"]), mimetype="image/gif",
+                     as_attachment=bool(request.args.get("download")),
+                     download_name="painting_timelapse.gif")
 
 
 @app.get("/api/health")
