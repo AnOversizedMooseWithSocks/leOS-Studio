@@ -76,8 +76,13 @@ def test_r36_checkpoint_ring_speeds_undo_and_stays_exact():
     px = d.layer(lid).pixels.copy()
     d.undo()                                    # cold: captures a checkpoint
     assert d._replay_ckpt.get(lid), "the first replay must leave a checkpoint"
-    ck_i = d._replay_ckpt[lid]["i"]
-    assert ck_i % 48 == 0 and ck_i > 0
+    # R68: a LADDER of positions, not one slot -- painting lays them too,
+    # so by here there are several and every one sits on the interval
+    ck_is = sorted(d._replay_ckpt[lid])
+    assert ck_is, "the ladder must not be empty"
+    assert all(i % d.CKPT_EVERY == 0 and i > 0 for i in ck_is), ck_is
+    assert d._ckpt_reach(lid) <= d.CKPT_EVERY, \
+        "the head must stay within one interval of a checkpoint"
     t0 = time.time()
     for _ in range(8):
         assert d.undo()
@@ -98,12 +103,20 @@ def test_r36_checkpoints_are_invalidated_by_surgery():
         d.paint(lid, [[5 + i * 2, 10], [5 + i * 2, 110]],
                 color=(0, 0, 0), radius=2.0)
     d.undo()                                    # capture a checkpoint
-    ck = d._replay_ckpt[lid]
-    epoch0 = ck["epoch"]
+    ladder = d._replay_ckpt[lid]
+    assert ladder, "the ladder must not be empty"
+    epoch0 = next(iter(ladder.values()))["epoch"]
     sid = d.strokes[2]["id"]                    # edit INSIDE the prefix
     d.smooth_strokes([sid], amount=0.6, iterations=2)
     assert d._journal_epoch > epoch0, \
         "an in-place edit must bump the journal epoch"
+    # R68: the ladder may have gained fresh rungs since (a rerender lays
+    # them), but not one rung from the OLD epoch may ever be chosen --
+    # every rung is stamped, and selection checks the stamp
+    best = d._ckpt_best(lid, [k for k in d._iter_strokes()
+                              if k["layer"] == lid])
+    assert best is None or best["epoch"] == d._journal_epoch, \
+        "a rung from before the surgery must never be selected"
     assert d.replay_is_faithful(lid), \
         "the stale checkpoint must be ignored, never replayed from"
     assert d.undo(), "surgery undo walks through the invalidation"

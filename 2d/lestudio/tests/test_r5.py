@@ -1133,7 +1133,10 @@ def test_r5_old_format_doc_renders_on_the_scalar_fallback():
     lid = d.layers[0].id
     d.paint(lid, [(30 + i, 50) for i in range(0, 40, 4)],
             color=(0, 0.5, 0), radius=8, media="oil")
-    dm, arrays = _doc_section(d, None)
+    # R67: journal-first is the default, and a layer that can prove it
+    # replays ships neither pixels nor body maps -- they are rebuilt. This
+    # pin is about the FAT file's shape, so it asks for one.
+    dm, arrays = _doc_section(d, None, cache_pixels=True)
     assert any(k.startswith("mediamap_") for k in arrays), \
         "a media stroke must serialise its map"
     # forge the OLD format: strip the map section from the payload
@@ -1145,7 +1148,7 @@ def test_r5_old_format_doc_renders_on_the_scalar_fallback():
     assert all(getattr(l, "media_map", None) is None for l in old.layers)
     old_px = np.asarray(old.composite())
     # the reference scalar-fallback render: same doc, map dropped by hand
-    ref, _g2 = _doc_from_section(*_doc_section(d, None))
+    ref, _g2 = _doc_from_section(*_doc_section(d, None, cache_pixels=True))
     for l in ref.layers:
         l.media_map = None
     assert np.array_equal(old_px, np.asarray(ref.composite())), \

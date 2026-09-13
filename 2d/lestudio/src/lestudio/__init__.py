@@ -26,6 +26,7 @@ import os
 import time
 
 import re
+import zlib
 import numpy as np
 
 __all__ = ["Document", "Layer", "NodeGraph", "OPS", "op_catalog", "composite",
@@ -1542,7 +1543,14 @@ def _material_grain(doc, l, gscale):
         # texture differed between launches unless PYTHONHASHSEED was
         # pinned. crc32 over stable bytes is launch-stable (R4 precedent).
         import zlib as _z
-        seed = _z.crc32(("%s|%s|matgrain|%r" % (doc.id, l.id, key))
+        # R56: standalone doc ids became random tags (no process-global
+        # counter), so the seed's doc component moved to a PERSISTED
+        # grain_tag -- constant for new documents (same edits anywhere =
+        # same pixels, the R34 acceptance) and absent in old files, where
+        # the fallback to the SAVED doc id reproduces their renders
+        # byte-for-byte.
+        gtag = getattr(doc, "grain_tag", None) or doc.id
+        seed = _z.crc32(("%s|%s|matgrain|%r" % (gtag, l.id, key))
                         .encode()) & 0x7fffffff
         rng = np.random.default_rng(seed)
         n = rng.random((doc.height, doc.width)).astype(np.float32)
@@ -1577,6 +1585,27 @@ def _relief_shade(px, height, gloss=0.3, shin=16.0, material=None,
     # down. The hard "veins" that 1.4 was hiding came from raw mask edges;
     # the deposit now models a real edge profile (rim, then falloff), so the
     # veins have no reason to exist and a light touch is enough.
+    # The height field is smoothed and differenced with a REFLECTING border,
+    # which mirrors the surface about the canvas edge and leaves a crease a
+    # few pixels in: measured on the R66 imprimatura, one bright row at y=4
+    # (0.397 against 0.31 above it and 0.345 below) running the full width of
+    # the picture, with a four-row dip outside it -- a hairline frame round
+    # every picture painted in a physical medium. Paint does not stop at the
+    # canvas edge; the edge CROPS it, which is what replicating the border
+    # says and reflecting it does not:
+    #
+    #     _rp = 4
+    #     smooth = _gauss_small(np.pad(height.astype(np.float32), _rp,
+    #                                  mode="edge"), 0.6)
+    #     gy, gx = np.gradient(smooth)
+    #     gy = gy[_rp:-_rp, _rp:-_rp] * slope
+    #     gx = gx[_rp:-_rp, _rp:-_rp] * slope
+    #
+    # That is the whole fix and it is verified to remove the line. It is NOT
+    # applied, because relief is part of composite() and the golden corpus
+    # pins composite() by crc: turning it on moves golden_ops.lews from
+    # 4076935875 to 2486669252 and the corpus has to be regenerated. Re-
+    # pinning the determinism law is not a call to make on the way past.
     smooth = _gauss_small(height.astype(np.float32), 0.6)
     gy, gx = np.gradient(smooth)
     gy = gy * slope
@@ -2859,6 +2888,11 @@ def _doc_emission(doc):
     return E
 
 
+class _Estimate(ValueError):
+    """An estimate that honestly found nothing -- carries a message written
+    for the person, not a traceback (R59)."""
+
+
 def estimate_perspective(doc, lid=None, image=None):
     """Read the PERSPECTIVE out of a picture: leCore finds the dominant
     vanishing point from the image's line structure; edges pointing at it
@@ -2952,6 +2986,16 @@ def estimate_perspective(doc, lid=None, image=None):
             v1, c1 = mm.vanishing_point(img, return_confidence=True)
         except Exception:
             v1, c1 = mm.vanishing_point(img), 0.5
+        # R59: the engine returns None when it finds no vanishing point at
+        # all -- an empty or edgeless layer -- and this then died on
+        # float(None[0]), which reached the person as the raw text
+        # "'NoneType' object is not subscriptable". There is nothing wrong
+        # with asking; there was just nothing to find. Say that instead.
+        if v1 is None or len(v1) < 2:
+            raise _Estimate("no perspective lines found on this layer — "
+                            "draw some straight edges (a road, a roofline, "
+                            "a table edge) and try again, or set the "
+                            "vanishing points by hand")
         vps = [[float(v1[0]), float(v1[1])]]
         confs = [float(c1)]
     if len(vps) == 2 and np.hypot(vps[0][0] - vps[1][0],
@@ -4115,10 +4159,18 @@ def composite_cached(doc):
     cc = getattr(doc, "_ccache", None)
     if cc is not None and cc["rev"] == _MUT_REV[0]             and cc["buf"].shape[:2] == (doc.height, doc.width):
         return cc["buf"]
+    # R58: stamp the cache with the rev seen BEFORE compositing, never
+    # after. A stroke that lands while this composite is being built bumps
+    # _MUT_REV mid-render; stamping afterwards recorded the NEW rev over
+    # PRE-stroke pixels, and every fetch until the next edit served that
+    # stale frame -- to the person it looked like their drag had painted
+    # one dab and stopped (the stroke was in the layer all along). With
+    # the pre-render rev the racing stroke simply invalidates this frame.
+    rev0 = _MUT_REV[0]
     buf = composite(doc.canvas_layers() if hasattr(doc, "canvas_layers")
                     else doc.layers,
                     doc.height, doc.width, doc.mask_map())
-    doc._ccache = {"rev": _MUT_REV[0], "buf": buf}
+    doc._ccache = {"rev": rev0, "buf": buf}
     return buf
 
 
@@ -4128,11 +4180,49 @@ def composite_patch(doc, x0, y0, x1, y1, rev_before):
     cc = getattr(doc, "_ccache", None)
     if cc is None or cc["rev"] != rev_before             or cc["buf"].shape[:2] != (doc.height, doc.width):
         return
-    # RE-BASE periodically: each window re-blend rounds in float32, and
-    # ~30 mixed ops accumulated a 2.3/255 drift against a fresh
-    # composite -- exactly the faint 'sometimes' tile artifacts. Every
-    # 20 patches the cache is dropped and the next serve pays one full
-    # composite, so drift can never build past a quantum.
+    # RE-BASE periodically: MEASURED (UX_BACKLOG "does the interval need to
+    # adapt to document size") through the real /api/paint + composite.png
+    # path, 4 layers, comparing the served cache to a truly independent
+    # fresh recompute (shading caches cleared too, not just re-blended):
+    #
+    #   plain / oil / acrylic strokes, 60 heavily-overlapping patches,
+    #   800x600 / 1920x1080 / 4000x3000: drift stayed EXACTLY 0.0/255 the
+    #   whole run, at every size. Window re-blend math is shape-invariant
+    #   per pixel (composite() has no cross-pixel reduction) and the
+    #   padded/trimmed shade-patch window is genuinely local away from a
+    #   real canvas edge (that case invalidates outright, see
+    #   _shade_patch) -- so for these media the "float32 rounding
+    #   accumulates" premise this guard was built for does not reproduce
+    #   in the current code at ANY patch count tested. No interval value
+    #   is doing correctness work here.
+    #
+    #   BUT a single "water" stroke (absorb/wicking touches pixels the
+    #   window didn't re-blend) drifted 2.2-3.8/255 against a fresh
+    #   composite on its OWN first patch -- already past the 1/255
+    #   quantum, the SAME at every canvas size, and flat regardless of
+    #   patch count (n=3 through n=60 all landed in the same 2-4/255
+    #   band, never growing further). This was a real bug -- "what you
+    #   see is not what landed", not a float32-accumulation question at
+    #   all -- and this counter's only role in it was accidental: a CAP
+    #   on how many serves could ride the wrong frame before a full
+    #   rebuild self-healed it. FIXED at the source (Document.paint(),
+    #   see `_reach`): the re-light/re-blend window is now padded by the
+    #   medium's own derived reach (iters+2 on every side, unioned with
+    #   _watercolour's absorb-based pad) instead of a flat constant sized
+    #   for oil. Re-measured after the fix: EVERY medium and material
+    #   (`_MEDIA`, `_MATERIALS`) drifts EXACTLY 0.0/255 at 800x600 and
+    #   4000x3000, paint cost effectively unchanged. This counter no
+    #   longer has any known drift to catch, from any cause.
+    #
+    # Net: nothing here justifies WIDENING the interval by document size
+    # (or otherwise) -- the plain-paint case that motivated 20 has no
+    # measured drift to bound even at 3x the count, and the one case that
+    # DOES drift is a fixed, count-independent defect that a bigger N
+    # would only let ride longer on exactly the documents (large ones)
+    # where a full rebuild is most expensive. 4000x3000 full composites
+    # measured 8-12 s (vs 0.17 s at 800x600, 0.8 s at 1920x1080) -- a
+    # real, confirmed hitch -- but the fix for THAT belongs in the
+    # padding bug above, not in relaxing this guard. 20 stays.
     cc["n"] = cc.get("n", 0) + 1
     if cc["n"] > 20:
         doc._ccache = None
@@ -4199,6 +4289,7 @@ def _layer_token(lyr):
     control ever ships, its state must join this hash."""
     if getattr(lyr, "_tok_rev", None) == _MUT_REV[0]:
         return lyr._tok
+    rev0 = _MUT_REV[0]             # R58: stamp with the PRE-hash rev (see composite_cached)
     hsh = hashlib.md5()
     hsh.update(np.ascontiguousarray(lyr.pixels[::2, ::2]).tobytes())
     # media_map joined in wave 3: a per-stroke medium EDIT (restyle) changes
@@ -4215,7 +4306,7 @@ def _layer_token(lyr):
                      lyr.pixels.shape)).encode())
     tok = hsh.hexdigest()
     try:
-        lyr._tok, lyr._tok_rev = tok, _MUT_REV[0]
+        lyr._tok, lyr._tok_rev = tok, rev0
     except AttributeError:
         pass                       # __slots__ window shims: recompute per call
     return tok
@@ -4297,13 +4388,14 @@ def _shaded_pixels(lyr):
                  * np.exp(-np.maximum(hgt, 0.0) / _PAINT_LEVEL))
     if getattr(lyr, "_shade_rev", None) == _MUT_REV[0]:
         return lyr._shaded
+    rev0 = _MUT_REV[0]             # R58: stamp with the PRE-render rev (see composite_cached)
     if (hasattr(lyr, "_shaded")
             and getattr(lyr, "_shade_key", None) == _layer_token(lyr)):
         # the global counter moved but THIS layer's content did not (someone
         # else's opacity edit, a mask tweak elsewhere): the old shade is
         # still exact. Re-stamp the rev so _shade_patch's currency check
         # keeps working.
-        lyr._shade_rev = _MUT_REV[0]
+        lyr._shade_rev = rev0
         return lyr._shaded
     _gl, _sh = _media_glosshin(lyr)
     out = _relief_shade(lyr.pixels, hgt, _gl, _sh,
@@ -4311,7 +4403,7 @@ def _shaded_pixels(lyr):
                         slope=_RELIEF_SLOPE * float(np.clip(
                             getattr(lyr, "relief", 1.0), 0.0, 1.0)))
     try:
-        lyr._shaded, lyr._shade_rev = out, _MUT_REV[0]
+        lyr._shaded, lyr._shade_rev = out, rev0
         lyr._shade_key = _layer_token(lyr)
     except AttributeError:
         pass
@@ -4501,11 +4593,13 @@ def composite(layers, h, w, masks=None):
 # ------------------------------------------------------------------------------------------------
 
 class Layer:
-    _next = 1
-
-    def __init__(self, h, w, name=None, pixels=None):
-        self.id = f"L{Layer._next}"; Layer._next += 1
-        self.name = name or self.id
+    # R56: no process-global counter -- ids come from the owning
+    # document's _mint_id (the lews_mint law: one persisted counter per
+    # prefix, scoped to the container). Construction sites mint or
+    # restore explicitly; "L0" survives only until they do.
+    def __init__(self, h, w, name=None, pixels=None, id=None):
+        self.id = id or "L0"
+        self.name = name or (id or "layer")
         self.visible = True
         self.opacity = 1.0
         self.blend = "normal"
@@ -4562,6 +4656,16 @@ class Layer:
         # working unchanged (the attribute simply always exists on new
         # layers; getattr still guards layers restored from old snapshots).
         self.locked = False       # refuse paint/fill/clear
+        # R63: the LIVE-COLLABORATION lock -- who currently holds this layer,
+        # and who else the owner has let in. This is a DIFFERENT thing from
+        # `locked` above: `locked` is a freeze the layer's own user chose
+        # (blocks EVERYONE, including its owner); `owner`/`shared` are a
+        # multiplayer courtesy so two people don't paint over each other on
+        # the same layer at once, and never block a single-user session (an
+        # unowned layer, or one whose owner is a lone unidentified client,
+        # stays wide open -- see server.py's permission gate). "" = no owner.
+        self.owner = ""
+        self.shared = []          # uids the owner granted edit rights to
         self.relief = 1.0         # how much of the impasto height is lit
         self.gravity = None       # None = the document decides; 0 = flat
         self.gravity_angle = None # degrees; which way is DOWN for wet paint
@@ -4608,6 +4712,13 @@ class Layer:
                 "place": json.loads(json.dumps(getattr(self, "place",
                                                        None))),
                 "locked": bool(getattr(self, "locked", False)),
+                # R63: the collaboration lock. owner_name/mine/agent are NOT
+                # here -- they need the requesting user's id and the presence
+                # table, neither of which a bare Layer has, so /api/state
+                # layers them on top of this dict instead of this method
+                # growing a request parameter.
+                "owner": str(getattr(self, "owner", "") or ""),
+                "shared": list(getattr(self, "shared", None) or []),
                 "relief": float(getattr(self, "relief", 1.0)),
                 # R5 #60: editable via edit_layer but invisible in meta(),
                 # so no UI could ever show or set it
@@ -4632,11 +4743,11 @@ class Layer:
 class Brush:
     """A greyscale stamp tip (T, T) in [0, 1] plus stroke spacing. Standard brushes
     are seeded procedurally; custom ones are written by the Brush out graph node."""
-    _next = 1
     TIP = 128
 
-    def __init__(self, name=None, tip=None, spacing=0.25, builtin=False):
-        self.id = f"B{Brush._next}"; Brush._next += 1
+    def __init__(self, name=None, tip=None, spacing=0.25, builtin=False,
+                 id=None):
+        self.id = id or "B0"
         self.name = name or self.id
         self.spacing = float(spacing)
         self.builtin = bool(builtin)
@@ -4659,12 +4770,9 @@ class Stamp:
     """A reusable RGBA sticker: captured from a layer (optionally through a
     selection) and placed by click, any number of times, at any scale and
     rotation. Pixels are straight-alpha float32 (h, w, 4)."""
-    _next = 1
-
-    def __init__(self, name=None, pixels=None):
-        self.id = "ST%d" % Stamp._next
-        Stamp._next += 1
-        self.name = name or ("Stamp %d" % (Stamp._next - 1))
+    def __init__(self, name=None, pixels=None, id=None):
+        self.id = id or "ST0"
+        self.name = name or ("Stamp %s" % (id or "0")[2:])
         self.pixels = np.asarray(pixels, np.float32)
 
 
@@ -4690,20 +4798,18 @@ def _standard_brushes():
     for px, py in pts[keep]:
         spray[int(py), int(px)] = 1.0
     spray = np.clip(_gauss_blur(spray, 0.8) * 2.2, 0, 1)
-    return [Brush("Soft round", soft, 0.2, True),
-            Brush("Hard round", hard, 0.15, True),
-            Brush("Chalk", chalk, 0.3, True),
-            Brush("Calligraphy", callig, 0.12, True),
-            Brush("Spray", spray, 0.5, True)]
+    return [Brush("Soft round", soft, 0.2, True, id="B1"),
+            Brush("Hard round", hard, 0.15, True, id="B2"),
+            Brush("Chalk", chalk, 0.3, True, id="B3"),
+            Brush("Calligraphy", callig, 0.12, True, id="B4"),
+            Brush("Spray", spray, 0.5, True, id="B5")]
 
 
 class Selection:
     """A stored selection: a greyscale field like a mask, but living in its own
     list, combinable with set operations, and convertible into a Mask."""
-    _next = 1
-
-    def __init__(self, h, w, name=None, data=None):
-        self.id = f"S{Selection._next}"; Selection._next += 1
+    def __init__(self, h, w, name=None, data=None, id=None):
+        self.id = id or "S0"
         self.name = name or self.id
         self.data = _f32(data) if data is not None else np.zeros((h, w), np.float32)
 
@@ -4715,10 +4821,8 @@ class Spline:
     """An editable path: control points with symmetric tangent handles, cubic
     bezier between neighbours, optionally closed. Strokeable with any brush and
     usable as a movement constraint for freehand painting."""
-    _next = 1
-
-    def __init__(self, name=None, points=None, closed=False):
-        self.id = f"P{Spline._next}"; Spline._next += 1
+    def __init__(self, name=None, points=None, closed=False, id=None):
+        self.id = id or "P0"
         self.name = name or self.id
         # points: [{x, y, hx, hy}]  (hx, hy) = out-handle; in-handle mirrors it
         self.points = [dict(p) for p in (points or [])]
@@ -4752,25 +4856,84 @@ class Spline:
 class Mask:
     """A named greyscale field (H, W) in [0, 1]. Attached to layers it gates their
     alpha; picked as the selection it gates the brush; in the graph it is an image."""
-    _next = 1
-
-    def __init__(self, h, w, name=None, data=None):
-        self.id = f"M{Mask._next}"; Mask._next += 1
+    def __init__(self, h, w, name=None, data=None, id=None):
+        self.id = id or "M0"
         self.name = name or self.id
         self.data = _f32(data) if data is not None else np.ones((h, w), np.float32)
 
     def meta(self):
         return {"id": self.id, "name": self.name}
+# R66: the undo-history spool used to be a mkdtemp that nothing ever
+# removed -- not on exit, not on the next run, never. A machine that had
+# been running leStudio for a while had 806 of these holding 24 GB, and the
+# disk filled mid-painting. Two halves to the fix: this process cleans up
+# after itself at exit, and it sweeps STALE spools left by runs that were
+# killed (an OOM or a SIGKILL never reaches atexit, which is exactly how
+# most of those 806 were made).
+_SPOOL_DIRS = set()
+
+
+def _sweep_stale_spools(max_age_h=6.0):
+    """Remove history spools from runs that are no longer alive. A spool is
+    stale when nothing has written to it for `max_age_h` -- a live document
+    touches its own spool constantly, so the window only has to outlast a
+    quiet session, not a long one."""
+    import glob
+    import shutil
+    import tempfile
+    cut = time.time() - max_age_h * 3600.0
+    for d in glob.glob(os.path.join(tempfile.gettempdir(), "lestudio_hist_*")):
+        if d in _SPOOL_DIRS:
+            continue
+        try:
+            if os.path.getmtime(d) < cut:
+                shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
+
+
+def _register_spool_dir(path):
+    import atexit
+    import shutil
+    if not _SPOOL_DIRS:
+        try:
+            _sweep_stale_spools()
+        except Exception:
+            pass
+
+        @atexit.register
+        def _drop_spools():
+            for d in list(_SPOOL_DIRS):
+                shutil.rmtree(d, ignore_errors=True)
+    _SPOOL_DIRS.add(path)
+
+
+
+
+class _HistoryTooBig(Exception):
+    """The saved history hit its array budget; the rest is not written."""
 
 
 class Document:
     """The single source of truth: an ordered stack of layers with undo history."""
 
-    _next = 1
-
-    def __init__(self, width=768, height=512, name=None, background=(1.0, 1.0, 1.0)):
-        self.id = f"D{Document._next}"; Document._next += 1
-        self.name = name or f"Untitled {self.id[1:]}"
+    def __init__(self, width=768, height=512, name=None,
+                 background=(1.0, 1.0, 1.0), id=None):
+        # R56: no process-global counter. A workspace mints its documents
+        # ("D%d" from what it holds -- Workspace.add); the load path
+        # restores saved ids. A STANDALONE Document (tests, previews,
+        # sub-surfaces like the palette) gets a random tag: unlike a
+        # counter it carries no cross-document ordering dependence, and
+        # auto ids never need to replay -- any id that reaches a file is
+        # restored from that file thereafter.
+        if id is None:
+            import uuid as _uuid
+            id = "D_" + _uuid.uuid4().hex[:8]
+        self.id = id
+        # seeds derived from "which document" use this, never self.id --
+        # it persists through save/load and is constant for new docs
+        self.grain_tag = "g1"
+        self.name = name or ("Untitled %s" % id[1:].lstrip("_"))
         self.width, self.height = int(width), int(height)
         self.layers = []
         self.groups = []          # [{id, name, layers: [layer_id, ...]}]
@@ -4841,6 +5004,15 @@ class Document:
                       "snap": False,
                       "ground": {"enabled": False, "grid": False,
                                  "opacity": 0.5}}
+        # R63: the DOCUMENT PROMPT a connected agent follows (CONTRACT.md
+        # section 2, GET/POST /api/agent/brief). Empty means "no brief has
+        # been written for this picture" -- server.py substitutes its
+        # DEFAULT_AGENT_BRIEF, which is itself the behaviour, not a
+        # placeholder, so the string stays "" here rather than duplicating
+        # that default into every fresh Document.
+        self.agent_brief = ""
+        self.agent_brief_by = ""      # uid of whoever last saved it
+        self.agent_brief_at = 0.0     # time.time() of that save
         self._lnext = 1
         self._fnext = 1
         self._undo, self._redo = [], []
@@ -5047,6 +5219,14 @@ class Document:
                              "place": json.loads(json.dumps(
                                  getattr(l, "place", None))),
                              "locked": bool(getattr(l, "locked", False)),
+                             # R63: undo REBUILDS a fresh Layer object every
+                             # time (see _restore below), so without this the
+                             # very first undo after a claim silently wiped
+                             # EVERY layer's owner/shared back to unowned --
+                             # not just the layer the undo touched. Carried
+                             # here the same way `locked` is, one line up.
+                             "owner": str(getattr(l, "owner", "") or ""),
+                             "shared": list(getattr(l, "shared", None) or []),
                              "relief": float(getattr(l, "relief", 1.0)),
                              # the UNDO snapshot is a separate path from
                              # save/load: without these an undo turned the
@@ -5351,7 +5531,9 @@ class Document:
                 self._spool_dir = tempfile.mkdtemp(prefix="lestudio_hist_")
                 self._history_spool = []
                 self._spool_seq = 0
-            blob = zlib.compress(pickle.dumps(ent, protocol=4), 1)
+                _register_spool_dir(self._spool_dir)
+            blob = zlib.compress(pickle.dumps(self._spool_pack(ent),
+                                              protocol=4), 1)
             path = os.path.join(self._spool_dir,
                                 "h%08d.bin" % self._spool_seq)
             self._spool_seq += 1
@@ -5368,6 +5550,289 @@ class Document:
                     pass
         except Exception:
             pass
+
+    _SPOOL_ARRAY_FIELDS = {"masks": 2, "selections": 2, "brushes": 4,
+                           "stamps": 2}
+
+    def _spool_pool_put(self, arr):
+        """Write an array into the spool's content-addressed pool, once,
+        and return its key."""
+        import hashlib
+        a = np.ascontiguousarray(arr)
+        key = hashlib.sha1(
+            repr((a.shape, str(a.dtype))).encode() + a.tobytes()).hexdigest()
+        pool = getattr(self, "_spool_pool", None)
+        if pool is None:
+            pool = self._spool_pool = {}
+        if key not in pool:
+            path = os.path.join(self._spool_dir, "p_%s.npy" % key)
+            if not os.path.exists(path):
+                with open(path, "wb") as f:
+                    np.lib.format.write_array(f, a, allow_pickle=False)
+            pool[key] = path
+        return key
+
+    def _spool_pool_get(self, key):
+        pool = getattr(self, "_spool_pool", None) or {}
+        path = pool.get(key) or os.path.join(
+            getattr(self, "_spool_dir", ""), "p_%s.npy" % key)
+        with open(path, "rb") as f:
+            return np.lib.format.read_array(f)
+
+    def _spool_arrays(self, snap, fn):
+        """Map `fn` over the interned arrays in a snapshot's mask, selection,
+        brush-tip and stamp records, returning a new snapshot.
+
+        These are INTERNED: one private copy shared by reference across
+        every snapshot that saw the same content, which costs nothing in
+        memory -- and pickling materialises all of them into every single
+        entry. Measured on a 200x150 document with five builtin brush
+        tips: 155,880 bytes of `brushes` in a 156,636-byte entry. The
+        history was 99% duplicated brush tips."""
+        out = dict(snap)
+        for field, slot in self._SPOOL_ARRAY_FIELDS.items():
+            recs = snap.get(field)
+            if not recs:
+                continue
+            new = []
+            for rec in recs:
+                rec = tuple(rec)
+                if len(rec) > slot and isinstance(rec[slot], np.ndarray) or (
+                        len(rec) > slot and isinstance(rec[slot], tuple)
+                        and rec[slot] and rec[slot][0] == "__pool__"):
+                    rec = rec[:slot] + (fn(rec[slot]),) + rec[slot + 1:]
+                new.append(rec)
+            out[field] = new
+        return out
+
+    def _spool_pack(self, ent):
+        """An evicted entry, in the form it goes to disk.
+
+        A path-delta entry carries the PRE-EDIT journal, and in memory
+        that list is shared between every snapshot that saw it -- costing
+        nothing. Pickling it materialises the whole thing, once per entry:
+        measured, 158 KB an entry on a 200x150 canvas, and 400.6 MB of
+        spool for 2,200 strokes on a 400x300 one. That is what the 2 GB
+        spool budget was there to bound, and what made history get PRUNED.
+
+        For an append-only edit the pre-state is just "the journal, this
+        long", so that is what goes to disk: a length and the id of the
+        stroke that has to be sitting at the end of it. Unpacking checks
+        that id before it truncates anything -- see _spool_unpack."""
+        try:
+            label, snap = ent[0], ent[1]
+            ks = snap.get("strokes")
+            if (not snap.get("rerender") or ks is None
+                    or label not in ("Brush", "Erase", "Mask paint")):
+                return ent
+            lean = dict(snap)
+            lean.pop("strokes", None)
+            lean["strokes_n"] = len(ks)
+            lean["strokes_tail"] = ks[-1]["id"] if ks else None
+            lean = self._spool_arrays(
+                lean, lambda a: ("__pool__", self._spool_pool_put(a)))
+            return (label, lean) + tuple(ent[2:])
+        except Exception:
+            return ent
+
+    def _spool_unpack(self, ent):
+        """Put a packed entry back together against the CURRENT journal.
+
+        Undo walks strictly backwards, so when this entry is applied the
+        live journal is its own prefix plus whatever came after -- which
+        is exactly what makes a length enough. The tail id is checked
+        anyway: if it does not match we are out of sequence, and the
+        honest answer is that this state cannot be rebuilt, not a picture
+        assembled from the wrong strokes."""
+        try:
+            snap = ent[1]
+            if "strokes_n" not in snap:
+                return ent
+            n = int(snap["strokes_n"])
+            tail = snap.get("strokes_tail")
+            live = getattr(self, "strokes", [])
+            if n > len(live):
+                return None
+            if n and (live[n - 1]["id"] != tail):
+                return None
+            full = dict(snap)
+            full.pop("strokes_n", None)
+            full.pop("strokes_tail", None)
+            full["strokes"] = [self._shadow_of(k) for k in live[:n]]
+            full = self._spool_arrays(
+                full, lambda r: (self._spool_pool_get(r[1])
+                                 if isinstance(r, tuple)
+                                 and r and r[0] == "__pool__" else r))
+            return (ent[0], full) + tuple(ent[2:])
+        except Exception:
+            return None
+
+    HISTORY_SAVE_BUDGET = 64 * 1024 * 1024   # array bytes of saved history
+
+    def _history_entries(self):
+        """The whole retained history, oldest first, each entry unpacked
+        and ready to restore. Spooled entries come back through
+        _spool_unpack, so a packed one is resolved against the journal the
+        same way undo resolves it."""
+        out = []
+        for path, _nb in (getattr(self, "_history_spool", []) or []):
+            try:
+                import pickle
+                import zlib as _z
+                with open(path, "rb") as f:
+                    ent = pickle.loads(_z.decompress(f.read()))
+            except Exception:
+                continue
+            out.append(ent)
+        # the LIVE entries are packed too. A live path-delta entry still
+        # holds the whole pre-edit journal -- shared by reference, so free
+        # in memory and ruinous the moment it is written out: measured,
+        # one live entry serialised to 13,955 bytes against 1,829 for a
+        # packed one, and on a 51,000-stroke document it would be ~15 MB
+        # EACH. The length and the tail id say the same thing.
+        out.extend(self._hist_pack(e) for e in self._undo)
+        return out
+
+    def _hist_pack(self, ent):
+        """The strokes half of _spool_pack, without touching the array
+        pool -- history_for_save lifts arrays itself."""
+        try:
+            label, snap = ent[0], ent[1]
+            ks = snap.get("strokes")
+            if (not snap.get("rerender") or ks is None
+                    or label not in ("Brush", "Erase", "Mask paint")):
+                return ent
+            lean = dict(snap)
+            lean.pop("strokes", None)
+            lean["strokes_n"] = len(ks)
+            lean["strokes_tail"] = ks[-1]["id"] if ks else None
+            return (label, lean) + tuple(ent[2:])
+        except Exception:
+            return ent
+
+    def _hist_to_json(self, obj, arrays, pool, budget):
+        """A snapshot as JSON, with every array lifted into `arrays`.
+
+        The manifest is JSON and a snapshot is not -- it holds numpy. So
+        arrays come out and leave a ["__arr__", name] marker behind, and
+        `pool` maps content to name so the same brush tip referenced by a
+        thousand entries is stored ONCE. (R67's container hoisting would
+        also catch that, but doing it here keeps the manifest small too:
+        a thousand refs to one name rather than a thousand names.)"""
+        if isinstance(obj, np.ndarray):
+            key = (obj.shape, str(obj.dtype), zlib.crc32(
+                np.ascontiguousarray(obj)))
+            name = pool.get(key)
+            if name is None:
+                if budget[0] < obj.nbytes:
+                    raise _HistoryTooBig()
+                budget[0] -= obj.nbytes
+                name = "hist%d" % len(pool)
+                pool[key] = name
+                arrays[name] = obj
+            return ["__arr__", name]
+        if isinstance(obj, tuple):
+            if len(obj) == 2 and obj[0] == "__pool__":
+                return self._hist_to_json(self._spool_pool_get(obj[1]),
+                                          arrays, pool, budget)
+            return ["__tup__"] + [self._hist_to_json(v, arrays, pool, budget)
+                                  for v in obj]
+        if isinstance(obj, list):
+            return [self._hist_to_json(v, arrays, pool, budget) for v in obj]
+        if isinstance(obj, dict):
+            return {"__dict__": [[k, self._hist_to_json(v, arrays, pool,
+                                                        budget)]
+                                 for k, v in obj.items()]}
+        if isinstance(obj, (np.floating, np.integer)):
+            return obj.item()
+        return obj
+
+    @staticmethod
+    def _hist_from_json(obj, arrays):
+        if isinstance(obj, list):
+            if len(obj) == 2 and obj[0] == "__arr__":
+                a = arrays.get(obj[1])
+                return None if a is None else np.asarray(a)
+            if obj and obj[0] == "__tup__":
+                return tuple(Document._hist_from_json(v, arrays)
+                             for v in obj[1:])
+            return [Document._hist_from_json(v, arrays) for v in obj]
+        if isinstance(obj, dict) and "__dict__" in obj:
+            return {k: Document._hist_from_json(v, arrays)
+                    for k, v in obj["__dict__"]}
+        return obj
+
+    def history_for_save(self, arrays, budget=None):
+        """The retained history, JSON-safe, with its arrays in `arrays`.
+
+        R68: history used to stop dead at a save. The journal crossed it
+        and the undo stack did not, so reopening a painting gave you
+        nothing to walk back through -- the most complete pruning there
+        is, happening on every save. A path-delta entry carries no pixels,
+        so a whole session costs about what its journal already costs;
+        entries that DO carry pixels (a fill, a paste, a transform) ride
+        as arrays and are budgeted, oldest dropped first, with `from_end`
+        saying how much of the history the file actually reaches."""
+        left = [int(self.HISTORY_SAVE_BUDGET if budget is None else budget)]
+        ents = self._history_entries()
+        pool, out = {}, []
+        kept_all = True
+        for ent in reversed(ents):            # newest first: keep those
+            try:
+                # Floor of one, as the undo budget has: the FIRST entry
+                # pays for every array the history shares (the builtin
+                # brush tips alone are 328 KB), so a small budget would
+                # otherwise write no history at all rather than the one
+                # undo somebody is most likely to want.
+                if not out:
+                    left[0] = max(left[0], 1 << 30)
+                snap = self._hist_to_json(ent[1], arrays, pool, left)
+                # the manifest text counts against the budget too, or a
+                # long hand-painted session (one entry per stroke, not
+                # per batch) writes a hundred megabytes of JSON while the
+                # array budget sits untouched
+                left[0] -= len(json.dumps(snap, separators=(",", ":")))
+                if not out:                   # re-arm after the floor
+                    left[0] = min(left[0],
+                                  int(self.HISTORY_SAVE_BUDGET
+                                      if budget is None else budget))
+                if left[0] < 0:
+                    raise _HistoryTooBig()
+            except _HistoryTooBig:
+                kept_all = False
+                break
+            out.append({"label": ent[0], "snap": snap,
+                        "author": ent[2] if len(ent) > 2 else ""})
+        out.reverse()
+        return {"entries": out, "complete": bool(kept_all and
+                                                 len(out) == len(ents)),
+                "n_total": len(ents)}
+
+    def history_from_save(self, hist, arrays):
+        """Put a saved history back. The newest entries become the live
+        stack; anything older goes to the spool, so undo behaves exactly
+        as it did before the save -- instant for the recent window, a
+        disk read beyond it."""
+        ents = []
+        for e in (hist or {}).get("entries", []):
+            snap = self._hist_from_json(e["snap"], arrays)
+            if isinstance(snap, dict):
+                ents.append((e.get("label", "Edit"), snap,
+                             e.get("author", "")))
+        if not ents:
+            return 0
+        # Everything goes to the spool, then the recent window is pulled
+        # straight back. Saved entries are PACKED (a journal length, not a
+        # list), and _unspool_history is the one path that knows how to
+        # resolve that against the live journal -- so it does, rather than
+        # a second copy of the same reasoning living here.
+        self._undo = []
+        for ent in ents:
+            self._spool_history(ent)
+        for _ in range(self.UNDO_KEEP):
+            if not self._unspool_history():
+                break
+        return len(ents)
 
     def history_len(self):
         """How many recorded operations the replay can walk back through:
@@ -5426,9 +5891,12 @@ class Document:
             for path, _nb in spool:
                 try:
                     with open(path, "rb") as f:
-                        ent = pickle.loads(zlib.decompress(f.read()))
+                        ent = self._spool_unpack(
+                            pickle.loads(zlib.decompress(f.read())))
                 except Exception:
-                    break             # spool damaged: stop here, honestly
+                    ent = None
+                if ent is None:
+                    break             # damaged or out of sequence: stop here
                 self._restore(ent[1])
                 _MUT_REV[0] += 1
                 i += 1
@@ -5507,14 +5975,13 @@ class Document:
         _MUT_REV[0] += 1
 
     def _mint_id(self, prefix):
-        """DETERMINISM_BACKLOG P0.3: object ids used to come from
-        process-GLOBAL class counters (Layer._next and friends), so the
-        ids a document minted depended on every other document opened in
-        the same process -- a replayed journal in a fresh process minted
-        different ids and every id reference broke. Ids are now minted
-        per document: the first use of a prefix scans everything that can
-        hold or reference such an id (deleted layers live on in stroke
-        records) and continues from the max."""
+        """DETERMINISM_BACKLOG P0.3 / R56 (the lews_mint law): one
+        counter per prefix, scoped to THIS document -- ids never depend
+        on what else the process has opened, so a replayed journal in a
+        fresh interpreter mints identical ids. The first use of a prefix
+        scans everything that can hold or reference such an id (deleted
+        layers live on in stroke records) and continues from the max;
+        R56 removed the last process-global fallbacks entirely."""
         seq = getattr(self, "_id_seq", None)
         if seq is None:
             seq = self._id_seq = {}
@@ -5544,15 +6011,25 @@ class Document:
         seq[prefix] = n
         return "%s%d" % (prefix, n)
 
-    STROKE_UNDO_MAX = 1500    # past this many strokes on a layer, a
-                              # replay-undo would take too long; fall back
-                              # to windowed pixel deltas (still small).
-                              # Raised 500 -> 1500 with the checkpoint
-                              # ring (P3.3): a warm undo replays only the
-                              # tail past the last 48-stroke boundary
-                              # (measured ~14 ms vs 180 ms cold), so the
-                              # cap now bounds the occasional cold walk,
-                              # not every undo.
+    # R68: this was a flat cap -- past 1500 strokes on a layer, undo gave
+    # up on path deltas and snapshotted PIXELS instead. Which meant the
+    # R33 design (an undo entry stores paths, not pixels) switched itself
+    # off exactly when a painting got big enough to need it: measured,
+    # 2,200 strokes on a 400x300 canvas spooled 400.6 MB of history, every
+    # live entry a full snapshot, and the spool's own 2 GB budget then
+    # PRUNED the oldest history to fit.
+    #
+    # The cap existed to bound a COLD walk -- a replay from the base,
+    # because only one checkpoint was kept and only replays laid it down.
+    # Checkpoints are a ladder now, and painting lays them, so the
+    # distance from the head to the nearest one is bounded by CKPT_EVERY
+    # whatever the layer's size. The question is therefore no longer "how
+    # big is this layer" but "how far is the nearest checkpoint", which is
+    # what UNDO_REPLAY_MAX bounds.
+    STROKE_UNDO_MAX = 1500    # kept for callers/tests that reference it;
+                              # no longer consulted by _stroke_undo_ok
+    UNDO_REPLAY_MAX = 600     # strokes a path-delta undo may have to
+                              # replay before pixels are cheaper
 
     def _stroke_undo_ok(self, lid, label):
         """Can this stroke's undo be a pure path-delta (no pixels)?
@@ -5573,7 +6050,11 @@ class Document:
         if n is None:
             n = sum(1 for k in self.strokes if k["layer"] == lid)
             l._stroke_count = n
-        if n > self.STROKE_UNDO_MAX:
+        # R68: how far the rebuild would have to run, not how big the
+        # layer is. A fifty-thousand-stroke layer with a checkpoint forty
+        # strokes back is cheap to undo; a small one whose journal was
+        # edited in place (checkpoints stale) is not.
+        if self._ckpt_reach(lid) > self.UNDO_REPLAY_MAX:
             return False
         has_base = lid in (getattr(self, "_replay_base", {}) or {})
         if not has_base and n > 0:
@@ -5640,10 +6121,51 @@ class Document:
                 full = True                   # that layer was kept whole
         return only, (None if full else region)
 
+    def _unspool_history(self):
+        """Pull the newest spooled entry back onto the live stack.
+
+        R68: `record()` has always spooled evicted entries to disk so the
+        history could reach the beginning -- and `undo()` only ever popped
+        the live stack, so it stopped dead at UNDO_KEEP with the rest of
+        the session sitting in a temp directory. Measured: 2,200 strokes
+        gave 24 live entries and 2,176 spooled, and undo succeeded exactly
+        24 times. That is what bit the R65 repaint, where a bad pass was
+        ~70 entries old against a stack of 23.
+
+        This is the "slower if you go back far enough" Devin asked for:
+        one decompress and unpickle off disk, then an ordinary undo."""
+        import os
+        import pickle
+        import zlib
+        sp = getattr(self, "_history_spool", None)
+        if not sp:
+            return False
+        path, _nb = sp[-1]
+        try:
+            with open(path, "rb") as f:
+                ent = self._spool_unpack(
+                    pickle.loads(zlib.decompress(f.read())))
+        except Exception:
+            ent = None
+        if ent is None:
+            sp.pop()                      # unreadable or out of sequence
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            return False
+        sp.pop()
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        self._undo.insert(0, ent)
+        return True
+
     def undo(self):
         self._sim_run = None
         _MUT_REV[0] += 1
-        if not self._undo:
+        if not self._undo and not self._unspool_history():
             return False
         ent = self._undo.pop()            # (label, snap[, author])
         label, snap = ent[0], ent[1]
@@ -6825,6 +7347,9 @@ class Document:
             if sel is None:
                 sel = Selection(self.height, self.width, name)
                 sel.id = self._mint_id("S")
+                if not name:
+                    sel.name = sel.id       # R58: the default name followed the
+                                            # placeholder id ("S0" on S1/S2/..)
                 # Remember the SHAPE for geometric tools. A rect or ellipse is
                 # geometry, not pixels: keeping it means a resize can
                 # re-rasterise it exactly instead of resampling a mask and
@@ -7771,12 +8296,23 @@ class Document:
         return getattr(self, "_assets", {}).get(key)
 
     def _asset_refs(self):
-        """asset key -> layer ids whose journal references it."""
+        """asset key -> layer ids whose journal references it.
+
+        R67: EVERY `*_asset` key counts, not just `brush["asset"]`. A stroke
+        painted under a selection carries its gate as `sel_asset`, and a
+        flood or a regional clear carries one too -- none of which this saw,
+        so none of those gates were written into the file. On reload replay
+        found the mask missing, dropped the stroke and cleared _replay_ok:
+        honest at replay time, but the file had already said replay_ok, and
+        journal-first there are no pixels left to fall back on. leCore's own
+        `journal_asset_refs` takes the same position and says why -- a
+        reference is a VALUE, not a naming convention an app might skip."""
         refs = {}
         for k in self._iter_strokes():
-            a = k["brush"].get("asset")
-            if a:
-                refs.setdefault(a, set()).add(k["layer"])
+            b = k["brush"]
+            for key, val in b.items():
+                if (key == "asset" or key.endswith("_asset")) and val:
+                    refs.setdefault(val, set()).add(k["layer"])
         return refs
 
     def _trim_assets(self):
@@ -8558,7 +9094,7 @@ class Document:
     def fill_generated(self, lid, x, y, style="both", tolerance=0.12,
                        contiguous=True, selection=None, sel_invert=False,
                        softness=2.0, sample="layer", seed=None, record=True,
-                       **kw):
+                       _report=None, **kw):
         """Paint-bucket that fills with GENERATED strokes instead of flat
         content (R48). The region is exactly what flood_fill would cover
         (same tolerance/contiguous/selection semantics), softened at the
@@ -8579,6 +9115,15 @@ class Document:
         if softness and softness > 0:
             g = np.clip(_gauss_blur(g[..., None], float(softness))[..., 0],
                         0, 1)
+        # _report is an out-param (not the return value -- that stays a bare
+        # int, pinned by the R48/R49/R53 determinism tests): the SERVER
+        # route wants the actual pixel coverage to report as `filled`
+        # instead of the placeholder 0 it used to hardcode (R58 UX #3 --
+        # "stitched 0 strokes" with no explanation when the bucket found
+        # nothing at the click).
+        covered = int((g > 0.05).sum())
+        if _report is not None:
+            _report["covered"] = covered
         if float(g.max()) < 0.05:
             return 0
         ys, xs = np.where(g > 0.05)
@@ -8853,6 +9398,31 @@ class Document:
         if getattr(self, "_replaying", False):
             return None                      # a replay must not re-record
         self._capture_replay_base(lid)
+        # R68: checkpoint WHILE PAINTING, not only while replaying. The
+        # ladder used to be filled by replays alone, so the head drifted
+        # arbitrarily far from the newest checkpoint and the first undo
+        # after a long pass paid a cold walk from the base. One state copy
+        # per CKPT_EVERY strokes keeps the head within a bounded replay at
+        # all times, which is what lets the flat stroke cap go away.
+        #
+        # It happens HERE, at the top, and not after the stroke is
+        # recorded: record_stroke runs BEFORE paint() lays any pixels, so
+        # a checkpoint taken at the bottom holds the state from before the
+        # stroke while claiming the index after it. (Which is exactly what
+        # it did, and test_r31_journal_never_trims caught it.) At the top
+        # of the NEXT record the previous stroke has certainly landed, so
+        # the state and the index agree.
+        try:
+            _pl = self.layer(lid)
+            _m = getattr(_pl, "_stroke_count", 0)
+            _last = getattr(_pl, "_last_sid", None)
+            if (_m and _last and _m % self.CKPT_EVERY == 0
+                    and not getattr(self, "_replaying", False)):
+                _jn = self._layer_journal_len(lid)
+                if _jn:
+                    self._ckpt_put(lid, _jn, _last)
+        except Exception:
+            pass
         # cached per-layer facts for _stroke_undo_ok (avoids an O(strokes)
         # scan per record): how many strokes, and whether any carry media/
         # material (paint body rebuilds from zero on replay) or a knife
@@ -8880,6 +9450,10 @@ class Document:
                              "brush": dict(brush or {})})
         if self._stroke_shadow is not None:
             self._stroke_shadow.append(self._shadow_of(self.strokes[-1]))
+        try:
+            self.layer(lid)._last_sid = sid      # for the next checkpoint
+        except KeyError:
+            pass
         if len(self.strokes) > self.MAX_STROKES:
             # DETERMINISM_BACKLOG P2.4: NEVER trim the journal. Head-cut
             # strokes used to dirty their layers (replay-from-base lost
@@ -8891,6 +9465,16 @@ class Document:
             if self._stroke_shadow is not None:
                 del self._stroke_shadow[:cut]
         return sid
+
+    def _layer_journal_len(self, lid):
+        """How long this layer's journal is -- the index a checkpoint
+        taken right now would sit at. Must agree with the ordering
+        replay_layer walks, which is spooled segments then the live tail."""
+        n = (getattr(self, "_journal_spooled", {}) or {}).get(lid, 0)
+        for k in self.strokes:
+            if k["layer"] == lid:
+                n += 1
+        return n
 
     def _journal_spool(self, seg):
         """Move old journal segments to disk (zlib-pickled, tempdir).
@@ -9122,15 +9706,8 @@ class Document:
         # epoch matches (no in-place journal edits since), the index still
         # fits, and the stroke at the boundary is the same one -- undo
         # TRUNCATIONS keep prefixes intact, so undo is the path that wins.
-        _ck = (getattr(self, "_replay_ckpt", {}) or {}).get(lid)
-        _ck_start = 0
-        if (into is None and _ck is not None
-                and _ck["epoch"] == getattr(self, "_journal_epoch", 0)
-                and 0 < _ck["i"] <= len(_journal)
-                and _journal[_ck["i"] - 1]["id"] == _ck["last_id"]):
-            _ck_start = _ck["i"]
-        else:
-            _ck = None
+        _ck = (self._ckpt_best(lid, _journal) if into is None else None)
+        _ck_start = _ck["i"] if _ck is not None else 0
         self.layer(lid).pixels = (
             _ck["pixels"].copy() if _ck is not None
             else (base.copy() if into is None else into))
@@ -9211,7 +9788,7 @@ class Document:
         # there instead of at the base. One state copy per replay, and
         # layers feeding a stratum chain are excluded (their replay also
         # rebuilds OTHER layers, which a checkpoint cannot stand in for).
-        _ck_every = 48
+        _ck_every = self.CKPT_EVERY
         _ck_target = (len(_journal) - 1) // _ck_every * _ck_every
         _ck_want = (into is None and _ck_target > _ck_start
                     and not getattr(self.layer(lid), "stratum_next", None))
@@ -9221,27 +9798,7 @@ class Document:
                 if _ki < _ck_start:
                     continue
                 if _ck_want and _ki == _ck_target:
-                    _L = self.layer(lid)
-                    _msn = getattr(_L, "_media", None)
-                    if not hasattr(self, "_replay_ckpt"):
-                        self._replay_ckpt = {}
-                    self._replay_ckpt[lid] = {
-                        "epoch": getattr(self, "_journal_epoch", 0),
-                        "i": _ki, "last_id": _journal[_ki - 1]["id"],
-                        "pixels": _L.pixels.copy(),
-                        "hm": (_L.height_map.copy()
-                               if _L.height_map is not None else None),
-                        "mm": (_L.material_map.copy()
-                               if getattr(_L, "material_map", None)
-                               is not None else None),
-                        "em": (_L.media_map.copy()
-                               if getattr(_L, "media_map", None)
-                               is not None else None),
-                        "media": ({f: v.copy() for f, v in _msn.items()}
-                                  if _msn is not None else None),
-                        "inject_n": int(getattr(_L, "_media_inject_n", 0)),
-                        "hyg": bool(getattr(_L, "_hyg_filled", False))}
-                    self._trim_ckpts()
+                    self._ckpt_put(lid, _ki, _journal[_ki - 1]["id"])
                 self._replay_apply(k)
             out = self.layer(lid).pixels
             self._replay_mediasim[lid] = (
@@ -9517,6 +10074,91 @@ class Document:
                 L.material_map, L.media_map = mm, em
             _MUT_REV[0] += 1                       # live pixels are back
         yield self.composite().copy()              # the honest final frame
+
+    def _layer_stroke_counts(self):
+        """Journaled strokes per layer, spooled segments included."""
+        n = dict(getattr(self, "_journal_spooled", {}) or {})
+        for k in getattr(self, "strokes", ()):
+            n[k["layer"]] = n.get(k["layer"], 0) + 1
+        return n
+
+    def _replay_first_set(self, budget=None):
+        """Which layers may save journal-first, within one TIME budget for
+        the whole document.
+
+        Leaving pixels out of the file is not a free win: it trades bytes
+        for time, and the time is paid on the person's next Open. Measured
+        on the R66 painting -- 880x600, six layers, 51,622 oil strokes --
+        the smallest possible file is 8.5 MB against 160.3 MB, and opening
+        it takes 977 s against 8 s. Nineteen times smaller, a hundred and
+        twenty times slower, because replay costs ~30 ms a stroke at this
+        size. That is a fine trade for an archive and a terrible one for a
+        document somebody is working in.
+
+        So the budget is a whole-document one, in strokes, and it is spent
+        on the CHEAPEST layers first: a sketch rebuilds entirely and ships
+        tiny, a finished painting keeps the pixels of its heavy layers and
+        still sheds its light ones. What the person waits for on Open is
+        bounded either way, which is the thing a per-layer budget could
+        not promise."""
+        left = int(budget if budget is not None else REPLAY_BUDGET)
+        if left <= 0:
+            return {l.id for l in self.layers}
+        counts = self._layer_stroke_counts()
+        out = set()
+        for l in sorted(self.layers, key=lambda x: counts.get(x.id, 0)):
+            c = counts.get(l.id, 0)
+            if c <= left:
+                out.add(l.id)
+                left -= c
+        return out
+
+    def _replay_affordable(self, lid, budget=None):
+        """Is `lid` in this document's journal-first set? See
+        _replay_first_set -- this is the single-layer form, and a save
+        computes the set once rather than asking per layer."""
+        try:
+            return lid in self._replay_first_set(budget)
+        except Exception:
+            return False
+
+    def _replay_provable(self, lid):
+        """Can this layer be rebuilt from base + journal, PROVABLY?
+
+        The save path used to ask `_replay_ok`, which is optimistic: it
+        starts True and only specific damage events clear it. That is fine
+        while the pixels ship beside it and useless once they do not, so
+        this is the gate for leaving them out. It is deliberately a
+        precondition check rather than a replay -- `replay_is_faithful`
+        costs ~6 s per 120 strokes at 1080p, and autosave runs every 90 s
+        over documents with fifty thousand strokes in them. Every way a
+        replay is known to come back wrong is enumerated here, and a
+        verified-and-still-current verdict short-circuits it:
+
+          * the layer was damaged by something that is not a stroke
+          * the journal has a hole in it (a segment that would not read)
+          * there is no base to replay from
+          * the journal references an asset the file will not contain --
+            a paste, or the gate of a stroke painted under a selection
+
+        Anything this cannot prove keeps its pixels. The cost of being
+        wrong is asymmetric: a needless 8 MB array against a layer that
+        comes back blank."""
+        l = self.layer(lid)
+        if not bool(getattr(l, "_replay_ok", True)):
+            return False
+        if getattr(self, "_journal_lost", False):
+            return False
+        if lid not in (getattr(self, "_replay_base", {}) or {}):
+            return False
+        if not self._replay_affordable(lid):
+            return False
+        if self._replay_ok_cached(lid):
+            return True
+        for key, lids in self._asset_refs().items():
+            if lid in lids and self._asset_get(key) is None:
+                return False
+        return True
 
     def _layer_fingerprint(self, lid):
         """A cheap signature of a layer's pixels. Strided so it costs ~1 ms on
@@ -10990,18 +11632,135 @@ class Document:
         return len(pts)
 
     CKPT_BUDGET = 256 * 1024 * 1024
+    # Journal positions between checkpoints. This is the interactive undo
+    # latency: an undo replays from the nearest checkpoint, so the interval
+    # IS the work. Measured on a 400x300 layer, 600 strokes, five undos:
+    #     48 -> 95 ms each, ladder 23 MB
+    #     24 -> 112 ms each, ladder 48 MB
+    #     16 ->  22 ms each, ladder 71 MB
+    #      8 ->  24 ms each, ladder 144 MB
+    # 16 is the knee; past it the ladder doubles for nothing. Painting cost
+    # is unchanged either way -- one state copy per interval is ~0.6 ms a
+    # stroke amortised, against the full pixel snapshot per edit this
+    # replaced.
+    CKPT_EVERY = 16
+
+    def _ckpt_bytes(c):
+        t = c["pixels"].nbytes
+        for f in ("hm", "mm", "em"):
+            if c.get(f) is not None:
+                t += c[f].nbytes
+        return t
+    _ckpt_bytes = staticmethod(_ckpt_bytes)
+
+    def _ckpt_put(self, lid, i, last_id):
+        """Add a checkpoint for `lid` at journal position `i`.
+
+        R68: this used to be ONE slot per layer, overwritten by whichever
+        replay ran last, and only ever filled DURING a replay. Walking
+        backwards through history therefore went: cheap, cheap, ... then
+        one step crossed the boundary, threw the only checkpoint away and
+        replayed the whole journal from the base to build the next one.
+        That cold walk is what `STROKE_UNDO_MAX` existed to avoid, by
+        giving up on rebuildable history entirely past 1500 strokes and
+        snapshotting pixels instead -- which is the opposite of the thing
+        the design was for.
+
+        A LADDER of positions makes backward walking cheap for as far as
+        the budget reaches, and a cold walk the rare case Devin described:
+        slower if you go back far enough, and not something ordinary use
+        hits."""
+        L = self.layer(lid)
+        msn = getattr(L, "_media", None)
+        if not hasattr(self, "_replay_ckpt"):
+            self._replay_ckpt = {}
+        self._replay_ckpt.setdefault(lid, {})[int(i)] = {
+            "epoch": getattr(self, "_journal_epoch", 0),
+            "i": int(i), "last_id": last_id,
+            "pixels": L.pixels.copy(),
+            "hm": (L.height_map.copy()
+                   if getattr(L, "height_map", None) is not None else None),
+            "mm": (L.material_map.copy()
+                   if getattr(L, "material_map", None) is not None else None),
+            "em": (L.media_map.copy()
+                   if getattr(L, "media_map", None) is not None else None),
+            "media": ({f: v.copy() for f, v in msn.items()}
+                      if msn is not None else None),
+            "inject_n": int(getattr(L, "_media_inject_n", 0)),
+            "hyg": bool(getattr(L, "_hyg_filled", False)),
+            "used": _MUT_REV[0]}
+        self._trim_ckpts()
+
+    def _ckpt_best(self, lid, journal):
+        """The newest still-valid checkpoint at or before the end of
+        `journal`, or None. Valid means: the same journal epoch (no
+        in-place edits since), the position still fits, and the stroke at
+        the boundary is the same one -- an undo TRUNCATES the journal, so
+        prefixes stay intact and that is exactly the case this wins."""
+        cks = (getattr(self, "_replay_ckpt", None) or {}).get(lid)
+        if not cks:
+            return None
+        epoch = getattr(self, "_journal_epoch", 0)
+        best = None
+        for i in sorted(cks, reverse=True):
+            c = cks[i]
+            if c["epoch"] != epoch or not (0 < i <= len(journal)):
+                continue
+            if journal[i - 1]["id"] != c["last_id"]:
+                continue
+            best = c
+            break
+        if best is not None:
+            best["used"] = _MUT_REV[0]
+        return best
 
     def _trim_ckpts(self):
-        """Checkpoints are CACHE: bounded, deletable, regenerable."""
+        """Checkpoints are CACHE: bounded, deletable, regenerable.
+
+        Evicts least-recently-USED first, so the ladder the person is
+        actually walking down survives and a layer nobody is undoing
+        gives its memory up."""
         cks = getattr(self, "_replay_ckpt", None) or {}
-        def nb(c):
-            t = c["pixels"].nbytes
-            for f in ("hm", "mm", "em"):
-                if c[f] is not None:
-                    t += c[f].nbytes
-            return t
-        while cks and sum(nb(c) for c in cks.values()) > self.CKPT_BUDGET:
-            cks.pop(next(iter(cks)))
+        def total():
+            return sum(self._ckpt_bytes(c)
+                       for per in cks.values() for c in per.values())
+        t = total()
+        if t <= self.CKPT_BUDGET:
+            return
+        flat = sorted(((c.get("used", 0), lid, i)
+                       for lid, per in cks.items() for i, c in per.items()))
+        for _used, lid, i in flat:
+            if t <= self.CKPT_BUDGET:
+                break
+            per = cks.get(lid) or {}
+            c = per.pop(i, None)
+            if c is not None:
+                t -= self._ckpt_bytes(c)
+            if not per:
+                cks.pop(lid, None)
+
+    def _ckpt_drop(self, lid=None):
+        """Forget checkpoints for one layer, or all of them."""
+        cks = getattr(self, "_replay_ckpt", None) or {}
+        if lid is None:
+            cks.clear()
+        else:
+            cks.pop(lid, None)
+
+    def _ckpt_reach(self, lid):
+        """How many strokes a replay of this layer would have to apply:
+        the distance from the newest usable checkpoint to the head."""
+        try:
+            n = getattr(self.layer(lid), "_stroke_count", None)
+            if n is None:
+                n = sum(1 for k in self.strokes if k["layer"] == lid)
+            cks = (getattr(self, "_replay_ckpt", None) or {}).get(lid) or {}
+            epoch = getattr(self, "_journal_epoch", 0)
+            near = max((i for i, c in cks.items() if c["epoch"] == epoch
+                        and i <= n), default=0)
+            return int(n - near)
+        except Exception:
+            return 1 << 30
 
     def _touch_journal(self):
         """The journal's EXISTING content changed (points moved, brushes
@@ -11089,6 +11848,29 @@ class Document:
                 return k
         raise KeyError(sid)
 
+    def clear_region(self, lid, x0, y0, x1, y1):
+        """Erase a RECTANGLE of a layer, journal-first. R65: a painter who
+        needs to take a mistake OUT (rather than paint over it -- which is
+        how a flat wall-coloured patch ended up on an object layer) should
+        not first have to mint a selection object. The rectangle becomes
+        the same frozen gate asset a selection clear records, so replay
+        reproduces it exactly and the layer stays replay-faithful; there is
+        no second code path for the replay to learn."""
+        h, w = self.height, self.width
+        x0, x1 = max(0, min(int(x0), int(x1))), min(w, max(int(x0), int(x1)))
+        y0, y1 = max(0, min(int(y0), int(y1))), min(h, max(int(y0), int(y1)))
+        if x1 <= x0 or y1 <= y0:
+            return 0
+        gate = np.zeros((h, w), np.float32)
+        gate[y0:y1, x0:x1] = 1.0
+        self.record("Clear region", only=[lid], journaled=True,
+                    region=(x0, y0, x1, y1))
+        self.record_stroke(lid, [[float(x0), float(y0)]], {
+            "op": "clear", "sel_asset": self._asset_put(gate),
+            "sel_invert": False}, new=True)
+        self.clear(lid, record=False, sel_mask=gate)
+        return int((x1 - x0) * (y1 - y0))
+
     def clear(self, lid, selection=None, sel_invert=False, record=True,
               sel_mask=None):
         """Erase the selection's contents on a layer (Delete in every editor).
@@ -11153,9 +11935,24 @@ class Document:
               taper=0.0, material=None, mix=0.0, real_brush=False,
               charge0=None, lanes0=None, sel_mask=None):
         self._locked_guard(lid)
-        if not record and not getattr(self, "_replaying", False):
+        if (not record and not stroke_new
+                and not getattr(self, "_replaying", False)):
             # an unrecorded dab lays pixels no replay can regenerate:
-            # path-delta undo is off for this layer from here on (R33)
+            # path-delta undo is off for this layer from here on (R33).
+            #
+            # `stroke_new` is the part that was missing, and it is the whole
+            # distinction: `record=False` means "do not open your own undo
+            # entry", NOT "this paint is unrecorded". The batch path (R16)
+            # paints record=False, stroke_new=True precisely because the
+            # BATCH already opened one undo entry and every stroke still
+            # goes into the replay log -- measured: record=False with
+            # stroke_new=True appends a stroke record, without it does not.
+            # Demoting on record=False alone meant every layer painted
+            # through /api/paint_batch -- the agent and swarm fast path --
+            # was permanently non-replayable, so its pixels had to be
+            # written into every .lews instead of being rebuilt from the
+            # journal. On the R61 painting that was 7 of 13 layers and
+            # 93 MB of float32 for a picture that displays as a 1.3 MB PNG.
             self.layer(lid)._replay_ok = False
         self.layer(lid).paper = _paper_of(self)[0]   # stock this sits on
         matdef = _resolve_material(material)   # raises on an unknown name
@@ -11470,6 +12267,9 @@ class Document:
         _dep_cache = None
         _body_scale = 1.0
         _wetcol = None
+        _reach = 0                  # how far THIS stroke's flow/wicking can
+                                     # touch pixels beyond its own bbox, on
+                                     # every side (see where it's set, below)
         _had_relief = True          # only false on a layer's FIRST relief
         if not erase and (matdef is not None or media in _MEDIA):
             _med0 = matdef if matdef is not None else _MEDIA[media]
@@ -11805,6 +12605,30 @@ class Document:
                 _bw = l.height_map[_bs_y0:_bs_y1, _bs_x0:_bs_x1]
                 _bw[...] = _bs_snap + (_bw - _bs_snap) * _body_scale
             flow_bottom = min(h, y1b + int(med["iters"]) + 2)
+            # DERIVED reach, not a guessed constant: how far THIS medium's
+            # own physics can move pixels beyond the stroke's mask bbox, on
+            # EVERY side -- not just down. _paint_flow already computes
+            # exactly this internally ("full pad of iters+2 on all sides
+            # puts the lossy boundary permanently out of reach" -- its own
+            # words) and _watercolour derives its own wicking pad from
+            # `absorb`; reuse both rather than re-guessing a fixed margin.
+            # MEASURED (slotted-shim fresh-composite reference, see
+            # composite_patch): with only the downward side padded by
+            # iters+2 and a flat 8px everywhere else, a single 'water'
+            # stroke (iters=26, needs 28) left a ring up to 20px past the
+            # old 8px pad whose shading/composite were never re-touched --
+            # 2.2-3.8/255 against a truly fresh recompute, present on the
+            # water stroke's OWN first patch (not a float32 accumulation),
+            # identical at 800x600 and 4000x3000. oil (iters=10) and
+            # acrylic (iters=6) both fit inside the old 8px pad already
+            # (needed 12 and 8 respectively -- acrylic's is borderline,
+            # which is exactly why "a constant that happens to be big
+            # enough for oil" is the wrong kind of fix), which is why only
+            # water ever showed it.
+            _reach = int(med["iters"]) + 2
+            if float(med.get("absorb", 0.0)) > 1e-3:
+                _reach = max(_reach, int(np.clip(
+                    4.0 + float(med["absorb"]) * 7.0, 4, 22)))
             if matdef is None and getattr(l, "media_map", None) is not None:
                 # the body PHYSICS lay paint OUTSIDE the pigment mask --
                 # gravity runs below it, wicking feathers past it, berms rim
@@ -11838,17 +12662,46 @@ class Document:
             composite_patch(self, 0, 0, w, h, rev_entry)
             self._last_paint_rect = (0, 0, w, h)
         elif not getattr(self, "_replaying", False):
-            _shade_patch(l, x0b, y0b, x1b, flow_bottom, rev_entry)
-            # the composite (and the client's dirty window) must cover
-            # the RE-LIT ring around the stroke, not just the pigment
-            # bbox -- relief shading reaches ~6 px past the mask
-            pd = 8
-            composite_patch(self, x0b - pd, y0b - pd, x1b + pd,
-                            flow_bottom + pd, rev_entry)
-            self._last_paint_rect = (max(0, int(x0b) - pd),
-                                     max(0, int(y0b) - pd),
-                                     min(w, int(x1b) + pd),
-                                     min(h, int(flow_bottom) + pd))
+            # re-light/re-blend everywhere this stroke's OWN physics could
+            # have touched a pixel -- `_reach` (0 for a plain stroke with no
+            # medium, so this is exactly the old x0b/y0b/x1b/flow_bottom
+            # window then) widens all four sides by the medium's derived
+            # flow/wicking radius; see where `_reach` is computed, above,
+            # for the measurement that added it.
+            rx0, ry0 = x0b - _reach, y0b - _reach
+            rx1, ry1 = x1b + _reach, flow_bottom + _reach
+            # SAFETY VALVE, not a tuned constant: once the padded window
+            # covers a big share of the canvas, patching it costs nearly
+            # what a full recompute would (composite()'s cost is ~linear
+            # in pixel count -- measured 0.17/0.8/8-12 s at 800x600 /
+            # 1920x1080 / 4000x3000) but pays that cost INLINE, making the
+            # stroke itself slow instead of the next serve. Past that
+            # point, honest deferral beats an expensive patch: drop the
+            # cache exactly like the periodic rebase above and let the
+            # next fetch pay one full composite. MEASURED: every current
+            # medium and material (`_MEDIA`, `_MATERIALS`) has iters <= 26
+            # and absorb <= 0.9, so the widest real `_reach` is water's
+            # 28 px -- nowhere close to this threshold at any tested size
+            # (worst window measured well under 1% of canvas area) -- so
+            # this branch does not fire for anything shipped today; it
+            # exists so a FUTURE medium with a much larger reach fails
+            # safe (a slow stroke or an honest full composite) rather than
+            # silently under-patching the way water did.
+            if (rx1 - rx0) * (ry1 - ry0) > 0.5 * w * h:
+                self._ccache = None
+                self._last_paint_rect = (0, 0, w, h)
+            else:
+                _shade_patch(l, rx0, ry0, rx1, ry1, rev_entry)
+                # the composite (and the client's dirty window) must cover
+                # the RE-LIT ring around THAT window too -- relief shading
+                # reaches ~6 px past whatever it was asked to light
+                pd = 8
+                composite_patch(self, rx0 - pd, ry0 - pd, rx1 + pd, ry1 + pd,
+                                rev_entry)
+                self._last_paint_rect = (max(0, int(rx0) - pd),
+                                         max(0, int(ry0) - pd),
+                                         min(w, int(rx1) + pd),
+                                         min(h, int(ry1) + pd))
         # REPLAY paints must not touch the caches: replay_layer is used as a
         # read-only PROBE by the faithfulness guard, which swaps in base
         # pixels, replays, and restores -- patching mid-replay stamped the
@@ -14302,9 +15155,22 @@ def _morph(ctx, ins, p):
         return np.clip(out, 0, 1)
     if p["method"] == "dct":
         h, w = a.shape[:2]
-        n = min(256, max(h, w))                # morph_scene needs SQUARE (backlog D)
-        sa, sb = _resize(a, n, n), _resize(b, n, n)
-        frames = mind().morph_scene(sa.astype(float), sb.astype(float), steps=11)
+        # R55: morph_scene accepts non-square images since leCore 0.2.21
+        # (its DCT went separable -- APP_BACKLOG D, pinned upstream), so
+        # the morph keeps the frame's aspect; the square crunch survives
+        # only as the fallback for older builds. Cap the long side for
+        # cost, preserving aspect.
+        sc = min(1.0, 256.0 / max(h, w))
+        nh, nw = max(8, int(h * sc)), max(8, int(w * sc))
+        sa, sb = _resize(a, nh, nw), _resize(b, nh, nw)
+        try:
+            frames = mind().morph_scene(sa.astype(float), sb.astype(float),
+                                        steps=11)
+        except Exception:
+            n = min(256, max(h, w))
+            sa, sb = _resize(a, n, n), _resize(b, n, n)
+            frames = mind().morph_scene(sa.astype(float), sb.astype(float),
+                                        steps=11)
         f = np.asarray(frames[int(round(float(p["t"]) * (len(frames) - 1)))],
                        np.float32)
         return np.clip(_resize(f, h, w), 0, 1)
@@ -16303,16 +17169,25 @@ def _smartsmooth(ctx, ins, p):
         "mask. sigma should roughly match the blur being undone; more iters digs "
         "deeper (and slower).", alpha="process")
 def _deconvolve(ctx, ins, p):
-    # leCore's sharpen_image is 1-D in 0.2.3 (see APP_BACKLOG D); this is the
-    # same residual-fitting loop run against our 2-D gaussian.
     img = _rgb(ins["image"])
     sigma, iters = float(p["sigma"]), int(p["iters"])
-    out = img.copy()
-    lam = 0.9
-    for _ in range(iters):
-        out = out + lam * (img - _gauss_blur(out, sigma))
-        out = np.clip(out, -0.25, 1.25)
-    out = np.clip(out, 0, 1)
+    # R55: sharpen_image handles 2-D/RGB since leCore 0.2.21 (it was 1-D --
+    # APP_BACKLOG D; the engine pinned the fix in
+    # test_lestudio_reported_bugs). The residual loop below survives only
+    # as the fallback for older builds.
+    try:
+        out = np.asarray(mind().sharpen_image(img, sigma=sigma, lam=0.9,
+                                              iters=iters), np.float32)
+        if out.shape != img.shape:
+            raise ValueError("shape")
+        out = np.clip(out, 0, 1)
+    except Exception:
+        out = img.copy()
+        lam = 0.9
+        for _ in range(iters):
+            out = out + lam * (img - _gauss_blur(out, sigma))
+            out = np.clip(out, -0.25, 1.25)
+        out = np.clip(out, 0, 1)
     return np.clip(img + float(p["strength"]) * (out - img), 0, 1)
 
 
@@ -17852,10 +18727,15 @@ class NodeGraph:
     def _struct_key(self):
         """Cheap fingerprint of the graph's SHAPE -- types, params, wiring. No
         pixel hashing; changing any of these invalidates the signature memo."""
-        return hash(tuple(sorted(
+        # R56: zlib.crc32 over stable bytes, never hash() -- Python salts
+        # hash() per process, so this memo key (and anything derived from
+        # it) silently changed identity every launch (the app_lint
+        # hash_seed law; leStudio's grain-texture lesson, relearned)
+        import zlib
+        return zlib.crc32(repr(sorted(
             (nid, n["type"], repr(sorted((n.get("params") or {}).items())),
              repr(sorted((n.get("inputs") or {}).items())))
-            for nid, n in self.nodes.items())))
+            for nid, n in self.nodes.items())).encode())
 
     def _pixhash(self, arr):
         """Content hash for change detection. Strided (every 2nd row/col): 1/4 the
@@ -18407,17 +19287,64 @@ def sdf_to_glsl(dsl):
     return mind().to_shadertoy(parse_dsl(dsl))
 
 
-def _doc_section(d, g, cache_pixels=True):
+# How many strokes a whole document may rebuild on Open. See
+# Document._replay_first_set: this is a TIME budget wearing a stroke count,
+# and at the ~30 ms a stroke the engine replays at, 1200 is about half a
+# minute in the worst case and nothing at all for an ordinary sketch.
+# 0 disables the check -- every provable layer goes journal-first, which is
+# what ?light=1 asks for and what an archive wants.
+REPLAY_BUDGET = 1200
+
+
+def _replay_first(cache_pixels, d, l):
+    """Should this layer's pixels be left out of the file?
+
+    `cache_pixels` is a tri-state: None (the default) means DECIDE -- leave
+    them out wherever the layer can prove it replays; True forces them in
+    for every layer; False forces them out wherever a base exists, which is
+    the old ?light=1 behaviour and is kept so a caller can still ask for the
+    smallest possible file without the gate's opinion."""
+    if cache_pixels is True:
+        return False
+    if cache_pixels is False:
+        # the explicit "smallest possible file" ask: the affordability
+        # budget is the caller's problem, not ours
+        return bool(getattr(l, "_replay_ok", True))
+    try:
+        ids = getattr(d, "_replay_first_ids", None)
+        if ids is not None and l.id not in ids:
+            return False
+        return bool(d._replay_provable(l.id))
+    except Exception:
+        return False
+
+
+def _doc_section(d, g, cache_pixels=None, replay_budget=None):
     """(meta, arrays) for one document -- the shared vocabulary of both the
     core container path and the legacy zip path."""
     arrays = {}
+    # the journal-first set, computed ONCE: it is a whole-document budget,
+    # so asking layer by layer would re-derive (and re-spend) it each time
+    try:
+        d._replay_first_ids = (d._replay_first_set(replay_budget)
+                               if cache_pixels is None else None)
+    except Exception:
+        d._replay_first_ids = None
     dm = {"id": d.id, "name": d.name, "width": d.width, "height": d.height,
+          "grain_tag": getattr(d, "grain_tag", None),
           "dpi": float(getattr(d, "dpi", 72.0)),
           # the studio the picture was painted in: losing these on save meant
           # a reopened painting sat on a different substrate and stopped
           # building past the layer ceiling
           "paper": str(getattr(d, "paper", "canvas")),
           "auto_stratum": bool(getattr(d, "auto_stratum", False)),
+          # R63: the document prompt saves and loads with the .lews like any
+          # other document field -- a picture reopened later must still say
+          # what its agent is following, not silently fall back to the
+          # default because the brief itself vanished.
+          "agent_brief": str(getattr(d, "agent_brief", "") or ""),
+          "agent_brief_by": str(getattr(d, "agent_brief_by", "") or ""),
+          "agent_brief_at": float(getattr(d, "agent_brief_at", 0.0) or 0.0),
           "brush_charge": float(getattr(d, "brush_charge", 1.0)),
           "brush_color": [float(v) for v in getattr(d, "brush_color", (0.0, 0.0, 0.0))],
           "brush_lanes": ([[float(v) for v in row]
@@ -18498,6 +19425,15 @@ def _doc_section(d, g, cache_pixels=True):
                              "place": json.loads(json.dumps(
                                  getattr(l, "place", None))),
                              "locked": bool(getattr(l, "locked", False)),
+                             # R63: the collaboration lock survives
+                             # save/load like any other layer property (see
+                             # the comment on Layer.owner) -- an owner who
+                             # closes the app and reopens the .lews later
+                             # still holds their layers; the 120s stale-yield
+                             # in server.py is what lets that go stale, not
+                             # a reload.
+                             "owner": str(getattr(l, "owner", "") or ""),
+                             "shared": list(getattr(l, "shared", None) or []),
                              "relief": float(getattr(l, "relief", 1.0)),
                              # the UNDO snapshot is a separate path from
                              # save/load: without these an undo turned the
@@ -18521,15 +19457,29 @@ def _doc_section(d, g, cache_pixels=True):
                                  getattr(l, "curve_profile", None))),
                              "dome_profile": json.loads(json.dumps(
                                  getattr(l, "dome_profile", None)))})
-        # DETERMINISM_BACKLOG P3.1: with cache_pixels=False, a layer whose
-        # truth is base + journal saves NO pixel arrays at all -- the
-        # loader replays it back. Baked pixels become optional CACHE, and
-        # the journal is the document.
-        _derived = (not cache_pixels
-                    and bool(getattr(l, "_replay_ok", True))
+        # DETERMINISM_BACKLOG P3.1: a layer whose truth is base + journal
+        # saves NO pixel arrays at all -- the loader replays it back. Baked
+        # pixels become optional CACHE, and the journal is the document.
+        #
+        # R67: that is now the DEFAULT (cache_pixels=None), not something
+        # you had to ask for with ?light=1. Nothing asked: not the save
+        # route, not autosave, not the live mirror. Measured on the R66
+        # painting, 32.7 MB of the live document was rasters the journal
+        # already rebuilds, and every layer in the file said replay_ok.
+        # The gate is `_replay_provable` rather than that optimistic flag,
+        # and what cannot be proved keeps its pixels.
+        _derived = ((_replay_first(cache_pixels, d, l))
                     and l.id in (getattr(d, "_replay_base", {}) or {}))
         if _derived:
             dm["layers"][-1]["pixels_cached"] = False
+            # ...and leave a signature of the pixels we are NOT storing, so
+            # the reopen can CHECK its own rebuild instead of trusting it.
+            # It costs three numbers.
+            try:
+                fp = d._layer_fingerprint(l.id)
+                dm["layers"][-1]["pixels_fp"] = [float(fp[0]), float(fp[1])]
+            except Exception:
+                pass
         else:
             arrays[f"layer_{l.id}"] = l.pixels
         base = getattr(d, "_replay_base", {}).get(l.id)
@@ -18560,11 +19510,44 @@ def _doc_section(d, g, cache_pixels=True):
                         arrays[f"replaybody_{_tag}_{l.id}"] = _arr
                 dm["layers"][-1]["has_replay_body"] = True
         # P2.2: replay exactness must survive a save/load -- persist the
-        # dirty flag instead of silently resetting it to clean
-        dm["layers"][-1]["replay_ok"] = bool(getattr(l, "_replay_ok", True))
+        # dirty flag instead of silently resetting it to clean.
+        #
+        # R67: ...and a journal with a HOLE in it is not replayable, whatever
+        # the flag says. `_iter_strokes` skips a segment it cannot read and
+        # sets `_journal_lost`; that flag was read NOWHERE, so a save could
+        # stamp replay_ok on a layer whose strokes are partly gone. The
+        # comment on `_iter_strokes` leaned on the faithfulness gate to catch
+        # it, and the gate does -- on the nudge and warp paths, which call
+        # replay_is_faithful(). The save path never did. With pixels in the
+        # file that was merely wasteful; journal-first it is a layer that
+        # comes back wrong and silently.
+        dm["layers"][-1]["replay_ok"] = (bool(getattr(l, "_replay_ok", True))
+                                         and not getattr(d, "_journal_lost",
+                                                         False))
+        # R67: whether the base was captured AFTER a layer-wide fill. Replay
+        # consumes this to repeat the SAME fill decision the original first
+        # stroke made -- and it was captured, read twice, and never written.
+        # After a save it came back an empty dict, so replay ran with
+        # _hyg_filled False even for a base that had the fill, and the
+        # replay_ok stamped beside it outlived its own precondition.
+        if (getattr(d, "_replay_base_hyg", {}) or {}).get(l.id):
+            dm["layers"][-1]["replay_base_hyg"] = True
         # P1.3: which stored asset this layer's imports/placements replay from
         if getattr(l, "_source_asset", None):
             dm["layers"][-1]["source_asset"] = l._source_asset
+        # R68: the paint's SPECULAR -- two scalars, and they used to be
+        # written only inside the `has_height` branch, i.e. only when the
+        # height ARRAY was being stored. A journal-first layer skips that
+        # array (the body rebuilds from the journal) and so lost its gloss
+        # and its medium with it, coming back on the 0.3 default instead
+        # of oil's 0.34. Measured on the R66 painting: every layer's
+        # pixels, height map and media map round-tripped BIT-IDENTICAL and
+        # the composite still differed by 5.98e-3 across 1.4% of the
+        # picture -- the specular, shifted, exactly where the paint has
+        # body. They are scalars; they are not part of the array decision
+        # and they do not belong behind it.
+        dm["layers"][-1]["paint_gloss"] = float(getattr(l, "paint_gloss", 0.3))
+        dm["layers"][-1]["paint_media"] = getattr(l, "paint_media", None)
         if not _derived and getattr(l, "height_map", None) is not None and l.height_map.any():
             # the paint's BODY: without it a reopened impasto piece comes back
             # flat and every later stroke flows over ridges that are not there
@@ -18576,8 +19559,7 @@ def _doc_section(d, g, cache_pixels=True):
                 # a thin sheet on a plateau again
                 arrays[f"below_{l.id}"] = hb
                 dm["layers"][-1]["has_below"] = True
-            dm["layers"][-1]["paint_gloss"] = float(getattr(l, "paint_gloss", 0.3))
-            dm["layers"][-1]["paint_media"] = getattr(l, "paint_media", None)
+
         mm = getattr(l, "material_map", None)
         if not _derived and mm is not None and (mm[..., 2] > 1e-3).any():
             # the paint's STUFF: without it a reopened piece keeps its gold
@@ -18644,6 +19626,14 @@ def _doc_section(d, g, cache_pixels=True):
             arrays["pal_" + k] = v
     # P1.3: content-addressed assets ride in the .lews, each stored ONCE --
     # only the ones the journal still references (natural GC on save)
+    # R68: the retained undo history rides with the document. It used to
+    # stop dead at a save -- the journal crossed and the stack did not, so
+    # a reopened painting had nothing to walk back through, which is the
+    # most complete pruning of history there is and it happened every time.
+    try:
+        dm["history"] = d.history_for_save(arrays)
+    except Exception:
+        dm["history"] = None
     if hasattr(d, "_asset_refs"):
         _keys = [k for k in d._asset_refs()
                  if d._asset_get(k) is not None]
@@ -18654,8 +19644,43 @@ def _doc_section(d, g, cache_pixels=True):
     return dm, arrays
 
 
+def _doc_has_work(d):
+    """Is there anything in this document a person would miss?
+
+    Strokes (live or spooled), undo history, more than the one background
+    layer, or any non-empty layer. Anything at all counts; the question is
+    only whether the document is a BLANK left behind by a `New` that was
+    never painted in."""
+    try:
+        if getattr(d, "strokes", None) or getattr(d, "_journal_segments", None):
+            return True
+        if getattr(d, "_stroke_n", 0):
+            return True
+        if (getattr(d, "splines", None) or getattr(d, "masks", None)
+                or getattr(d, "selections", None)
+                or getattr(d, "groups", None)):
+            return True
+        if len(getattr(d, "layers", ())) != 1:
+            return True
+        l = d.layers[0]
+        if getattr(l, "source", None) is not None:
+            return True
+        px = getattr(l, "pixels", None)
+        if px is None:
+            return True
+        # A new document is one layer of one flat colour -- the background
+        # it was created with. Anything a person did to it, including a
+        # flood fill or a paste, leaves more than one colour behind. The
+        # undo stack is NOT the signal: merely resizing a new document
+        # records an entry, and that is not work.
+        flat = px.reshape(-1, px.shape[-1])
+        return bool((flat != flat[0]).any())
+    except Exception:
+        return True              # never drop a document over a bad guess
+
+
 def save_workspace(docs, graphs, active_id, extras=None,
-                   cache_pixels=True):
+                   cache_pixels=None, replay_budget=None):
     """One .lews file via leCore's sectioned container (>= 0.2.2). Every
     document (with its graph) is a section of kind "lestudio.document"; extras
     are foreign sections carried verbatim -- the container never interprets
@@ -18663,24 +19688,140 @@ def save_workspace(docs, graphs, active_id, extras=None,
     from holographic.io_and_interop.holographic_container import save_container
     sections = []
     for did, d in docs.items():
+        # R67: an UNTOUCHED document is not saved. Nothing in leStudio ever
+        # closes a document -- /api/new switches the active one and leaves
+        # the old resident, with no cap and no staleness -- so eight runs of
+        # a script left eight full paintings in the workspace and the writer
+        # saved every one of them. Measured on the R66 file: 74% of 160 MB
+        # was seven abandoned drafts.
+        #
+        # "Untouched" is deliberately the strictest reading: no strokes, no
+        # journal, no undo history, and not the active document. A document
+        # with a single mark in it is somebody's work and is saved. Nothing
+        # is CLOSED here either -- the file just stops carrying blanks.
+        if (did != active_id and not _doc_has_work(d)):
+            continue
         dm, arrays = _doc_section(d, graphs.get(did),
-                                  cache_pixels=cache_pixels)
-        sections.append({"kind": "lestudio.document", "id": did,
-                         "meta": dm, "arrays": arrays})
+                                  cache_pixels=cache_pixels,
+                                  replay_budget=replay_budget)
+        lw = _lews_kinds()
+        sections.append(
+            lw.make_section("lestudio.document", did, dm, arrays) if lw
+            else {"kind": "lestudio.document", "id": did,
+                  "meta": dm, "arrays": arrays})
+    sections = _hoist_shared_arrays(sections)
     sections += list(extras or [])
     return save_container(sections,
                           meta={"app": "lestudio", "active": active_id})
 
 
+# The document schema this build writes. 1 was the pre-R67 shape; 2 adds
+# per-layer `pixels_fp`, `replay_base_hyg`, and `array_refs` -- all optional,
+# so a v1 file reads correctly as-is and the migration is an identity. It is
+# registered anyway, because the point of a version is that the NEXT change
+# has somewhere to hang its migration instead of guessing from field
+# presence, which is what this format was doing.
+DOC_SCHEMA = 2
+
+
+def _lews_kinds():
+    """Register leStudio's kinds with leCore, once, and hand back the module.
+
+    None when the engine on PYTHONPATH predates the LEWS layer -- every
+    caller treats that as "write the plain container", which is what
+    leStudio did for every version up to here."""
+    try:
+        from holographic.io_and_interop import holographic_lews as _lw
+    except Exception:
+        return None
+    if not getattr(_lews_kinds, "_done", False):
+        try:
+            _lw.register_kind_schema(
+                "lestudio.document", DOC_SCHEMA,
+                "a leStudio picture: layers, journal and replay bases",
+                migrate={1: lambda sec: sec})
+        except Exception:
+            return None
+        _lews_kinds._done = True
+    return _lw
+
+
+def _hoist_shared_arrays(sections):
+    """Store an array ONCE, however many sections reference it.
+
+    leCore has carried content-addressed assets since 0.2.21 --
+    `asset_key` is sha256 over shape, dtype and bytes, and a
+    `lecore.asset` section's id IS its content, so putting the same bytes
+    twice is a no-op. leStudio adopted the live-collaboration half of that
+    module and none of the persistence half: it nests every array inside
+    its own document section, so the same brush tip, the same pasted
+    image, the same replay base in two documents is written once per
+    document. Measured on the R66 file: 137 arrays, 64 distinct by
+    content, 39 MB of byte-identical duplicates.
+
+    An array used once stays where it is -- hoisting it would only make
+    the file harder to read for no gain. An array used twice or more
+    becomes one `lecore.asset` section and a reference from each user."""
+    lw = _lews_kinds()
+    if lw is None or len(sections) < 2:
+        return sections
+    try:
+        seen = {}
+        for si, sec in enumerate(sections):
+            for name, arr in (sec.get("arrays") or {}).items():
+                seen.setdefault(lw.asset_key(arr), []).append((si, name))
+        shared = {k: v for k, v in seen.items() if len(v) > 1}
+        if not shared:
+            return sections
+        out = [dict(sec, arrays=dict(sec.get("arrays") or {}),
+                    meta=dict(sec.get("meta") or {})) for sec in sections]
+        assets = []
+        for key, uses in shared.items():
+            si, name = uses[0]
+            assets.append(lw.asset_section(sections[si]["arrays"][name],
+                                           name=name))
+            for si, name in uses:
+                out[si]["meta"].setdefault("array_refs", {})[name] = \
+                    "asset:" + key
+                out[si]["arrays"].pop(name, None)
+        return out + assets
+    except Exception:
+        return sections           # never fail a save over a size optimisation
+
+
+def _resolve_shared_arrays(sections):
+    """Put hoisted arrays back where their sections expect them."""
+    pool = {}
+    for sec in sections:
+        if sec.get("kind") == "lecore.asset":
+            data = (sec.get("arrays") or {}).get("data")
+            if data is not None:
+                pool[str(sec.get("id"))] = data
+    if not pool:
+        return sections
+    out = []
+    for sec in sections:
+        refs = (sec.get("meta") or {}).get("array_refs") or {}
+        if refs:
+            sec = dict(sec, arrays=dict(sec.get("arrays") or {}))
+            for name, key in refs.items():
+                if key in pool:
+                    sec["arrays"][name] = pool[key]
+        out.append(sec)
+    return out
+
+
 def _doc_from_section(dm, arrays):
     import re as _re
     def bump(cls, ident):
-        m = _re.search(r"(\d+)$", str(ident))
-        if m:
-            cls._next = max(cls._next, int(m.group(1)) + 1)
+        # R56: class counters are gone (ids are per-document, persisted --
+        # the lews_mint law); nothing to advance. Kept as a no-op so the
+        # seven call sites below stay as documentation of where ids enter.
+        pass
     if True:
         d = Document(dm["width"], dm["height"], dm["name"])
         d.id = dm["id"]; bump(Document, d.id)
+        d.grain_tag = dm.get("grain_tag")
         d.layers, d.masks, d.selections, d.brushes = [], [], [], []
         d.lights = [dict(li) for li in dm.get("lights", [])]
         d.fields = [dict(f) for f in dm.get("fields", [])]
@@ -18721,6 +19862,8 @@ def _doc_from_section(dm, arrays):
                        if f"layer_{lm['id']}" in arrays else None))
             if lm.get("pixels_cached") is False:
                 l._needs_rebuild = True    # P3.1: truth = base + journal
+                if lm.get("pixels_fp"):
+                    l._pixels_fp = [float(v) for v in lm["pixels_fp"]]
             l.id = lm["id"]; bump(Layer, l.id)
             if lm.get("placed") and f"src_{l.id}" in arrays:
                 l.source = arrays[f"src_{l.id}"]
@@ -18748,6 +19891,12 @@ def _doc_from_section(dm, arrays):
             l.place = json.loads(json.dumps(lm.get("place"))) \
                 if lm.get("place") else None
             l.locked = bool(lm.get("locked", False))
+            # R63: .get(...) with a default rather than a bare index -- an
+            # OLD .lews simply lacks these keys, and it must load as an
+            # unowned layer (the safe default) instead of a KeyError on
+            # every pre-R63 file.
+            l.owner = str(lm.get("owner", "") or "")
+            l.shared = list(lm.get("shared") or [])
             l.relief = float(lm.get("relief", 1.0))
             l.palette = bool(lm.get("palette", False))
             l.stratum_of = lm.get("stratum_of")
@@ -18799,19 +19948,24 @@ def _doc_from_section(dm, arrays):
                                 np.float32)
                      if f"replaybody_{_t}_{l.id}" in arrays else None)
                     for _t in ("h", "m", "e"))
+            if lm.get("replay_base_hyg"):
+                if not hasattr(d, "_replay_base_hyg"):
+                    d._replay_base_hyg = {}
+                d._replay_base_hyg[l.id] = True
             if "replay_ok" in lm:
                 l._replay_ok = bool(lm["replay_ok"])
             elif lm.get("has_replay_base") and not lm.get("has_replay_body"):
                 # legacy file: a base without body provenance cannot prove
                 # replay exactness -- stay honest, fall back to snapshots
                 l._replay_ok = False
+            if "paint_gloss" in lm:
+                l.paint_gloss = float(lm.get("paint_gloss", 0.3))
+            if lm.get("paint_media"):
+                l.paint_media = lm["paint_media"]
             if lm.get("has_below") and f"below_{l.id}" in arrays:
                 l.height_below = np.asarray(arrays[f"below_{l.id}"], np.float32)
             if lm.get("has_height") and f"height_{l.id}" in arrays:
                 l.height_map = np.asarray(arrays[f"height_{l.id}"], np.float32)
-                l.paint_gloss = float(lm.get("paint_gloss", 0.3))
-                if lm.get("paint_media"):
-                    l.paint_media = lm["paint_media"]
             if lm.get("has_material") and f"material_{l.id}" in arrays:
                 l.material_map = np.asarray(arrays[f"material_{l.id}"],
                                             np.float32)
@@ -18844,7 +19998,28 @@ def _doc_from_section(dm, arrays):
         d.dpi = float(dm.get("dpi", 72.0))     # physical scale rides along too
         # the studio comes back with the picture
         d.paper = str(dm.get("paper", "canvas"))
+        # ...and onto every layer, because that is where the SHADING reads
+        # it from (set_paper pushes it down for exactly this reason). The
+        # loader set it on the document alone, so a reopened painting
+        # relit its paint over CANVAS tooth whatever stock it was painted
+        # on -- `getattr(lyr, "paper", "canvas")` in three places, and the
+        # attribute was never there.
+        #
+        # This is the R66 still life's last unexplained divergence, and it
+        # took the long way round to find: every layer's pixels, height
+        # map and media map round-tripped bit-identical, the metadata was
+        # identical field for field, and the composite still differed by
+        # 5.98e-3 across 1.4% of the picture. The rebuilt document was the
+        # RIGHT one; the one that loaded its pixels was wrong.
+        for _l in d.layers:
+            _l.paper = d.paper
         d.auto_stratum = bool(dm.get("auto_stratum", False))
+        # R63: .get(...) with defaults, same reasoning as l.owner above -- an
+        # old .lews simply lacks these keys and must load as "no brief
+        # written" (the default quiet-support behaviour), not a KeyError.
+        d.agent_brief = str(dm.get("agent_brief", "") or "")
+        d.agent_brief_by = str(dm.get("agent_brief_by", "") or "")
+        d.agent_brief_at = float(dm.get("agent_brief_at", 0.0) or 0.0)
         d.brush_charge = float(dm.get("brush_charge", 1.0))
         bc = dm.get("brush_color")
         if bc:
@@ -18918,8 +20093,42 @@ def _doc_from_section(dm, arrays):
         # and strokes are all loaded by now) rebuilds them here
         for _l in d.layers:
             if getattr(_l, "_needs_rebuild", False):
-                d._stroke_rerender(_l.id)
+                # A LOCKED layer still has to be rebuilt. The lock is a
+                # guard against the person editing it by accident; a replay
+                # is not an edit, it is how the layer gets its pixels back
+                # at all. Journal-first made this reachable for the first
+                # time -- with pixels in the file the rebuild never ran --
+                # and it failed as "layer 'Background' is locked".
+                _was = bool(getattr(_l, "locked", False))
+                _l.locked = False
+                try:
+                    d._stroke_rerender(_l.id)
+                finally:
+                    _l.locked = _was
                 del _l._needs_rebuild
+                # R67: CHECK the rebuild against the signature the writer
+                # left behind. Leaving pixels out of the file is only safe
+                # if a wrong rebuild is loud, and a layer that comes back
+                # blank is exactly the failure that would otherwise be
+                # discovered by looking at the picture weeks later.
+                want = getattr(_l, "_pixels_fp", None)
+                if want is not None:
+                    del _l._pixels_fp
+                    got = d._layer_fingerprint(_l.id)
+                    span = max(1.0, abs(want[0]), abs(got[0]))
+                    if (abs(got[0] - want[0]) / span > 1e-3
+                            or abs(got[1] - want[1]) > 2e-3):
+                        _l._replay_ok = False
+                        if not hasattr(d, "_replay_mismatch"):
+                            d._replay_mismatch = []
+                        d._replay_mismatch.append(_l.id)
+        # R68: and the history, last -- it references the journal by
+        # length, so the journal has to be in place first
+        try:
+            if dm.get("history"):
+                d.history_from_save(dm["history"], arrays)
+        except Exception:
+            pass
         # P0.3: the constructor's background layer primed the per-doc id
         # sequence at 1 BEFORE the real layers loaded -- the next mint
         # then reissued an id the document already holds (a pasted layer
@@ -18938,11 +20147,22 @@ def load_workspace(data):
         loaded = load_container(data)
         sections, meta = loaded["sections"], loaded.get("meta") or {}
         assert meta.get("app") == "lestudio"
+        # R67: arrays shared between documents are stored once as
+        # `lecore.asset` sections; put them back before anything reads them
+        sections = _resolve_shared_arrays(sections)
+        lw = _lews_kinds()
         docs, graphs, extras = {}, {}, []
         for sec in sections:
             if sec.get("kind") == "lestudio.document":
+                # ...and lift an older document schema to the one this build
+                # reads, rather than inferring the shape from which fields
+                # happen to be present
+                if lw is not None:
+                    sec = lw.upgrade_section(sec)
                 d, g = _doc_from_section(sec["meta"], sec["arrays"])
                 docs[d.id], graphs[d.id] = d, g
+            elif sec.get("kind") == "lecore.asset":
+                pass              # consumed by _resolve_shared_arrays
             else:
                 extras.append(sec)
         assert docs

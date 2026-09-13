@@ -7,6 +7,7 @@ Requires the [ui] extra (Flask + Pillow):  pip install "lestudio"
 """
 from __future__ import annotations
 
+import collections
 import io
 import json
 import os
@@ -22,10 +23,10 @@ import uuid
 from . import (OPS, Document, NodeGraph, accel_status, decode_image, image_dpi,
                parallel_advice, load_workspace,
                mind, op_catalog, png_bytes, save_workspace, sdf_to_glsl,
-               BLEND_MODES, _MATERIALS, _PAPERS)
+               BLEND_MODES, _MATERIALS, _PAPERS, _doc_has_work)
 
 try:
-    from flask import Flask, Response, jsonify, request, send_file
+    from flask import Flask, Response, g, jsonify, request, send_file
 except ImportError as e:  # pragma: no cover
     raise SystemExit('leStudio needs Flask + Pillow: pip install "lestudio"') from e
 
@@ -36,8 +37,33 @@ class _WS:
     """The workspace: several documents, one active. `DOC`/`GRAPH` below keep the
     whole existing endpoint surface working against the active document."""
 
+    def _mint_did(self):
+        """Workspace-scoped document ids. R57: minted by the ENGINE's
+        persisted per-prefix counter on the shared .lews directory
+        (`Workspace.mint("D")` -- the lews_mint law itself, not our imitation
+        of it), so no app on this workspace can ever issue the same id, even
+        from another process. The scan fallback keeps an engine without the
+        Workspace class booting; the collision guard covers ids that predate
+        the counter (the boot doc's explicit "D1", restored files)."""
+        try:
+            ws = _lews_ws()
+            if ws is not None:
+                did = ws.mint("D")
+                while did in getattr(self, "docs", {}):
+                    did = ws.mint("D")
+                return did
+        except Exception:
+            pass
+        import re as _re
+        n = 0
+        for did in getattr(self, "docs", {}):
+            m = _re.match(r"^D(\d+)$", str(did))
+            if m:
+                n = max(n, int(m.group(1)))
+        return "D%d" % (n + 1)
+
     def __init__(self):
-        d = Document(768, 512)
+        d = Document(768, 512, id="D1")
         self.docs = {d.id: d}
         self.graphs = {d.id: NodeGraph(d)}
         self.active = d.id
@@ -63,7 +89,8 @@ class _WS:
         return self.graphs[self.active]
 
     def add(self, w, h, name=None, background=(1.0, 1.0, 1.0)):
-        d = Document(w, h, name, background=background)
+        d = Document(w, h, name, background=background,
+                     id=self._mint_did())
         self.docs[d.id] = d
         self.graphs[d.id] = NodeGraph(d)
         self._wire()
@@ -284,8 +311,70 @@ SYNC = {"rev": 0, "src": "", "clients": {}, "tabuser": {}, "names": {},
         # per-USER id (never tab id -- mixing the two gave people their own
         # ghost chip): viewing = which doc each user has active, activity =
         # their latest {tool, layer} ping for the presence chips
-        "viewing": {}, "activity": {}}
+        "viewing": {}, "activity": {},
+        # R63: "have we heard from this uid at all, recently" -- for the
+        # layer-ownership stale-lock check. `clients`/`tabuser` answer "is a
+        # tab open RIGHT NOW" but get POPPED the instant a tab closes
+        # (see /api/events' `finally`), losing exactly the timestamp a
+        # staleness check needs; `joined` never updates after the first
+        # sighting. last_seen is stamped by the ownership gate on every
+        # identified request AND by the /api/events heartbeat, so a uid
+        # working purely through the JSON API (a script, an agent, most of
+        # this test suite) counts as present without ever opening a stream.
+        "last_seen": {}}
 INVITES = {"pending": [], "joined": []}    # session-scoped guest bookkeeping
+
+# R56: presence is MIRRORED into the shared .lews workspace directory via
+# the engine's live-session contract (lews_touch keyed by the PERSON --
+# the ghost-editor law is the engine's now), so any other app on this
+# machine (Poly Studio, an agent shell) sees leStudio's participants
+# through lews_presence / the engine's /api/presence door. The in-app
+# SYNC table stays the POLICY layer (host, kick, invites, per-doc
+# viewing) -- APP_FOUNDATION §8 keeps hosting policy app-side.
+_LEWS_TOUCH = {"last": {}}
+
+# R57: the shared live workspace DIRECTORY (engine Workspace: locked, atomic,
+# journalled container + persisted id mints). One root for everything that
+# touches it -- agent_surface mounts on it, presence mirrors into it, and the
+# document sections now autosave into it -- so any other app or agent holding
+# the same directory open sees leStudio's documents, ids and presence as one
+# coherent workspace instead of three half-overlapping ones.
+_WS_ROOT = os.environ.get("LESTUDIO_WS") \
+    or os.path.expanduser("~/.lestudio_agent_ws")
+_LEWS = {"ws": None, "sha": {}}
+
+
+def _lews_ws():
+    """The engine's live .lews Workspace on `_WS_ROOT`, or None when the
+    engine on PYTHONPATH predates it. Cached: the object is cheap but the
+    guard import is not free per request."""
+    if _LEWS["ws"] is None:
+        try:
+            from holographic.io_and_interop.holographic_lews import Workspace
+            os.makedirs(_WS_ROOT, exist_ok=True)
+            _LEWS["ws"] = Workspace(_WS_ROOT, app="lestudio")
+        except Exception:
+            return None
+    return _LEWS["ws"]
+
+
+def _lews_mirror_touch(uid, activity=None):
+    try:
+        now = time.time()
+        if now - _LEWS_TOUCH["last"].get(uid, 0) < 2.0:
+            return
+        _LEWS_TOUCH["last"][uid] = now
+        from . import mind as _mind_fn
+        m = _mind_fn()
+        if not hasattr(m, "lews_touch"):
+            return
+        root = _WS_ROOT
+        os.makedirs(root, exist_ok=True)
+        m.lews_touch(root, str(uid), activity=dict(activity or {}),
+                     name=SYNC["names"].get(uid) or str(uid),
+                     app="lestudio")
+    except Exception:
+        pass                                    # presence mirror is best-effort
 
 
 @app.after_request
@@ -353,8 +442,38 @@ def events():
         SYNC["clients"][cid] = time.time()
         SYNC["tabuser"][cid] = uid
         SYNC["joined"].setdefault(uid, time.time())
+        _lews_mirror_touch(uid, SYNC["activity"].get(uid))
         last = -1
         beat = 0.0
+        # R57: cross-APP awareness. The shared .lews workspace journals every
+        # put/note from every app on the directory; this stream forwards the
+        # ones that are NOT ours (exclude="lestudio" -- our own writes already
+        # reached this client as SYNC revs), so the UI can say "Poly Studio
+        # changed the workspace" without polling anything itself.
+        lws = _lews_ws()
+        try:
+            lews_last = lws.rev() if lws is not None else 0
+        except Exception:
+            lws, lews_last = None, 0
+
+        def lews_foreign():
+            nonlocal lews_last
+            if lws is None:
+                return None
+            try:
+                # changes_since (not since): the cursor must advance over our
+                # OWN excluded entries too, or every poll re-reads them
+                ent = lws.changes_since(lews_last)
+                if ent:
+                    lews_last = max(e.get("rev", lews_last) for e in ent)
+                ent = [e for e in ent if e.get("app") != "lestudio"]
+                if not ent:
+                    return None
+                return [{"rev": e.get("rev"), "op": e.get("op"),
+                         "id": e.get("id"), "kind": e.get("kind"),
+                         "app": e.get("app")} for e in ent[-20:]]
+            except Exception:
+                return None
         try:
             while True:
                 if uid in SYNC["kicked"]:
@@ -364,6 +483,12 @@ def events():
                            + chr(10) + chr(10))
                     return
                 SYNC["clients"][cid] = time.time()
+                # R63: a tab sitting open with no other traffic is still
+                # PRESENT -- without this, an owner who parked their cursor
+                # and stopped clicking (but never closed the tab) would look
+                # "absent" to the 120s stale-lock check the moment 120s of
+                # silence passed, and lose their layer mid-thought.
+                SYNC["last_seen"][uid] = time.time()
                 now = time.time()
                 live_uids = {SYNC["tabuser"].get(c, c)
                              for c, t in SYNC["clients"].items() if now - t < 10}
@@ -381,6 +506,17 @@ def events():
                                       if u2 in SYNC["activity"]}})
                         + chr(10) + chr(10))
                 elif now - beat >= 2.0:
+                    foreign = lews_foreign()
+                    if foreign:
+                        # another APP wrote the shared workspace: forward the
+                        # journal entries themselves (rev unchanged -- this is
+                        # not a leStudio edit, so no self-refresh storm)
+                        beat = now
+                        yield ("data: " + json.dumps(
+                            {"rev": last, "src": SYNC["src"],
+                             "workspace": foreign})
+                            + chr(10) + chr(10))
+                        continue
                     # THE GHOST FIX. This generator only wrote to the socket
                     # when rev changed -- on an idle document, never. A closed
                     # tab's connection is only discovered when a WRITE fails,
@@ -418,9 +554,20 @@ def _editor_roster(me=""):
         if now - t < 10:
             u2 = SYNC["tabuser"].get(c, c)
             tabs[u2] = tabs.get(u2, 0) + 1
+    # R64: this list stays TAB-based on purpose. It is what elects the host
+    # and authorises a kick, and both are properties of a browser session --
+    # a script that painted once must not become host and start removing
+    # people. Scripts and agents ARE here and DO show up: they arrive
+    # through /api/state's `peers` (R63), and the presence popup renders
+    # both lists. Two questions, two answers, rather than one list forced
+    # to mean both.
     live = sorted((SYNC["joined"].get(u2, now), u2) for u2 in tabs)
     host = live[0][1] if live else ""
-    return [{"id": u2, "name": SYNC["names"].get(u2, ""),
+    # R64: one naming rule everywhere. This list said "" for anyone who had
+    # not registered a display name while /api/state's peers said what
+    # _display_name says, so the same agent appeared named in one roster
+    # and anonymous in the other.
+    return [{"id": u2, "name": SYNC["names"].get(u2) or _display_name(u2),
              "tabs": tabs[u2],
              "activity": SYNC["activity"].get(u2),
              "joined": round(now - j, 1), "you": u2 == me, "host": u2 == host}
@@ -433,6 +580,20 @@ def _req_uid():
     return (request.headers.get("X-User")
             or request.headers.get("X-Client")
             or request.args.get("user") or request.args.get("client") or "")
+
+
+def _owner_uid():
+    """The identity LAYER OWNERSHIP keys off -- X-User specifically (or its
+    query-param twin), never the X-Client/tab-id fallback _req_uid() uses
+    for presence and kick. A tab id is reborn every reload and every new
+    tab; keying a LOCK to one would mean reloading your own browser tab
+    loses your own layer, and would let a script that never identifies
+    itself as a person rack up a permanent claim just by painting once.
+    CONTRACT.md section 1's "U == '' (no identity sent)" means exactly
+    this: no X-User -- which is also, not coincidentally, why this test
+    suite's many X-Client-only / header-free paint calls keep working:
+    they were never claiming anything to begin with."""
+    return request.headers.get("X-User") or request.args.get("user") or ""
 
 
 @app.get("/api/editors")
@@ -629,12 +790,21 @@ def perspective_post():
     act = d.get("action", "set")
     P = getattr(DOC, "persp", {})
     if act == "estimate":
+        from . import _Estimate
         try:
             est = estimate_perspective(DOC, d.get("layer", ""))
         except KeyError:
             return jsonify(error="no such layer"), 404
-        except Exception as ex:
+        except _Estimate as ex:
+            # R59: an honest "nothing to estimate from", written for a
+            # person -- not the raw exception text the catch-all produced
             return jsonify(error=str(ex)), 400
+        except Exception as ex:
+            app.logger.warning("perspective estimate failed: %r", ex)
+            return jsonify(error="could not read perspective from that "
+                                 "layer — draw some straight edges and try "
+                                 "again, or place the vanishing points by "
+                                 "hand"), 400
         DOC.record("Estimate perspective", only=[])
         P.update(vps=est["vps"], horizon=est["horizon"], enabled=True)
         from . import _MUT_REV
@@ -984,6 +1154,7 @@ def editors_name():
     me = _req_uid()
     if not me:
         return jsonify(error="no user id on the request"), 400
+    _touch_presence(me)         # announcing yourself IS being here (R63)
     nm = str((request.json or {}).get("name", "")).strip()[:24]
     if nm:
         SYNC["names"][me] = nm
@@ -1017,6 +1188,630 @@ def _refuse_kicked():
         if uid and uid in SYNC["kicked"]:
             return jsonify(error="you were removed from this session by the "
                                  "host"), 403
+
+
+# ------------------------------------------------------------------------------------------------
+# R63: live-collaboration layer ownership (CONTRACT.md sections 1-3).
+#
+# A layer's `owner`/`shared` are a MULTIPLAYER COURTESY, not `locked`
+# (Document._locked_guard's freeze, a DIFFERENT and older feature): `locked`
+# blocks everyone including its own owner; `owner` exists purely so two
+# connected people don't paint over each other on the same layer, and must
+# never get in a single, unidentified user's way -- see the permission table
+# in _layer_permission below, which is the ONE place it is decided.
+# ------------------------------------------------------------------------------------------------
+STALE_S = 120.0    # CONTRACT.md: "a document must never be frozen by
+                    # someone who shut their laptop"
+
+
+def _touch_presence(uid):
+    """Stamp `uid` as heard-from right now. Called from the ownership gate
+    on every identified request (mutating or not) and from the /api/events
+    heartbeat -- together they're what makes "absent > 120s" mean anything
+    for a uid that never opens a live stream at all (a script, an agent, most
+    of this test suite painting with a bare X-User header)."""
+    if uid:
+        SYNC["last_seen"][uid] = time.time()
+
+
+def _presence_absent_s(uid):
+    """Seconds since `uid` was last heard from. No record at all (this
+    PROCESS has never heard from them -- e.g. a fresh boot reloaded a .lews
+    whose layer owner was set by a run that no longer exists) reads as
+    infinitely absent: a restart must not let a long-gone owner freeze a
+    layer just because nobody has said hello to this process yet."""
+    ts = SYNC["last_seen"].get(uid)
+    return float("inf") if ts is None else max(0.0, time.time() - ts)
+
+
+def _display_name(uid):
+    """Best-effort human name for a uid, matching the convention already
+    used for undo's cross-author warning (_foreign_top_entry).
+
+    An agent's uid is "agent:<name>" (CONTRACT.md section 4), so the plain
+    uid[:6] fallback rendered EVERY agent as the string "agent:" -- which
+    would have made two agents in one document indistinguishable, and read
+    as a truncation bug wherever it appeared. The name after the colon is
+    the name it chose; use it."""
+    if not uid:
+        return uid
+    nm = SYNC["names"].get(uid)
+    if nm:
+        return nm
+    if uid.startswith("agent:"):
+        return uid[6:] or "agent"
+    # R64 (dogfooded): uid[:6] chopped "u_devin" to "u_devi" and put THAT
+    # in the sentence a human reads -- "ask u_devi for access?" reads as a
+    # truncation bug, not as a fallback. An unregistered id is shown whole:
+    # it is at least the real handle, and a UI that wants it shorter can
+    # shorten it knowing what it started from.
+    return uid
+
+
+def _layer_refusal(lid, layer):
+    """The CONTRACT's one refusal shape. Every route that turns down a
+    write for OWNERSHIP reasons must return exactly this (403) -- the client
+    has one renderer for it ("That layer is Priya's -- ask her for
+    access?" + a button), and a second shape would need a second renderer,
+    or silently fail to show the ask-for-access button at all."""
+    owner = getattr(layer, "owner", "") or ""
+    name = _display_name(owner) or owner
+    return {"error": "that layer is %s's — ask %s for access?"
+                     % (name, name),
+            "layer": lid, "owner": owner, "owner_name": name,
+            "can_request": True}
+
+
+def _layer_permission(lid, uid):
+    """PERMISSION to mutate layer `lid` as `uid` -- CONTRACT.md section 1,
+    checked in the order it is written there (first match decides). `uid`
+    must be _owner_uid()'s notion of identity (X-User only), not _req_uid()'s
+    -- see _owner_uid's docstring for why the tab-id fallback doesn't count:
+
+        unowned            -> yes, and `uid` CLAIMS it here (auto-lock on
+                               first write; a no-op when `uid` is itself ""
+                               -- an anonymous write to an unowned layer
+                               does not conjure an owner out of nothing).
+                               Checking permission and taking the lock are
+                               the SAME decision on purpose: if they were
+                               two steps, two requests racing on a freshly-
+                               unowned layer could both see "yes" and both
+                               end up believing they own it.
+        uid is the owner    -> yes
+        uid in shared       -> yes (the owner granted them in)
+        owner is an agent   -> yes (agent:* never locks a human out -- the
+                               document belongs to the human, not the agent)
+        uid is anonymous    -> refused (no X-User at all; an OWNED layer
+                               stays protected even from a client sending no
+                               persistent identity, or the lock would be
+                               worth nothing -- but note an UNOWNED layer
+                               already returned "yes" above, which is
+                               exactly how this suite's many X-User-free
+                               paint calls keep working)
+        owner absent > 120s -> yes, and the lock YIELDS to `uid`
+        otherwise           -> refused, contract shape
+
+    Returns (ok, extra). `extra` is {} when ok with no side note, or
+    {"yielded_from": <prior owner>} when ok via a stale-lock yield, or (when
+    not ok) the refusal dict itself. An unknown layer id is waved through --
+    manufacturing a 403 for it here would bury the route's own, more useful
+    "no such layer" 400 under an ownership error that names no one."""
+    try:
+        layer = DOC.layer(lid)
+    except Exception:
+        return True, {}
+    owner = getattr(layer, "owner", "") or ""
+    if owner == "":
+        layer.owner = uid                              # auto-claim
+        return True, {}
+    if uid and uid == owner:
+        return True, {}
+    if uid and uid in (getattr(layer, "shared", None) or []):
+        return True, {}
+    if owner.startswith("agent:"):
+        return True, {}
+    if not uid:
+        return False, _layer_refusal(lid, layer)
+    if _presence_absent_s(owner) > STALE_S:
+        prior = owner
+        layer.owner = uid                              # the lock yields
+        return True, {"yielded_from": prior}
+    return False, _layer_refusal(lid, layer)
+
+
+# Routes the ownership gate must NEVER touch, and why: these either have
+# their own separate authority (undo/redo's cross-author warning, host
+# moderation), or are the plumbing that presence and the request flow
+# themselves run on -- gating THOSE would be circular (you'd need access to
+# ask for access) or would break multiplayer awareness outright (you'd need
+# a lock to say you're still here).
+_GATE_EXCLUDED_PATHS = {
+    "/api/undo", "/api/redo",                 # _foreign_top_entry already
+                                               # warns about another
+                                               # author's work; a SEPARATE,
+                                               # older feature from the
+                                               # ownership lock
+    "/api/events",                            # presence itself -- holding
+                                               # this stream open IS how a
+                                               # user is "here" at all
+    "/api/presence/name", "/api/presence/activity",   # presence pings
+    "/api/autosave", "/api/autosave/restore",  # background persistence,
+                                               # never a deliberate user edit
+    "/api/editors/kick", "/api/editors/allow",  # host moderation is a
+                                               # different authority than
+                                               # layer ownership
+    "/api/access",                            # the request FLOW -- asking
+                                               # for access must never itself
+                                               # require access
+}
+
+
+def _mutating_layer_targets():
+    """The layer ids this request would touch, by the body shapes actually
+    in use (grepped across every POST route, not guessed): almost everything
+    that targets a layer sends it as a top-level "layer" string, the one
+    exception being /api/layer itself (which sends "id", and only for the
+    actions that touch an EXISTING layer's content -- "add" makes a new one,
+    "release"/"grant"/"revoke" are owner-administration handled by their own
+    stricter check inside layer_edit(), not this generic gate) and
+    /api/paint_batch (many strokes, each carrying its own "layer")."""
+    d = request.get_json(silent=True)
+    if not isinstance(d, dict):
+        return set()
+    ids = set()
+    lay = d.get("layer")
+    if isinstance(lay, str) and lay:
+        ids.add(lay)
+    if request.path == "/api/paint_batch":
+        for it in (d.get("strokes") or ()):
+            if isinstance(it, dict) and isinstance(it.get("layer"), str) \
+                    and it["layer"]:
+                ids.add(it["layer"])
+    elif request.path == "/api/layer":
+        act = d.get("action")
+        # R64 (dogfooded): VISIBILITY is not destruction. Two painters left
+        # the construction underdrawing sitting over the finished picture
+        # because the only person who could switch it off was scoped
+        # elsewhere, and hiding someone else's layer was refused. The lock
+        # exists so people cannot DESTROY each other's work; hiding changes
+        # no pixels, is instantly reversible by anyone, and the alternative
+        # is a document nobody present is able to finish. An edit that
+        # touches nothing but `visible` is therefore ungated -- every other
+        # property (name, opacity, blend, clip, alpha_lock, mask, locked)
+        # changes the picture and stays owner's-only.
+        if act == "edit" and set(d) <= {"action", "id", "visible"}:
+            return set()
+        if act in ("edit", "delete", "remove", "duplicate", "merge_down",
+                   "clear", "fill", "flip", "move", "claim"):
+            lid = d.get("id")
+            if isinstance(lid, str) and lid:
+                ids.add(lid)
+        elif act == "merge":
+            ids.update(x for x in (d.get("ids") or ()) if isinstance(x, str))
+        elif act == "merge_visible":
+            try:
+                ids.update(l.id for l in DOC.layers if l.visible)
+            except Exception:
+                pass
+    return ids
+
+
+@app.before_request
+def _layer_ownership_gate():
+    """THE choke point (CONTRACT.md sections 1-2): every mutating request is
+    inspected HERE, once, rather than each of the ~90 POST routes carrying
+    its own copy of the ownership check -- a guard sprinkled through thirty
+    call sites is exactly how the one route someone forgets becomes the
+    hole.
+    """
+    if request.method != "POST" or not request.path.startswith("/api/"):
+        return None
+    if request.path in _GATE_EXCLUDED_PATHS \
+            or request.path.startswith("/api/agent/") \
+            or request.path.startswith("/api/job/"):
+        return None
+    uid = _owner_uid()
+    _touch_presence(uid)
+    targets = _mutating_layer_targets()
+    if not targets:
+        return None
+    yields = []
+    for lid in sorted(targets):
+        ok, extra = _layer_permission(lid, uid)
+        if not ok:
+            return jsonify(extra), 403
+        if extra.get("yielded_from"):
+            yields.append({"layer": lid, "yielded_from": extra["yielded_from"]})
+    if yields:
+        # picked up by _layer_yield_notice below -- the route handler itself
+        # doesn't need to know a yield happened to report it, which is the
+        # point of doing this at the gate instead of in every route
+        g._layer_yields = yields
+    return None
+
+
+@app.after_request
+def _layer_yield_notice(resp):
+    """Folds `yielded_from` into a successful mutation's own JSON body, per
+    CONTRACT.md ("the lock YIELDS to U, with yielded_from in the response").
+    A separate hook rather than each route reporting it itself, for the same
+    reason the permission check is a separate hook: one place, not thirty."""
+    y = getattr(g, "_layer_yields", None)
+    if not y or resp.status_code >= 400 or not resp.is_json:
+        return resp
+    try:
+        body = resp.get_json()
+        if isinstance(body, dict):
+            body["yielded_from"] = y[0]["yielded_from"] if len(y) == 1 else \
+                {e["layer"]: e["yielded_from"] for e in y}
+            resp.set_data(json.dumps(body))
+    except Exception:
+        pass                                    # never let a notice break a real response
+    return resp
+
+
+# ------------------------------------------------------------------------------------------------
+# R63: the reactive agent loop (CONTRACT.md section 2, /api/agent/brief +
+# /api/agent/tick). Built ON section 1-3's ownership gate above, not beside
+# it -- the agent gets no bypass of its own; _layer_permission's existing
+# "owner is an agent -> yes" / "otherwise -> refused" rows are what make
+# "an agent never touches a user's layer" true, so this section only has to
+# report state, never enforce it.
+# ------------------------------------------------------------------------------------------------
+PAUSE_MS = 1800.0    # CONTRACT.md: may_act needs this much HUMAN idle time
+
+# Devin's brief for an unset document (CONTRACT.md section 2's
+# "default_brief"). This is not a placeholder -- it IS the instruction an
+# agent follows when nobody has written one, so its wording is load-bearing:
+# support, infer, do the unglamorous work, never invent, never recompose,
+# smallest change, and when unsure, do nothing at all.
+DEFAULT_AGENT_BRIEF = (
+    "Support what the painter is doing. Infer their intent from their most "
+    "recent strokes, not from a plan they never stated. Do the unglamorous "
+    "supporting work: contact shadows, edge cleanup, continuity between "
+    "strokes, keeping the established light consistent. Never invent "
+    "subject matter, and never change the composition -- add to what is "
+    "already there, don't redirect it. Prefer the smallest change that "
+    "helps. If you are unsure whether something would help, do nothing."
+)
+
+# What happened, per document, since the last _MUT_REV bump: a bounded log
+# of {rev, lid, layer_name, by, by_name, kind, ts}, keyed by document id so
+# switching pictures doesn't leak one picture's activity into another's
+# tick. Kept in server memory like ACCESS_REQUESTS above, for the same
+# reason -- this is conversation about the live session, not part of the
+# picture, and must not resurrect itself out of a reopened .lews.
+_AGENT_ACTIVITY = {}
+_ACTIVITY_MAXLEN = 500
+
+# The last time a NON-agent uid successfully changed a layer, per document.
+# Deliberately separate from SYNC["last_seen"] (which is presence -- "is
+# this uid's tab/script still around") and from _MUT_REV (which is global
+# across every document): human_idle_ms means "since this document was last
+# PAINTED ON by a person", and a stale-but-present peer, or a mutation on a
+# different picture, must not reset it.
+_LAST_HUMAN_MUTATION = {}
+# Sentinel idle reading for "no human mutation recorded this process" (a
+# freshly booted server, or a document nobody has touched yet) -- large
+# enough that PAUSE_MS's comparison always passes, but finite, because
+# float("inf") serialises to invalid JSON ("Infinity") over jsonify.
+_NEVER_MS = 24 * 3600 * 1000.0
+
+
+def _still_busy(body):
+    """R64, dogfooded. "It acts WHEN THE USER PAUSES, never mid-stroke" was
+    only ever ADVISORY: `may_act` is computed when the agent POLLS, and the
+    agent then spends a second or two looking at the picture before it
+    writes. In the test painting two of its four assists landed 0.19 s and
+    0.14 s after a human burst ENDED -- decided in a real pause, written
+    after the painter had already started and finished the next one. A
+    slower analysis or a longer burst and it would have painted straight
+    through a live stroke, which is the one thing the cadence promise says
+    it will never do.
+
+    No amount of client-side re-polling closes that: the gap between
+    "check" and "write" is exactly where the race lives. So the check moves
+    INTO the write, under _DOC_LOCK, as an HTTP-conditional: a caller that
+    passes `if_human_idle_ms` is saying "only apply this if the painter has
+    been quiet at least this long", and gets 409 if they have not. OPT-IN,
+    so nothing that does not ask for it changes behaviour -- but the
+    reference agent always asks, and any agent that wants the guarantee to
+    be real rather than polite can have it for one field."""
+    try:
+        want = float((body or {}).get("if_human_idle_ms") or 0)
+    except (TypeError, ValueError):
+        return None
+    if want <= 0:
+        return None
+    last = _LAST_HUMAN_MUTATION.get(_viewing_doc_id())
+    idle = _NEVER_MS if last is None else max(0.0, (time.time() - last) * 1000.0)
+    if idle >= want:
+        return None
+    return jsonify(error="the painter is still working -- %d ms since their "
+                         "last change, and you asked to wait for %d"
+                         % (int(idle), int(want)),
+                   human_idle_ms=idle, wanted_idle_ms=want,
+                   retry_when_idle=True), 409
+
+
+def _log_activity(did, lid, layer_name, by, kind):
+    """Record one layer-touching mutation for /api/agent/tick's `changed`,
+    and -- for a non-agent `by` -- reset how long this document has been
+    quiet. Called from _record_agent_activity below, once per touched
+    layer, AFTER the mutation actually succeeded."""
+    from . import _MUT_REV
+    log = _AGENT_ACTIVITY.setdefault(did, collections.deque(maxlen=_ACTIVITY_MAXLEN))
+    # R64: `by_name` is deliberately NOT stamped here. A painter who
+    # registers a display name after their first stroke would otherwise
+    # appear in one feed under two names ("u_devin" for the early entries,
+    # "Devin" for the later ones) and a presence chip fed from this would
+    # show one collaborator twice. The uid is the fact; the name is a
+    # lookup, and agent_tick does it at read time.
+    log.append({"rev": _MUT_REV[0], "lid": lid, "layer_name": layer_name,
+               "by": by, "kind": kind, "ts": time.time()})
+    if not (by or "").startswith("agent:"):
+        _LAST_HUMAN_MUTATION[did] = time.time()
+
+
+@app.after_request
+def _record_agent_activity(resp):
+    """THE most important line in this file, per CONTRACT.md: an agent's
+    own writes must never look like human activity, or a tick that follows
+    one of its own strokes would see "something changed" forever and
+    trigger on itself in a tight loop. The fix lives in ONE place --
+    _log_activity's `by`-startswith-"agent:" check above -- rather than
+    every call site remembering to exclude itself.
+
+    Reuses _mutating_layer_targets() (the same body-shape parser the
+    ownership gate uses) so this needs no second list of "which routes
+    touch a layer" to keep in sync with the real one. Runs for every
+    successful mutating POST, gated or not -- /api/paint on an UNOWNED or
+    already-mine layer never even reaches the ownership gate's targets
+    check with something to refuse, but it still must show up as
+    "changed" for a watching agent."""
+    if request.method != "POST" or not request.path.startswith("/api/") \
+            or resp.status_code >= 400 or not resp.is_json:
+        return resp
+    try:
+        targets = _mutating_layer_targets()
+    except Exception:
+        targets = set()
+    if not targets:
+        return resp
+    kind = ("paint" if request.path in ("/api/paint", "/api/paint_batch")
+            else "layer" if request.path == "/api/layer" else "other")
+    try:
+        uid = _owner_uid()
+        did = _viewing_doc_id()
+        doc = WS.docs.get(did)
+        if kind == "paint" and (uid or "").startswith("agent:"):
+            body = request.get_json(silent=True) or {}
+            rj = resp.get_json() or {}
+            sids = rj.get("sids") or ([rj["sid"]] if rj.get("sid") else [])
+            _record_assist(did, uid, str(body.get("note") or "")[:160],
+                           targets, sids)
+        for lid in targets:
+            try:
+                name = doc.layer(lid).name if doc is not None else lid
+            except Exception:
+                name = lid          # deleted mid-request, or an unknown id
+            _log_activity(did, lid, name, uid, kind)
+    except Exception:
+        pass                        # a logging bug must never break a real response
+    return resp
+
+
+def _layer_locked_for(l, uid):
+    """Read-only mirror of _layer_permission's table (section 1), for
+    /api/agent/tick's `locked` list. Deliberately NOT _layer_permission
+    itself: that function's job is to DECIDE and, on an unowned or
+    stale-owned layer, CLAIM or YIELD it as a side effect -- exactly right
+    for a route that is actually about to write, and exactly wrong for a
+    GET that only wants to report status. Calling the real one here would
+    make merely polling the agent loop silently seize locks."""
+    owner = getattr(l, "owner", "") or ""
+    if owner == "" or (uid and uid == owner) \
+            or (uid and uid in (getattr(l, "shared", None) or [])) \
+            or owner.startswith("agent:"):
+        return False
+    if not uid:
+        return True
+    return _presence_absent_s(owner) <= STALE_S
+
+
+# R64: what each connected agent says it UNDERSTOOD the prompt to mean.
+# A document prompt whose effect is invisible is indistinguishable from one
+# that was ignored -- which is what R63 shipped, and the R64 test painting
+# proved it: the brief said "leave the window alone" and the agent grounded
+# the window, with nothing anywhere to show the painter that their words had
+# not landed. Server memory, like ACCESS_REQUESTS: a reading is a remark
+# about this session, not part of the picture.
+AGENT_READINGS = {}
+
+
+# R65: what the agent DID, as the painter sees it -- one entry per assist,
+# with the stroke ids so one click takes it back. The layer list already
+# lets you hide or delete the agent's whole layer; this is finer: "that
+# one, no". Session memory, per document, like the activity ring.
+AGENT_ASSISTS = {}
+_ASSIST_SEQ = [0]
+
+
+def _record_assist(did, by, note, lids, sids):
+    log = AGENT_ASSISTS.setdefault(did, collections.deque(maxlen=60))
+    _ASSIST_SEQ[0] += 1
+    log.append({"id": "A%d" % _ASSIST_SEQ[0], "by": by, "note": note,
+                "layers": list(lids), "sids": list(sids), "at": time.time(),
+                "undone": False})
+
+
+@app.get("/api/agent/assists")
+def agent_assists():
+    """What an agent has DONE here, newest first: one entry per assist with
+    the note the agent wrote, the layers it touched and the ids of exactly
+    the strokes it painted. POST {"action":"undo","id"} takes one back."""
+    did = _viewing_doc_id()
+    out = []
+    for a in AGENT_ASSISTS.get(did, ()):
+        out.append(dict(a, by_name=_display_name(a["by"]) or a["by"],
+                        layer_names=[_layer_name(l) for l in a["layers"]]))
+    return jsonify(ok=True, assists=list(reversed(out)))
+
+
+def _layer_name(lid):
+    try:
+        return DOC.layer(lid).name
+    except Exception:
+        return lid
+
+
+@app.post("/api/agent/assists")
+def agent_assist_act():
+    """{action:"undo", id} -- take ONE assist back. Deletes exactly the
+    strokes that assist painted (needs a faithful replay, which an agent's
+    own journal-only layer always has). Anyone may do this: the assist is
+    on the agent's layer, and an agent never locks a human out."""
+    d = request.json or {}
+    did = _viewing_doc_id()
+    if d.get("action") != "undo":
+        return jsonify(error="unknown action: %r" % d.get("action")), 400
+    ent = next((a for a in AGENT_ASSISTS.get(did, ()) if a["id"] == d.get("id")), None)
+    if ent is None:
+        return jsonify(error="no such assist"), 404
+    if ent["undone"]:
+        return jsonify(ok=True, already=True)
+    try:
+        with _DOC_LOCK:
+            n = DOC.delete_strokes([s_ for s_ in ent["sids"] if s_])
+    except Exception as e:
+        return jsonify(error="could not take that back: %s" % e), 400
+    ent["undone"] = True
+    GRAPH.commit_layer_outputs()
+    return jsonify(ok=True, deleted=n)
+
+
+@app.get("/api/agent/brief")
+def agent_brief_get():
+    """The document prompt (CONTRACT.md section 2). `default_brief` rides
+    along on every GET so the UI can show what the agent actually follows
+    even when the document has never had one written -- an empty brief
+    field with no explanation reads as "nothing is happening", not "the
+    quiet-support default is happening"."""
+    now = time.time()
+    return jsonify(brief=str(getattr(DOC, "agent_brief", "") or ""),
+                   paused=bool(getattr(DOC, "agent_paused", False)),
+                   updated_by=str(getattr(DOC, "agent_brief_by", "") or ""),
+                   updated_at=float(getattr(DOC, "agent_brief_at", 0.0) or 0.0),
+                   default_brief=DEFAULT_AGENT_BRIEF,
+                   # only agents still around: a reading from a run that
+                   # ended is a claim about nothing
+                   readings=[dict(v, uid=k, name=_display_name(k))
+                             for k, v in sorted(AGENT_READINGS.items())
+                             if _presence_absent_s(k) <= STALE_S
+                             and now - v.get("at", 0) < 3600])
+
+
+@app.post("/api/agent/brief")
+def agent_brief_set():
+    """Save the document prompt. Excluded from the ownership gate (its path
+    starts with /api/agent/, see _layer_ownership_gate) -- the brief is a
+    property of the whole picture, not of any one layer, so it is never
+    something a layer lock could refuse."""
+    d = request.json or {}
+    me = _owner_uid()
+    _touch_presence(me)
+    if "paused" in d and "brief" not in d:
+        # R65: "not right now". Sometimes you do not want help, and the
+        # only ways to say so were to disconnect the agent or write a brief
+        # telling it to do nothing. A document-level switch; the tick
+        # reports it, and may_act is false while it is set.
+        DOC.agent_paused = bool(d.get("paused"))
+        return jsonify(ok=True, paused=DOC.agent_paused)
+    if "reading" in d and "brief" not in d:
+        # an AGENT reporting how it read the prompt -- never a rewrite of
+        # the prompt itself, which belongs to the human who wrote it
+        if not me:
+            return jsonify(error="a reading needs an X-User"), 400
+        AGENT_READINGS[me] = {"reading": str(d.get("reading") or "")[:600],
+                              "at": time.time()}
+        return jsonify(ok=True)
+    DOC.agent_brief = str(d.get("brief") or "")[:4000]
+    DOC.agent_brief_by = me
+    DOC.agent_brief_at = time.time()
+    return jsonify(ok=True)
+
+
+@app.get("/api/agent/tick")
+def agent_tick():
+    """The reactive loop, one call (CONTRACT.md section 2). An agent polls
+    this with the last `rev` it saw; `may_act` is decided HERE, server-side,
+    so the pause rule is testable without a browser and identical for every
+    client. `pause_ms` overrides PAUSE_MS -- query-param only, for tests
+    that cannot wait 1.8 real seconds; no client-facing control offers it."""
+    # Polling the tick IS the agent being here: while it waits for the
+    # painter to pause it makes no POSTs at all, so without this stamp an
+    # attentive, well-behaved agent aged out of the roster after STALE_S
+    # and the panel said "none connected" about an agent that was watching
+    # every stroke.
+    _touch_presence(_owner_uid())
+    did = _viewing_doc_id()
+    doc = WS.docs.get(did)
+    from . import _MUT_REV
+    rev = _MUT_REV[0]
+    try:
+        since = int(request.args.get("since", 0))
+    except (TypeError, ValueError):
+        since = 0
+    try:
+        pause_ms = float(request.args.get("pause_ms", PAUSE_MS))
+    except (TypeError, ValueError):
+        pause_ms = PAUSE_MS
+
+    entries = [e for e in _AGENT_ACTIVITY.get(did, ())
+              if e["rev"] > since]
+    # group by layer -- an agent responds to WHAT happened, not a raw
+    # per-mutation diary it would have to re-derive that from every time
+    by_lid = {}
+    for e in entries:
+        agg = by_lid.setdefault(e["lid"], {"lid": e["lid"], "n": 0})
+        agg["layer_name"] = e["layer_name"]      # last-known name wins
+        agg["by"] = e["by"]
+        agg["by_name"] = _display_name(e["by"]) or e["by"]   # R64: live
+        agg["kind"] = e["kind"]
+        agg["n"] += 1
+    changed = [by_lid[k] for k in sorted(by_lid)]
+
+    last_human = _LAST_HUMAN_MUTATION.get(did)
+    human_idle_ms = (_NEVER_MS if last_human is None
+                     else max(0.0, (time.time() - last_human) * 1000.0))
+    # "something new since `since` that a human did" -- an agent's OWN
+    # entries in `changed` must never satisfy this, or a tick that follows
+    # its own paint would see may_act stay true and loop on itself forever.
+    human_did_something = any(not (e["by"] or "").startswith("agent:")
+                              for e in entries)
+    paused = bool(getattr(doc, "agent_paused", False)) if doc is not None else False
+    may_act = human_idle_ms >= pause_ms and human_did_something and not paused
+
+    uid = _owner_uid()
+    mine, locked = [], []
+    if doc is not None:
+        for l in doc.layers:
+            owner = getattr(l, "owner", "") or ""
+            if uid and owner == uid:
+                mine.append(l.id)
+            elif _layer_locked_for(l, uid):
+                locked.append({"id": l.id, "owner": owner,
+                               "owner_name": _display_name(owner)})
+
+    brief = str(getattr(doc, "agent_brief", "") or "") if doc is not None else ""
+    return jsonify(rev=rev, changed=changed, human_idle_ms=human_idle_ms,
+                   may_act=may_act, brief=brief or DEFAULT_AGENT_BRIEF,
+                   mine=mine, locked=locked, paused=paused,
+                   # R64: an agent watching a different picture from the
+                   # painter sees a document where nothing ever happens and
+                   # has no way to tell that from a painter who has stopped
+                   doc=did, workspace_active_doc=WS.active,
+                   following_workspace=did == WS.active)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -1811,10 +2606,54 @@ _ACCEL_HINTS = {
 }
 
 
+# R59: /api/status cost 10.4 SECONDS per call -- accel_status() 7.0s and
+# engine_status() 3.4s, both recomputed from scratch every time. The page
+# asks for it on load, and (worse) a slow status call saturates the server,
+# so an unrelated stroke or selection queued behind it: the app froze for
+# ten seconds at exactly the moment a person first touched it, and that is
+# the "stroke round-trip 1.2s under load" note in the UX backlog too.
+# Both answers are PROCESS-STATIC -- which optional wheels are importable
+# and which faculties this engine build has cannot change while we run --
+# so they are computed once, warmed in the background at boot so the first
+# request never pays, and re-checkable with ?fresh=1 for a developer who
+# just pip-installed something.
+_STATUS = {"accel": None, "engine": None, "lock": threading.Lock()}
+
+
+def _status_parts(fresh=False):
+    if fresh:
+        _STATUS["accel"] = _STATUS["engine"] = None
+    if _STATUS["accel"] is None or _STATUS["engine"] is None:
+        with _STATUS["lock"]:            # one worker pays, the rest wait once
+            if _STATUS["accel"] is None:
+                _STATUS["accel"] = accel_status()
+            if _STATUS["engine"] is None:
+                eng = None
+                try:
+                    from . import mind as _mind_fn
+                    _m = _mind_fn()
+                    if hasattr(_m, "engine_status"):
+                        eng = _m.engine_status()
+                except Exception:
+                    eng = None
+                _STATUS["engine"] = {"v": eng}
+    return _STATUS["accel"], _STATUS["engine"]["v"]
+
+
+def _warm_status():
+    try:
+        _status_parts()
+    except Exception:
+        pass
+
+
+threading.Thread(target=_warm_status, daemon=True).start()
+
+
 @app.get("/api/status")
 def status():
-    """Engine status: gpu availability, leCore version, faculty report."""
-    a = accel_status()
+    """Engine status: gpu availability, leCore version, faculty report. Cached (process-static); ?fresh=1 recomputes."""
+    a, _eng_cached = _status_parts(fresh=request.args.get("fresh"))
     have_map = a.get("accel") or {}
     missing = [{"name": n, "install": _ACCEL_HINTS[n][0],
                 "unlocks": _ACCEL_HINTS[n][1]}
@@ -1826,6 +2665,22 @@ def status():
     # available" on a machine with none.
     report = a.get("gpu") if isinstance(a.get("gpu"), dict) else None
     gpu_flag = bool(report.get("any_available")) if report else bool(a.get("gpu"))
+    # R55: the engine's own status panel (version, extras, determinism
+    # policy, budget) rides along when the build provides it -- the
+    # APP_FOUNDATION rule is to gate on the build in front of us, never
+    # keep a client-side list of what to check. R59: cached, see above.
+    eng = _eng_cached
+    # R57: the shared live workspace, as the engine describes it -- rev,
+    # sections and which apps wrote them -- so a status call answers "is
+    # anyone else working in this workspace?" without a second protocol.
+    lews = None
+    try:
+        _ws = _lews_ws()
+        if _ws is not None:
+            lews = _ws.describe()
+            lews["root"] = _WS_ROOT
+    except Exception:
+        lews = None
     # WHAT IS ACTUALLY ACCELERATED. `gpu` means leCore found a device it can
     # use for SIMULATION and node work. The painting engine -- deposit, flow,
     # bristle tracks, blurs -- is pure numpy on the CPU, so a chip reading
@@ -1841,7 +2696,8 @@ def status():
         "shaders": {"device": "gpu", "note": "shader previews run in your "
                                              "browser's GPU"},
     }
-    return jsonify(gpu=gpu_flag, jit=a["jit"], live=LIVE["on"],
+    return jsonify(engine=eng, lews=lews, gpu=gpu_flag, jit=a["jit"],
+                   live=LIVE["on"],
                    live_error=LIVE["error"], accel=have_map,
                    accel_missing=missing, subsystems=subsystems,
                    threads=int(os.environ.get("LESTUDIO_THREADS", "0")) or None,
@@ -2111,14 +2967,64 @@ def state():
         # keys by user id -- names, viewing and the caller comparison. When
         # `me` compared _req_uid-keyed names against the TAB id, users saw
         # their own ghost chip and peers' docs showed wrongly.
-        "peers": [{"id": uid, "name": nm or uid[:6],
-                   "doc": SYNC["viewing"].get(uid),
+        # Who is here. Named editors (a browser tab announces its name on
+        # the SSE stream) UNION anyone else this process has heard from
+        # inside the stale window -- R63: an agent, or any script, that
+        # paints with an X-User but never announces a display name was
+        # invisible in the roster, so the one thing CONTRACT.md section 4
+        # promises ("it appears in presence like anyone else, so the user
+        # can see it is there") was not true of an agent that simply got
+        # to work. _touch_presence already stamps every identified request,
+        # so the server knew all along; only this list did not say so.
+        # Bounded by STALE_S for the same reason the lock yields at it: a
+        # script that pinged once an hour ago is not "here".
+        "peers": [{"id": uid, "name": _display_name(uid),
+                   # R64: a peer who has never activated a document is
+                   # following the workspace, not sitting nowhere -- the
+                   # old None here read as "this person is unplaced"
+                   "doc": SYNC["viewing"].get(uid) or WS.active,
                    "activity": SYNC["activity"].get(uid),
+                   "agent": uid.startswith("agent:"),
                    "me": uid == _req_uid()}
-                  for uid, nm in sorted(SYNC.get("names", {}).items())],
+                  for uid in sorted(set(SYNC.get("names", {}))
+                                    | set(SYNC.get("last_seen", {})))
+                  if _presence_absent_s(uid) <= STALE_S],
         "width": DOC.width, "height": DOC.height,
+        # R63: owner_name/mine/agent ride on TOP of l.meta()'s bare
+        # owner/shared -- they need the requesting user's id and the
+        # presence table, neither of which a Layer object has, so they
+        # belong here rather than growing Layer.meta() a request parameter.
+        # R64 (dogfooded): an access request had NO notification path.
+        # /api/access returned {ok,id} and then nothing happened anywhere --
+        # the owner learned they had been asked only by independently
+        # POSTing {"action":"list"}, which they have no reason to do. The
+        # refusal tells the REQUESTER exactly how to ask and nothing at all
+        # told the person being asked. This is the count every client is
+        # already polling for, so a chip can light up without a second
+        # request; the detail still comes from /api/access.
+        # R64: which document the workspace considers current, next to the
+        # one THIS user is on. They are normally the same; when they are
+        # not, the client can say so instead of leaving someone painting
+        # into a picture nobody else can see.
+        "workspace_active_doc": WS.active,
+        "following_workspace": _viewing_doc_id() == WS.active,
+        "access_pending": sum(
+            1 for r in ACCESS_REQUESTS.get(_viewing_doc_id(), ())
+            if r["to"] == _owner_uid() and r["state"] == "pending"),
+        # R64: the live `strokes` list is a WINDOW -- older segments spool
+        # to disk (_journal_spool) and only _journal_spooled remembers
+        # them. Asking the window alone said "no strokes" about the most
+        # heavily painted layers in the document, which is exactly
+        # backwards, and it is what R59 gates "Re-render strokes" on.
         "layers": [dict(l.meta(),
-                        has_strokes=any(k["layer"] == l.id for k in DOC.strokes))
+                        has_strokes=(l.id in getattr(DOC, "_journal_spooled", {})
+                                     or any(k["layer"] == l.id
+                                            for k in DOC.strokes)),
+                        owner_name=_display_name(getattr(l, "owner", "") or ""),
+                        mine=bool(_owner_uid())
+                             and (getattr(l, "owner", "") == _owner_uid()
+                                  or _owner_uid() in (getattr(l, "shared", None) or [])),
+                        agent=str(getattr(l, "owner", "") or "").startswith("agent:"))
                    for l in DOC.layers],
         "groups": DOC.groups,
         "masks": [m.meta() for m in DOC.masks],
@@ -2130,6 +3036,12 @@ def state():
         "splines": [p.meta() for p in DOC.splines],
         # Recorded brush strokes: id + a summary only. The full point lists can
         # be large and the UI just needs to offer them in a picker.
+        # R64: this array is the TAIL, not the journal (see the slice at
+        # its end). Callers derived per-layer counts from it and got them
+        # wrong; the totals below say so out loud.
+        "strokes_total": (len(DOC.strokes)
+                          + sum((getattr(DOC, "_journal_spooled", {}) or {}).values())),
+        "strokes_are_a_tail": True,
         "strokes": [{"id": k["id"], "layer": k["layer"],
                      "points": len(k["points"]),
                      "ends": [[round(float(k["points"][0][0]), 1),
@@ -2148,6 +3060,16 @@ def state():
         "output_node": GRAPH.output_node(),
         "ops": op_catalog(),
         "blend_modes": list(BLEND_MODES),
+        # R67: how many documents are RESIDENT, and how many of those are
+        # blanks nobody painted in. Nothing closes a document -- /api/new
+        # switches the active one and leaves the old one alive -- so a
+        # session that re-runs a script accumulates full paintings with no
+        # cap and nothing to notice it. The writer stops saving the blanks;
+        # this is so the app can offer to close the rest rather than the
+        # person discovering them in a 160 MB file.
+        "docs_resident": len(WS.docs),
+        "docs_blank": [k for k, v in WS.docs.items()
+                       if k != WS.active and not _doc_has_work(v)],
         # the stock everything is painted on: it decides where thin
         # paint catches, where a wash pools, and how much it granulates
         "paper": str(getattr(DOC, "paper", "canvas")),
@@ -2331,6 +3253,26 @@ def _doc_ops_locked():
             if not 1 <= dv <= 2400:
                 return jsonify(error="dpi must be between 1 and 2400"), 400
             doc.dpi = dv
+        # The STOCK is a document setting, and this is where a caller looks
+        # for document settings. It used to live only on /api/paper, so
+        # {"action":"settings","paper":"smooth"} answered ok:true and
+        # changed nothing -- and a whole picture came back painted on
+        # heavy canvas weave, because nothing had said no.
+        if d.get("paper") is not None:
+            try:
+                doc.set_paper(str(d["paper"]))
+            except ValueError as e:
+                return jsonify(error=str(e)), 400
+        # ...and REFUSE anything this route does not understand, for the
+        # same reason: a setting that is quietly dropped is worse than one
+        # that is rejected, because the caller goes on believing it took.
+        unknown = sorted(set(d) - _SETTINGS_KEYS)
+        if unknown:
+            return jsonify(error="unknown document setting%s: %s (this route "
+                                 "takes %s)" % ("s" if len(unknown) > 1 else "",
+                                                ", ".join(unknown),
+                                                ", ".join(sorted(_SETTINGS_KEYS
+                                                                 - {"action", "id"})))), 400
         if (w, h) != (doc.width, doc.height):
             try:
                 # "resample" = IMAGE size (the picture stays, pixel count
@@ -2436,6 +3378,7 @@ def fill():
                 kw["custom"] = src["custom"]
             if "color" in src:
                 kw["color"] = tuple(src["color"])
+            _rpt = {}
             n = DOC.fill_generated(
                 d["layer"], int(d["x"]), int(d["y"]),
                 style=str(src.get("style", "both")),
@@ -2445,9 +3388,32 @@ def fill():
                 sel_invert=bool(d.get("sel_invert")),
                 softness=float(src.get("softness", 2.0)),
                 sample=str(src.get("sample", "layer")),
-                seed=src.get("seed"), **kw)
+                seed=src.get("seed"), _report=_rpt, **kw)
             GRAPH.commit_layer_outputs()
-            return jsonify(ok=True, filled=0, strokes=int(n))
+            # WHY DIDN'T THAT PAINT? (generated fills): `filled` used to be
+            # hard-coded 0 on this path -- it never meant anything, so the
+            # client's "filled 0 px" fallback line was always a lie. Report
+            # the real seed-region coverage instead. And a generator that
+            # laid zero strokes is the same silent no-op as any other tool:
+            # either the bucket found nothing to flood at that point (empty
+            # coverage), or the region existed but was too sparse/thin for
+            # the current density/spacing to place even one stroke -- both
+            # read as "stitched 0 strokes" with no clue why (R58 UX open #3).
+            covered = int(_rpt.get("covered", 0))
+            gwarn = None
+            if int(n) == 0:
+                if covered == 0:
+                    gwarn = ("nothing to fill here — the flood found no "
+                             "matching pixels at that point; click inside a "
+                             "shape's edges, or raise the tolerance")
+                else:
+                    gwarn = ("the region here is too thin or sparse for "
+                             "these settings — no strokes fit; try a lower "
+                             "spacing or a smaller size/thickness")
+            resp = dict(ok=True, filled=covered, strokes=int(n))
+            if gwarn is not None:
+                resp["warning"] = gwarn
+            return jsonify(**resp)
         content = _fill_content(src or None, DOC.height, DOC.width)
         n = DOC.flood_fill(d["layer"], int(d["x"]), int(d["y"]), content,
                            tolerance=float(d.get("tolerance", 0.12)),
@@ -2604,8 +3570,22 @@ def presence_name():
     me = _req_uid()
     if not me:
         return jsonify(error="send an X-User (or X-Client) header"), 400
+    _touch_presence(me)         # announcing yourself IS being here (R63)
     SYNC["names"][me] = str(d.get("name", "")).strip()[:24]
-    SYNC["viewing"].setdefault(me, WS.active)
+    # R64, dogfooded, and the worst bug this round found: this line used to
+    # be `SYNC["viewing"].setdefault(me, WS.active)` -- saying your NAME
+    # pinned you to whatever document happened to be open at that moment,
+    # permanently. A second painter who introduced herself, and then kept
+    # working while the picture was replaced, spent an entire session
+    # painting a complete wall, window, bottle, bowl and lemons into a
+    # document nobody was looking at. Every write returned 200. Nothing
+    # anywhere said the two of them were on different pictures.
+    #
+    # A name is not a choice of document. Only /api/doc activate is, and a
+    # user who has never made that choice keeps FOLLOWING the workspace's
+    # active document (_viewing_doc_id's fallback) -- which is what a
+    # collaborator joining a shared studio, and what an agent connecting to
+    # watch someone paint, both actually want.
     return jsonify(ok=True)
 
 
@@ -2619,9 +3599,11 @@ def presence_activity():
     me = _req_uid()
     if not me:
         return jsonify(error="send an X-User (or X-Client) header"), 400
+    _touch_presence(me)         # an activity ping IS being here (R63)
     SYNC["activity"][me] = {"tool": str(d.get("tool", ""))[:24],
                             "layer": str(d.get("layer", ""))[:24],
                             "at": time.time()}
+    _lews_mirror_touch(me, SYNC["activity"][me])
     return jsonify(ok=True)
 
 
@@ -3436,9 +4418,21 @@ def workspace_save():
                   for k, a in ASSETS.items()]
     data = save_workspace(WS.docs, WS.graphs, WS.active,
                           extras=list(WS.extras) + asset_secs,
-                          # P3.1: ?light=1 -> journal-first file (pixels of
-                          # replay-faithful layers are rebuilt on open)
-                          cache_pixels=not request.args.get("light"))
+                          # R67: journal-first is the DEFAULT now -- a layer
+                          # that can prove it replays does not ship its
+                          # pixels. ?light=1 still forces the smallest file
+                          # (every layer with a base, gate or no gate);
+                          # ?pixels=1 forces the old fat file for a caller
+                          # that wants pixels no matter what.
+                          cache_pixels=(True if request.args.get("pixels")
+                                        else (False if request.args.get("light")
+                                              else None)),
+                          # ...and the budget is a DIAL, because how much
+                          # rebuild time a file may cost on Open is a
+                          # judgement about the document, not a constant:
+                          # ?budget=0 is the smallest file, a big number
+                          # keeps opens instant. See Document._replay_first_set
+                          replay_budget=_int_arg("budget"))
     _mark_saved()                # everything on disk: docs read clean now
     return send_file(io.BytesIO(data), mimetype="application/octet-stream",
                      as_attachment=True, download_name="workspace.lews")
@@ -3462,18 +4456,73 @@ def _load_workspace_bytes(data):
 @app.post("/api/workspace/open")
 def workspace_open():
     """Open a .lews workspace (multipart file). Replaces the current workspace."""
-    _load_workspace_bytes(request.files["file"].read())
+    data = request.files["file"].read()
+    _load_workspace_bytes(data)
+    # R57: the opened file replaces the LIVE workspace too, through the
+    # engine's import (`Workspace.from_file`): every section carried
+    # verbatim, one journal line recording where the content came from, so
+    # a late-joining app can tell "opened a file" from "edited in place".
+    try:
+        ws = _lews_ws()
+        if ws is not None:
+            import tempfile
+            fd, tmp = tempfile.mkstemp(suffix=".lews")
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+                from holographic.io_and_interop.holographic_lews import Workspace
+                _LEWS["ws"] = Workspace.from_file(tmp, _WS_ROOT,
+                                                  app="lestudio")
+                _LEWS["sha"].clear()      # hashes describe the OLD container
+            finally:
+                os.unlink(tmp)
+    except Exception as e:
+        app.logger.warning("lews import skipped: %s", e)
     return jsonify(ok=True)
 
 
 _AUTOSAVE_PATH = os.path.expanduser("~/.lestudio_autosave.lews")
 
 
+_AUTOSAVE_LAST_REV = [-1]
+
+
+def _autosave_tick():
+    """R65: the crash net used to live in the BROWSER PAGE (a setInterval
+    that POSTs /api/autosave), so a session driven entirely by scripts and
+    agents never autosaved at all -- restarting the server mid-round lost a
+    whole painting, and it was only recoverable because the painters'
+    scripts happened to be deterministic. The server now runs the timer
+    itself: every 90 s, if anything has changed since the last write, the
+    same sidecar is written whether or not a tab is open. The browser's own
+    timer is left in place; two writers of the same file at 90 s cadence
+    cost nothing and a second net catches what the first misses."""
+    import threading
+    def loop():
+        while True:
+            time.sleep(90)
+            try:
+                from . import _MUT_REV
+                rev = _MUT_REV[0]
+                if rev == _AUTOSAVE_LAST_REV[0]:
+                    continue
+                with app.test_request_context("/api/autosave", method="POST"):
+                    r = autosave_write()
+                _AUTOSAVE_LAST_REV[0] = rev
+            except Exception:
+                pass                 # the net must never take the server down
+    t = threading.Thread(target=loop, name="lestudio-autosave", daemon=True)
+    t.start()
+    return t
+
+
 @app.post("/api/autosave")
 def autosave_write():
     """Write the whole workspace to a fixed sidecar file. The client calls
     this on a timer while there are unsaved changes; an explicit Save is
-    still the person's own file -- this is just the crash net."""
+    still the person's own file -- this is just the crash net. Since R65
+    the server runs the same timer itself (_autosave_tick), so a session
+    with no browser tab open is covered too."""
     from . import ASSETS
     asset_secs = [{"kind": "lestudio.asset", "id": k,
                    "meta": {"name": a["name"], "ext": a["ext"]},
@@ -3500,7 +4549,53 @@ def autosave_write():
         f.write(data)
     os.replace(tmp, _AUTOSAVE_PATH)                 # atomic: never half a file
     _mark_saved()                # the crash net holds this state: docs clean
-    return jsonify(ok=True, bytes=len(data))
+    # R57: the live .lews Workspace is the CROSS-APP backing -- each document
+    # goes in as its own section through the engine's locked, journalled
+    # put(), so other apps holding this directory open see leStudio's
+    # documents by rev, not by racing us for a sidecar file. The sidecar
+    # above stays: it is the single-file crash net and needs no engine.
+    # Best-effort by design (autosave already succeeded either way).
+    lews_rev = _lews_publish()
+    return jsonify(ok=True, bytes=len(data),
+                   **({"lews_rev": lews_rev} if lews_rev else {}))
+
+
+def _lews_publish():
+    """Mirror WS into the live workspace directory: one 'lestudio.document'
+    section per doc (unchanged docs skipped by content hash -- a put rewrites
+    the whole container and journals a line, so no-op churn would spam every
+    other app's change feed), one 'lestudio.state' section for the active id,
+    and sections for docs closed since are deleted. Returns the last rev
+    written, or None (nothing changed, or no engine Workspace)."""
+    try:
+        ws = _lews_ws()
+        if ws is None:
+            return None
+        from . import _doc_section
+        from holographic.io_and_interop.holographic_lews import section_hash
+        rev = None
+        for did, d in WS.docs.items():
+            dm, arrays = _doc_section(d, WS.graphs.get(did))
+            sec = {"kind": "lestudio.document", "id": did,
+                   "meta": dm, "arrays": arrays}
+            sha = section_hash(sec)
+            if _LEWS["sha"].get(did) == sha:
+                continue
+            rev = ws.put(sec)
+            _LEWS["sha"][did] = sha
+        st = {"kind": "lestudio.state", "id": "lestudio-state",
+              "meta": {"active": WS.active}, "arrays": {}}
+        if _LEWS["sha"].get("__state") != WS.active:
+            rev = ws.put(st)
+            _LEWS["sha"]["__state"] = WS.active
+        for sec in ws.sections("lestudio.document", upgrade=False):
+            if sec.get("id") not in WS.docs:
+                rev = ws.delete(sec["id"])
+                _LEWS["sha"].pop(sec.get("id"), None)
+        return rev
+    except Exception as e:
+        app.logger.warning("lews publish skipped: %s", e)
+        return None
 
 
 @app.get("/api/autosave")
@@ -3732,16 +4827,51 @@ def layer_png(lid):
     return _png(DOC.layer(lid).pixels)
 
 
+@app.get("/api/layer/<lid>/below.png")
+def layer_below_png(lid):
+    """Everything UNDER this layer, composited: the surface you are actually
+    painting on. R65, dogfooded: a painter had no way to see what was
+    beneath her own layer without rendering the whole document -- which
+    includes the layers ABOVE hers -- so she sampled the full composite to
+    repair a halo and painted a flat, wall-coloured rectangle onto her
+    OBJECT layer. That rectangle is the artifact Devin saw behind the bowl.
+    Two of her five fix rounds existed only to work around this."""
+    from . import composite
+    with _DOC_LOCK:
+        DOC.layer(lid)                              # 404 the honest way
+        ls = DOC.canvas_layers()
+        idx = next((i for i, l in enumerate(ls) if l.id == lid), None)
+        if idx is None:
+            return jsonify(error="that layer is not on the canvas"), 400
+        return _png(composite(ls[:idx], DOC.height, DOC.width, DOC.mask_map()))
+
+
+@app.get("/api/layer/<lid>/above.png")
+def layer_above_png(lid):
+    """Everything OVER this layer, composited -- what will be drawn on top
+    of anything you paint here. The other half of below.png: a highlight
+    that lands under someone's glaze is not the highlight you painted."""
+    from . import composite
+    with _DOC_LOCK:
+        DOC.layer(lid)
+        ls = DOC.canvas_layers()
+        idx = next((i for i, l in enumerate(ls) if l.id == lid), None)
+        if idx is None:
+            return jsonify(error="that layer is not on the canvas"), 400
+        return _png(composite(ls[idx + 1:], DOC.height, DOC.width, DOC.mask_map()))
+
+
 @app.post("/api/layer")
 def layer_edit():
-    """Layer ops: {"action": "add"|"delete"|"edit"|"duplicate"|"merge_down"|"move", "id"?, plus edit props: name, visible, opacity, blend, mask, mask_invert, alpha_lock, clip}."""
+    """Layer ops: {"action": "add"|"delete"|"edit"|"duplicate"|"merge_down"|"move"|"claim"|"release"|"grant"|"revoke", "id"?, plus edit props: name, visible, opacity, blend, mask, mask_invert, alpha_lock, clip}. claim/release take just {id}; grant/revoke take {id, to} and are owner-only -- see CONTRACT.md section 1-2."""
     d = request.json or {}
     act = d.get("action")
     # ONE guard for every id-taking action. Before this, each action failed
     # its own way: delete of an unknown id silently no-opped (after burning
     # an undo snapshot), move KeyError'd to a 500, edit had a private check.
     if act in ("duplicate", "merge_down", "clear", "remove", "delete",
-               "fill", "flip", "move", "edit"):
+               "fill", "flip", "move", "edit",
+               "claim", "release", "grant", "revoke"):
         lid = d.get("id")
         if not lid:
             return jsonify(error="which layer? '%s' needs a layer id"
@@ -3771,8 +4901,24 @@ def layer_edit():
         DOC.merge_visible_layers()
         GRAPH.commit_layer_outputs()
     elif act == "clear":
-        DOC.clear(d["id"], selection=d.get("selection") or None,
-                  sel_invert=bool(d.get("sel_invert")))
+        reg = d.get("region")
+        if reg:
+            # R65: a plain rectangle, for a painter who needs to take a
+            # mistake OUT rather than paint over it. Painting over is how
+            # the flat patch behind the bowl happened; nobody erases when
+            # erasing needs a selection object first.
+            try:
+                x0, y0, x1, y1 = [int(v) for v in reg]
+            except Exception:
+                return jsonify(error="region must be [x0, y0, x1, y1]"), 400
+            x0, x1 = max(0, min(x0, x1)), min(DOC.width, max(x0, x1))
+            y0, y1 = max(0, min(y0, y1)), min(DOC.height, max(y0, y1))
+            if x1 <= x0 or y1 <= y0:
+                return jsonify(error="empty region"), 400
+            DOC.clear_region(d["id"], x0, y0, x1, y1)   # journal-first
+        else:
+            DOC.clear(d["id"], selection=d.get("selection") or None,
+                      sel_invert=bool(d.get("sel_invert")))
     elif act in ("remove", "delete"):
         # both verbs: the docstring said "delete" for years while the code
         # only matched "remove", and an unknown action fell through to
@@ -3823,9 +4969,208 @@ def layer_edit():
             # and this surfaces its (helpful) message as a client error
             return jsonify(error=str(e)), 400
         GRAPH.commit_layer_outputs()
+        # WHY DIDN'T THAT GLINT? "Water reflection" and "Dispersion fringes"
+        # (layer Actions ▾) dial `reflect`/`dispersion`, which every layer
+        # model carries -- but the renderer only ever READS them off a
+        # WATER/GLASS volume slab (composite_volumetric's refraction
+        # branch), and even there only paints them in the Ortho/Persp 3D
+        # view; the Flat composite (composite_cached / composite_lit's
+        # flat branch) never calls that code at all. Dialling either up on
+        # a `Flat paint (no volume)` layer -- or on a real water/glass slab
+        # while still in Flat view -- reported ok:True over a pixel-
+        # identical composite (checked both ways with a real render diff).
+        # Emissive glow (vol_glow) is NOT in this boat: it lights the Flat
+        # composite directly (_doc_emission), so it needs no message here.
+        _refl_on = d.get("reflect") not in (None, 0, 0.0)
+        _disp_on = d.get("dispersion") not in (None, 0, 0.0)
+        if _refl_on or _disp_on:
+            _labels = [n for n, on in (("water reflection", _refl_on),
+                                       ("dispersion", _disp_on)) if on]
+            _what = " and ".join(_labels)
+            _is, _do = (("is a property", "renders") if len(_labels) == 1
+                        else ("are properties", "render"))
+            _l = DOC.layer(d["id"])
+            _kind = getattr(_l, "vol_kind", "none")
+            _optics_kind = {"inkwater": "water", "smoke": "fog",
+                            "fire": "fog"}.get(_kind, _kind)
+            warn = None
+            if _optics_kind not in ("water", "glass"):
+                warn = ("%s %s of a WATER or GLASS slab, and this layer's "
+                        "Type is %s -- set Type to Water or Glass (Layer "
+                        "options ▸ Optics & material) first, then it "
+                        "does something"
+                        % (_what[0].upper() + _what[1:], _is,
+                           "'Flat paint (no volume)'" if _kind == "none"
+                           else repr(_kind)))
+            elif getattr(DOC, "view3d", "flat") == "flat":
+                warn = ("done -- but %s only %s in Ortho/Persp 3D, not "
+                        "Flat; the Flat view has no waterline to show it "
+                        "on -- switch the camera (View ▸ Ortho/Persp) "
+                        "to see it" % (_what, _do))
+            if warn is not None:
+                return jsonify(ok=True, warning=warn)
+    elif act == "claim":
+        # The ownership GATE (before_request, above) already ran the full
+        # CONTRACT.md permission table for this id and 403'd if it refused
+        # -- an unowned or stale-owned layer was just auto-claimed/yielded
+        # to `me` as a SIDE EFFECT of that check passing, and _layer_yield_
+        # notice already folded `yielded_from` into this response if a
+        # stale lock just yielded. Reaching here at all means claim already
+        # happened; there is nothing left to do but say so.
+        return jsonify(ok=True, owner=DOC.layer(d["id"]).owner)
+    elif act == "release":
+        # Deliberately NOT run through the generic gate (see
+        # _mutating_layer_targets): "release" means "give up MY OWN lock",
+        # which is the opposite of what the gate's unowned-auto-claim would
+        # do if it ran on a layer that turns out to already be unowned.
+        l = DOC.layer(d["id"])
+        me = _owner_uid()
+        owner = getattr(l, "owner", "") or ""
+        if owner == "":
+            return jsonify(ok=True)          # nothing to release, no-op
+        if owner != me:
+            return jsonify(_layer_refusal(d["id"], l)), 403
+        l.owner = ""
+        return jsonify(ok=True)
+    elif act in ("grant", "revoke"):
+        # OWNER ONLY -- deliberately stricter than the generic mutate-layer
+        # permission (which also admits `shared` collaborators): letting a
+        # collaborator you shared with re-grant or revoke OTHER people would
+        # turn "I trust Priya with this layer" into "I trust Priya with who
+        # else gets to touch it", which is not what a grant means.
+        to = str(d.get("to", "")).strip()
+        if not to:
+            return jsonify(error="grant/revoke needs 'to' -- whose access "
+                                 "are you changing?"), 400
+        l = DOC.layer(d["id"])
+        me = _owner_uid()
+        owner = getattr(l, "owner", "") or ""
+        if owner == "":
+            return jsonify(error="that layer has no owner yet -- claim it "
+                                 "first, then you can share it"), 400
+        if owner != me:
+            return jsonify(_layer_refusal(d["id"], l)), 403
+        shared = list(getattr(l, "shared", None) or [])
+        if act == "grant":
+            if to not in shared:
+                shared.append(to)
+        else:
+            shared = [u for u in shared if u != to]
+        l.shared = shared
+        return jsonify(ok=True, shared=shared)
     elif act:
         return jsonify(error="unknown layer action: %r" % act), 400
     return jsonify(ok=True)
+
+
+# R63: pending access requests live in server MEMORY, keyed per document id
+# -- not in the .lews. A request is a conversation about the picture, not
+# part of it: saving/loading a file must not resurrect "may I paint on your
+# sky?" from a session that ended, and a request naming a uid who never
+# reconnects should just fade with the process rather than haunt a reopened
+# document forever. Keyed per document so switching pictures doesn't leak
+# one picture's inbox into another's.
+ACCESS_REQUESTS = {}
+_ACCESS_SEQ = [0]
+
+
+# R65: named passes already painted, per (document, user, pass). Session
+# memory like ACCESS_REQUESTS: a pass name is a fact about one painting
+# session, not about the picture.
+PASSES_SEEN = {}
+
+
+def _access_bucket():
+    return ACCESS_REQUESTS.setdefault(_viewing_doc_id(), [])
+
+
+@app.get("/api/access")
+def access_list_get():
+    """R64 (dogfooded): reading your own requests used to require
+    POST {"action":"list"} and a plain GET answered 405, which is the wrong
+    answer to the most obvious thing anyone tries. Same payload, no verb."""
+    me = _owner_uid()
+    reqs = _access_bucket()
+    return jsonify(ok=True,
+                   incoming=[_access_view(r) for r in reqs if r["to"] == me],
+                   outgoing=[_access_view(r) for r in reqs if r["from"] == me])
+
+
+def _access_view(r):
+    """A request as the client should see it: `from_name`/`to_name` are
+    resolved NOW, not stamped when it was filed. R64 -- a painter who
+    registered a display name after asking stayed "u_devi" in their own
+    pending request forever."""
+    return dict(r, from_name=_display_name(r["from"]) or r["from"],
+                to_name=_display_name(r["to"]) or r["to"])
+
+
+@app.post("/api/access")
+def access_route():
+    """The access-request flow (CONTRACT.md section 2):
+    {"action":"request","layer","note"?} -> {ok,id} (requester -> owner)
+    {"action":"list"} -> {ok,incoming:[...],outgoing:[...]} for the caller
+    {"action":"grant","id"} -> owner answers yes (adds requester to shared)
+    {"action":"deny","id","reason"?} -> owner answers no
+    Deliberately excluded from the ownership gate (_GATE_EXCLUDED_PATHS):
+    asking for access must never itself require access."""
+    d = request.json or {}
+    act = d.get("action")
+    me = _owner_uid()    # requests are about real identities, same as ownership
+    reqs = _access_bucket()
+    if act == "request":
+        lid = d.get("layer")
+        if not lid:
+            return jsonify(error="which layer are you asking for?"), 400
+        try:
+            l = DOC.layer(lid)
+        except KeyError:
+            return jsonify(error="no such layer: %s" % lid), 400
+        owner = getattr(l, "owner", "") or ""
+        if not owner:
+            return jsonify(error="that layer has no owner -- just paint on "
+                                 "it, no need to ask"), 400
+        if owner == me or me in (getattr(l, "shared", None) or []):
+            return jsonify(error="you already have access to that layer"), 400
+        _ACCESS_SEQ[0] += 1
+        rid = "AR%d" % _ACCESS_SEQ[0]
+        reqs.append({"id": rid, "layer": lid, "layer_name": l.name,
+                     "from": me, "to": owner,
+                     "note": str(d.get("note") or "")[:280],
+                     "state": "pending", "asked_at": time.time(),
+                     "answered_at": None})
+        return jsonify(ok=True, id=rid)
+    if act == "list":
+        return jsonify(ok=True,
+                       incoming=[_access_view(r) for r in reqs if r["to"] == me],
+                       outgoing=[_access_view(r) for r in reqs if r["from"] == me])
+    if act in ("grant", "deny"):
+        rid = d.get("id")
+        ent = next((r for r in reqs if r["id"] == rid), None)
+        if ent is None:
+            return jsonify(error="no such request (it may already have "
+                                 "been answered)"), 404
+        if ent["to"] != me:
+            return jsonify(error="that request is not addressed to you"), 403
+        if ent["state"] != "pending":
+            return jsonify(error="that request was already %s"
+                                 % ent["state"]), 400
+        if act == "grant":
+            try:
+                l = DOC.layer(ent["layer"])
+            except KeyError:
+                return jsonify(error="that layer no longer exists"), 400
+            shared = list(getattr(l, "shared", None) or [])
+            if ent["from"] not in shared:
+                shared.append(ent["from"])
+            l.shared = shared
+        else:
+            if d.get("reason"):
+                ent["reason"] = str(d["reason"])[:280]
+        ent["state"] = "granted" if act == "grant" else "denied"
+        ent["answered_at"] = time.time()
+        return jsonify(ok=True)
+    return jsonify(error="unknown action: %r" % act), 400
 
 
 @app.post("/api/group")
@@ -3913,7 +5258,27 @@ def select():
                          target=d.get("target"), name=d.get("name"),
                          feather=float(d.get("feather", 0)))
         GRAPH.commit_layer_outputs()
-        return jsonify(ok=True, selection=sel.meta())
+        meta = sel.meta()
+        # WHY DIDN'T THAT SELECT ANYTHING? object/wand/lum can silently
+        # produce an essentially empty mask: clicking bare paper with the
+        # object selector (no segment under the point covers the click), or
+        # a wand/lum tolerance too tight to match even the antialiased
+        # pixels next door. The selection is still made -- naming and undo
+        # history stay honest -- it is just told plainly there is nothing
+        # here to paint into (R58 UX open #3).
+        coverage = float(sel.data.mean())
+        meta["coverage"] = coverage
+        warn = None
+        if d.get("tool") == "object" and coverage < 1e-4:
+            warn = ("that selected nothing — no shape was found under the "
+                    "click; try a spot with a clearer edge")
+        elif d.get("tool") in ("color", "brightness") and coverage < 1e-4:
+            warn = ("that matched almost nothing — the tolerance is too "
+                    "tight for this area; raise it and try again")
+        resp = dict(ok=True, selection=meta)
+        if warn is not None:
+            resp["warning"] = warn
+        return jsonify(**resp)
     except Exception as e:
         return jsonify(error=str(e)), 400
 
@@ -4005,7 +5370,20 @@ def mask_png(mid):
 @app.post("/api/paint")
 def paint():
     """Paint a stroke: {"layer", "points": [[x,y,widthFactor?]...], "color", "radius", "opacity", "hardness", "erase"?, "media"?: "oil"|"acrylic"|"water" (impasto body + gravity), "material"?: a preset name from /api/state materials (gold, chrome, chalk, ...) or {"preset"?, "rough" 0..1, "metal" 0..1, "grain", "hold", "flow", "iters"} -- the stroke lays a PBR surface (per-pixel roughness/metalness lit by the composite; the brush colour is the albedo, so gold gleams in YOUR gold) plus a paint body, "load"?, "mode"?: "brush"|"knife" (the PALETTE KNIFE: shapes the paint already there instead of adding more, working the whole paint COLUMN across every stratum, with "knife": "smooth" to level a surface and cure stepping between layers, "push" to plough a ridge with volume conserved, "scrape" to take the tops off, "spread" to drag it into a thin film)|"blend" (the BLENDER: carries no pigment, softens and drags the WET paint already on canvas, gated by paint body -- and unlike smudge it is a recorded stroke, so the layer keeps full stroke editing and a blend re-derives when you nudge the colours under it)|"smudge"|"clone"|"heal"|"erase_strokes" (whole strokes under the path)|"erase_top" (only the topmost stroke)|"erase_undo" (restore the area to its pre-stroke base)|"erase_depth" (carve the impasto body first)|"node", "selection"?, "brush"?, "live"?, "record"}. Returns {ok, sid}. Layer alpha_lock is honoured and recorded."""
+    # R58: strokes are SERIALISED against composites. This route mutated the
+    # document with no lock while GET /api/composite.png rendered under one;
+    # a stroke landing mid-render left every cache stamped current over
+    # pre-stroke pixels, and the person saw one dab where they had dragged
+    # a whole line. RLock: nested takes by helpers stay fine.
+    with _DOC_LOCK:
+        return _paint_locked()
+
+
+def _paint_locked():
     d = request.json or {}
+    busy = _still_busy(d)          # R64: the cadence promise, made atomic
+    if busy is not None:
+        return busy
     # FIRST, before anything reads the payload. The bounding box below is
     # computed straight from the points, so NaN or a string in there crashed
     # with a 500 long before the engine was reached.
@@ -4057,6 +5435,15 @@ def paint():
                 warn = ("this layer clips onto %r, which is empty here — "
                         "the paint shows only where the base has pixels"
                         % base.name)
+        if warn is None and mode == "knife" and pts:
+            # R58 UX sweep: the palette knife shapes paint BODY. On flat paint
+            # (no impasto under the path) it is a silent no-op -- the drag
+            # does nothing and nothing says why.
+            _hm = getattr(_l, "height_map", None)
+            if _hm is None or float(_hm[y0:y1, x0:x1].max(initial=0.0)) < 1e-4:
+                warn = ("the knife shapes paint BODY, and there is none here — "
+                        "paint with an oil/acrylic/water medium first (Brush ▸ "
+                        "Media), then knife it")
         if warn is None:
             # STROKES UNDER OPAQUE PAINT (R11, found swarm-painting a
             # portrait): a fix painted on a layer BELOW the flaw looks like
@@ -4979,6 +6366,62 @@ def dream_place():
     return jsonify(ok=True, id=l.id)
 
 
+_APP_SUBSTRATES = {}
+
+
+@app.post("/api/memory")
+def user_memory():
+    """PER-USER memory (R56, APP_FOUNDATION §6): each painter gets their
+    own physically separate leCore partition via m.app_substrate --
+    remember/recall with provenance (taught vs model-cached), observe/
+    suggest/habits (procedures mined from what THIS user actually does),
+    and forget (the veto). Keyed by the X-User identity the agent
+    surface already carries; the shared studio doctrine stays with the
+    sage (/api/advise). {"action": "remember"|"recall"|"observe"|
+    "suggest"|"habits"|"forget", plus q/a/goal/steps as the action
+    needs}."""
+    d = request.json or {}
+    uid = _req_uid()
+    if not uid:
+        return jsonify(error="send an X-User header -- memory is per "
+                             "person"), 400
+    from . import mind as _mind_fn
+    m = _mind_fn()
+    if not hasattr(m, "app_substrate"):
+        return jsonify(error="this leCore build has no app_substrate -- "
+                             "update leos-core for per-user memory"), 503
+    sub_ = _APP_SUBSTRATES.get(uid)
+    if sub_ is None:
+        sub_ = _APP_SUBSTRATES[uid] = m.app_substrate("lestudio", user=uid)
+    act = d.get("action") or "recall"
+    try:
+        if act == "remember":
+            r = sub_.remember(d["q"], d["a"], topic=d.get("topic"))
+        elif act == "recall":
+            r = sub_.recall(d["q"],
+                            established_only=bool(d.get("established_only")))
+        elif act == "observe":
+            r = sub_.observe(d["goal"], list(d.get("steps") or []))
+        elif act == "suggest":
+            r = sub_.suggest(d["goal"])
+        elif act == "habits":
+            r = sub_.habits()
+        elif act == "forget":
+            r = sub_.forget(d["q"])
+        else:
+            return jsonify(error="unknown action %r" % act), 400
+        try:
+            if hasattr(sub_, "save"):
+                sub_.save()
+        except Exception:
+            pass
+        return jsonify(ok=True, result=r)
+    except KeyError as e:
+        return jsonify(error="missing field for %s: %s" % (act, e)), 400
+    except Exception as e:
+        return jsonify(error=str(e)), 400
+
+
 @app.post("/api/advise")
 def advise():
     """THE STUDIO SAGE: ask the leCore memory that every painting session
@@ -5128,6 +6571,11 @@ def paint_batch():
     Why it exists: a swarm painting a portrait made ~8000 /api/paint calls;
     HTTP + JSON + per-stroke undo bookkeeping dominated wall time. One batch
     of 50 strokes costs one round trip and one snapshot."""
+    with _DOC_LOCK:                 # R58: see /api/paint
+        return _paint_batch_locked()
+
+
+def _paint_batch_locked():
     d = request.json or {}
     items = d.get("strokes")
     if not isinstance(items, list) or not items:
@@ -5151,6 +6599,32 @@ def paint_batch():
         except _Gone as e:
             return jsonify(error="stroke %d: %s" % (i, e)), 400
     with _DOC_LOCK:
+        busy = _still_busy(d)      # R64: the cadence promise, made atomic
+        if busy is not None:
+            return busy
+        # R65: a NAMED pass is applied once. A painter re-ran a script by
+        # accident and every semi-transparent build-up pass doubled -- the
+        # window bloom washed the frame out and it took two fix rounds to
+        # find out why. Low-opacity passes have no way to tell they have
+        # already happened, so the server remembers for them: same user,
+        # same document, same pass name -> 409, unless `force`.
+        pname = str(d.get("pass") or "").strip()
+        prun = str(d.get("pass_run") or "").strip()
+        if pname and not d.get("force"):
+            key = (_viewing_doc_id(), _owner_uid(), pname)
+            prev = PASSES_SEEN.get(key)
+            # A pass bigger than one batch arrives as several calls, and
+            # they all belong to the SAME pass: `pass_run` is the client's
+            # id for this instance of it, so continuing chunks are let
+            # through and only a genuinely NEW run of an applied pass is
+            # refused. (Found immediately: the first chunk of the cast
+            # shadows registered the name and the server then refused the
+            # rest of the same pass.)
+            if prev is not None and prev != prun:
+                return jsonify(error="pass %r was already painted in this "
+                                     "document by you -- send force:true to "
+                                     "paint it again on purpose" % pname,
+                               pass_already_applied=True, **{"pass": pname}), 409
         DOC._edited_palette_last = False
         lids = []
         for it, _m in cleaned:
@@ -5177,10 +6651,41 @@ def paint_batch():
                 ry1 = min(DOC.height, int(max(ys)) + 1)
                 if rx1 > rx0 and ry1 > ry0:
                     reg = (rx0, ry0, rx1, ry1)
-        DOC.record("Brush x%d" % len(cleaned), only=lids, region=reg)
+        # journaled=True is the R16 batch-record law, and it was MISSING.
+        # Without it record() takes the "any non-stroke edit" branch and sets
+        # layer._replay_ok = False on every target -- so a layer painted
+        # through the swarm fast path was never replay-faithful again, and a
+        # .lews had to store its pixels instead of rebuilding it from the
+        # journal. Measured on the R61 painting: 7 of 13 layers demoted, 93 MB
+        # of float32 saved for a picture that displays as a 1.3 MB PNG. Every
+        # stroke in the batch IS in the replay log, which is exactly what
+        # journaled=True asserts.
+        DOC.record("Brush x%d" % len(cleaned), only=lids, region=reg,
+                   journaled=True)
         sids = []
         try:
             for it, mode in cleaned:
+                # DIP IN BAND. `real_brush` models a finite charge, which is
+                # correct physics and a trap for anything without a hand:
+                # measured, a loaded brush is dry after three long strokes
+                # and the next seven change not one pixel, silently, at 200.
+                # The only refill was POST /api/brush_load, so a script had
+                # to leave the batch to dip -- which meant a real-brush pass
+                # could not be batched AT ALL. The R66 accents pass spent
+                # twelve minutes on two round trips per stroke for that
+                # reason alone. `dip` on a batch item reloads the brush
+                # immediately before that stroke: true for a full charge in
+                # the stroke's own colour, or {"color", "amount"}.
+                d_ = it.get("dip")
+                if d_:
+                    if d_ is True:
+                        DOC.load_brush(color=it.get("color"), amount=1.0)
+                    elif isinstance(d_, dict):
+                        DOC.load_brush(color=d_.get("color", it.get("color")),
+                                       amount=float(d_.get("amount", 1.0)))
+                    else:
+                        raise ValueError("dip must be true or "
+                                         "{color?, amount?}")
                 if mode == "knife":
                     sid = DOC.knife(it["layer"], it["points"],
                                     mode=str(it.get("knife", "smooth")),
@@ -5223,11 +6728,22 @@ def paint_batch():
         # a recorded stroke would stamp replay-ok forward itself; these are
         # record=False (one undo entry for the batch) but every stroke IS
         # recorded in the replay log, so the layers stay faithful by
-        # construction -- stamp them like paint() would have
+        # construction -- stamp them like paint() would have.
+        #
+        # NOTE, because this block used to look like it was undoing the
+        # damage above and was not: _mark_replay_ok writes the DOCUMENT's
+        # _replay_ok DICT (the "is this verdict still current" cache), while
+        # the demotion above cleared the LAYER's _replay_ok ATTRIBUTE (the
+        # verdict itself). Two different things sharing one name, so the
+        # repair silently repaired nothing for years of agent painting. The
+        # real fix is journaled=True above; this stamp stays because it is
+        # still the right thing for the cache.
         for lid in lids:
             if DOC._replay_ok_cached(lid):
                 DOC._mark_replay_ok(lid)
         GRAPH.commit_layer_outputs()
+        if pname:
+            PASSES_SEEN[(_viewing_doc_id(), _owner_uid(), pname)] = prun
     return jsonify(ok=True, count=len(sids), sids=sids)
 
 
@@ -6188,6 +7704,7 @@ def serve(host=None, port=None, debug=False):
     host = host or os.environ.get("LESTUDIO_HOST", "127.0.0.1")
     port = int(port or _env_int("LESTUDIO_PORT", 5050))
     print(f"leStudio -> http://{host}:{port}")
+    _autosave_tick()             # R65: the crash net runs here, not in a tab
     app.run(host=host, port=port, debug=debug, threaded=True)
 
 
@@ -6280,6 +7797,22 @@ def palette_squeeze():
         return jsonify(error=str(e)), 400
     return jsonify(ok=True,
                    spots=[[float(a), float(b)] for a, b in spots])
+
+
+_SETTINGS_KEYS = {"action", "id", "name", "width", "height", "dpi", "mode",
+                  "paper"}
+
+
+def _int_arg(name):
+    """A non-negative integer query arg, or None when absent/nonsense."""
+    v = request.args.get(name)
+    if v is None:
+        return None
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return None
+    return n if n >= 0 else None
 
 
 @app.post("/api/paper")
@@ -6395,6 +7928,87 @@ def palette_clear():
         pd.strokes = [k for k in pd.strokes if False]
         DOC._edited_palette_last = True      # so Ctrl+Z reaches it
     return jsonify(ok=True)
+
+
+# --------------------------------------------------------------- agent surface ----
+# R55 (leCore 0.2.21 / APP_FOUNDATION): mount the ENGINE'S standard agent
+# doors -- /api/agent/tools (manifest), /api/agent/invoke (call by name,
+# image routes return data: URLs), /api/engine (engine_status), and the
+# engine's /api/presence -- beside our own doors rather than deriving a
+# second manifest by hand (the app_lint 'own_tool_manifest' hit). Our
+# pre-existing /api/mind, /api/schema and SSE /api/events stay: first
+# registration wins for duplicate rules, and agents get the union.
+# Guarded: an older engine without agent_surface still boots the app.
+def _mount_agent_surface():
+    try:
+        from . import mind as _mind_fn
+        m = _mind_fn()
+    except Exception:
+        return
+    if not hasattr(m, "agent_surface"):
+        return
+    try:
+        root = _WS_ROOT
+        os.makedirs(root, exist_ok=True)
+        before = set(app.view_functions)
+        m.agent_surface(app, base="/api", app_name="lestudio",
+                        workspace_root=root,
+                        image_routes=("composite.png", "graph/render.png",
+                                      "textile/preview.png"))
+        # our /api/schema manifest documents routes from their view
+        # docstrings; give the engine's mounted views one where the
+        # engine did not, so they stay visible to agents through BOTH
+        # manifests (the doc-coverage pin holds)
+        for ep in set(app.view_functions) - before:
+            fn = app.view_functions[ep]
+            if not (fn.__doc__ or "").strip():
+                fn.__doc__ = ("Engine-mounted agent door (leCore "
+                              "agent_surface): see GET /api/agent/tools "
+                              "for the manifest.")
+    except Exception as e:
+        app.logger.warning("agent_surface mount skipped: %s", e)
+
+
+def _lews_boot():
+    """R57 boot: the live workspace directory is the document backing. If it
+    already holds leStudio documents (a previous run's, another app's, an
+    agent's), REBUILD the in-process workspace from them -- restarting the
+    server must not orphan the shared truth. Otherwise seed the directory
+    from the boot state so other apps see us from the first request. Guarded
+    to nothing on an engine without the Workspace class."""
+    try:
+        ws = _lews_ws()
+        if ws is None:
+            return
+        secs = ws.sections("lestudio.document")
+        if not secs:
+            _lews_publish()
+            return
+        from . import _doc_from_section
+        docs, graphs = {}, {}
+        for sec in secs:
+            d, g = _doc_from_section(sec["meta"], sec["arrays"])
+            docs[d.id], graphs[d.id] = d, g
+        if not docs:
+            return
+        st = ws.get("lestudio-state")
+        active = (st or {}).get("meta", {}).get("active")
+        WS.docs, WS.graphs = docs, graphs
+        WS.active = active if active in docs else next(iter(docs))
+        WS._wire()
+        from holographic.io_and_interop.holographic_lews import section_hash
+        for sec in secs:
+            _LEWS["sha"][sec["id"]] = section_hash(sec)
+        _LEWS["sha"]["__state"] = WS.active
+    except Exception as e:
+        app.logger.warning("lews boot restore skipped: %s", e)
+
+
+try:
+    _mount_agent_surface()
+    _lews_boot()
+except Exception:
+    pass
 
 
 # ------------------------------------------------------------------------------------------------

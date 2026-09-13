@@ -103,10 +103,15 @@ def test_r37_journal_first_lews_round_trips():
                 color=(1, 0, 0), radius=4.0)
     d.paint(l2.id, [[20, 60], [300, 120]], color=(0.7, 0.5, 0.2),
             radius=12.0, media="oil", load=0.8)
-    full = save_workspace({d.id: d}, {}, d.id)
+    # R67: journal-first is the DEFAULT now, so the fat file is the one you
+    # have to ask for. cache_pixels=True is that ask; None decides per layer.
+    full = save_workspace({d.id: d}, {}, d.id, cache_pixels=True)
     light = save_workspace({d.id: d}, {}, d.id, cache_pixels=False)
+    auto = save_workspace({d.id: d}, {}, d.id)
     assert len(light) < len(full) * 0.8, \
         "the journal-first file must be substantially smaller"
+    assert len(auto) < len(full) * 0.8, \
+        "...and the DEFAULT must be the journal-first one, not the fat one"
     docs, graphs, active, extras = load_workspace(light)
     d2 = docs[active]
     for L in (lid, l2.id):
