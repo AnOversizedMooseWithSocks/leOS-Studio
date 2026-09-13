@@ -1,0 +1,35 @@
+{
+ "golden_ops.lews": {
+  "composite_crc": 4076935875,
+  "ops": [
+   "bake",
+   "blend",
+   "clear",
+   "fill_layer",
+   "flip",
+   "flood",
+   "heal",
+   "import",
+   "knife",
+   "media_step",
+   "paint",
+   "paste",
+   "place",
+   "smudge",
+   "stamp",
+   "text",
+   "xform"
+  ],
+  "w": 200,
+  "h": 150
+ },
+ "golden_r47.lews": {
+  "composite_crc": 3425952032,
+  "ops": [
+   "paint",
+   "pwarp"
+  ],
+  "w": 200,
+  "h": 150
+ }
+}

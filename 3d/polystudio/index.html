@@ -1,0 +1,1701 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Poly Studio — leCore</title>
+<style>
+  :root { --bg:#0d1016; --panel:#141821; --panel2:#1b2130; --line:#242c3d; --ink:#c8d2e0; --dim:#6b7789;
+          --acc:#58a6ff; --accent:#e0a34d;
+          /* --acc = interactive/selection (primary); --accent = render/commit only (secondary) */
+          --sel:#22334d; --sel-2:#26314a; --ink-bright:#e8eef8;
+          /* type scale: xs labels, sm secondary, base body, lg headings */
+          /* type scale -- every font-size in the app resolves to one of these (D1-3). --fs-2xs and
+             --fs-md were added because the UI genuinely used 10px and 13px; snapping those onto 9/11/12
+             would have restyled working panels to satisfy the token list. */
+          --fs-2xs:10px; --fs-xs:9px; --fs-sm:11px; --fs-base:12px; --fs-md:13px; --fs-lg:15px; }
+  * { box-sizing:border-box; margin:0; }
+  html,body { height:100%; }
+  body { background:var(--bg); color:var(--ink); font:12px/1.45 -apple-system,'Segoe UI',Roboto,sans-serif; overflow:hidden; }
+  #wrap { display:grid; grid-template-rows:34px 1fr; height:100%; }
+  button, select, input[type=number], input[type=text] { background:var(--panel2); color:var(--ink);
+    border:1px solid var(--line); border-radius:6px; padding:5px 8px; font:inherit; cursor:pointer; }
+  input[type=text], input[type=number] { cursor:text; }
+  button:hover { border-color:var(--acc); }
+  button.on { background:var(--sel); border-color:var(--acc); }
+  kbd { background:#0a0d12; border:1px solid var(--line); border-radius:4px; padding:0 4px; font-size:var(--fs-2xs); color:var(--dim); }
+  .row { display:flex; gap:6px; margin:5px 0; } .row > * { flex:1; }
+  .seg { display:flex; gap:0; margin:5px 0; } .seg button { flex:1; border-radius:0; }
+  .seg button:first-child { border-radius:6px 0 0 6px; } .seg button:last-child { border-radius:0 6px 6px 0; }
+  .kv { display:flex; justify-content:space-between; margin:4px 0 2px; color:var(--dim); } .kv b { color:var(--ink); }
+  .note { color:var(--dim); font-size:var(--fs-sm); margin:5px 0; }
+  .inline { display:flex; align-items:center; gap:6px; margin:5px 0; color:var(--dim); }
+  h2 { font-size:var(--fs-2xs); letter-spacing:0.14em; text-transform:uppercase; color:var(--dim); margin:12px 0 5px; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+
+  /* ---------------- menubar ---------------- */
+  #menubar { display:flex; align-items:center; gap:2px; background:var(--panel); border-bottom:1px solid var(--line); padding:0 10px; z-index:60; position:relative; }
+  #menubar .title { font-weight:700; margin-right:10px; color:var(--ink-bright); } #menubar .title i { color:var(--acc); font-style:normal; }
+  .menu { position:relative; }
+  .menu > .mtop { background:none; border:none; padding:8px 10px; border-radius:6px 6px 0 0; color:var(--ink); }
+  .menu.open > .mtop, .menu > .mtop:hover { background:var(--panel2); }
+  .mdrop { display:none; position:absolute; left:0; top:100%; min-width:240px; background:var(--panel2);
+    border:1px solid var(--line); border-radius:0 8px 8px 8px; padding:5px; z-index:70; box-shadow:0 10px 26px rgba(0,0,0,0.5); }
+  .menu.open .mdrop { display:block; }
+  .mdrop button, .mdrop .mi { display:flex; width:100%; text-align:left; background:none; border:none; padding:6px 8px;
+    border-radius:5px; justify-content:space-between; align-items:center; gap:12px; }
+  .mdrop button:hover, .mdrop .mi:hover { background:var(--sel-2); }
+  .mdrop button:disabled { opacity:0.4; pointer-events:none; }
+  .mdrop hr { border:none; border-top:1px solid var(--line); margin:4px 2px; }
+  .scrow { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:4px 0; font-size:var(--fs-base); color:var(--ink); border-top:1px solid var(--line); }
+  .scrow span { color:var(--dim); }
+  .mdrop .mglabel { font-size:var(--fs-xs); text-transform:uppercase; letter-spacing:0.08em; color:var(--dim);
+    padding:6px 12px 2px; pointer-events:none; }
+  .mdrop .inline, .mdrop .seg { padding:0 6px; }
+  #menubar .spacer { flex:1; }
+
+  /* ---------------- main + toolbar ---------------- */
+  #main { position:relative; overflow:hidden; }
+  #toolstrip { position:absolute; left:0; top:0; bottom:0; width:58px; background:var(--panel);
+    border-right:1px solid var(--line); display:flex; flex-direction:column; gap:2px; padding:6px 4px; z-index:40; transition:width 0.15s; }
+  #toolstrip.expanded { width:172px; }
+  #toolstrip button { display:flex; align-items:center; justify-content:flex-start; gap:9px; background:none; border:none; border-radius:7px;
+    padding:7px 9px; color:var(--ink); font-size:var(--fs-base); white-space:nowrap; overflow:hidden; }
+  #toolstrip button:hover { background:var(--panel2); }
+  #toolstrip button.on { background:var(--sel); color:#fff; box-shadow:inset 0 0 0 1px var(--acc); }
+  #toolstrip .ic { font-size:var(--fs-lg); width:20px; text-align:center; flex:0 0 20px; }
+  #toolstrip .lb { display:none; } #toolstrip.expanded .lb { display:inline; }
+  #toolstrip .tslabel { display:none; }
+  #toolstrip.expanded .tslabel { display:block; font-size:var(--fs-xs); text-transform:uppercase; letter-spacing:0.08em; color:var(--dim); padding:4px 8px 2px; }
+  #toolstrip hr { border:none; border-top:1px solid var(--line); margin:5px 2px; }
+  #toolseg { display:flex; flex-direction:column; gap:2px; }
+  #toolseg button { width:100%; }
+  #toolstrip .snaprow { display:flex; align-items:center; gap:5px; padding:2px 6px; color:var(--dim); }
+  #toolstrip .snaprow input[type=number] { width:52px; padding:2px 4px; display:none; }
+  #toolstrip.expanded .snaprow input[type=number] { display:block; }
+
+  /* ---------------- viewport ---------------- */
+  #viewwrap { position:absolute; inset:0 0 0 58px; }
+  #timeline { position:absolute; left:70px; right:12px; bottom:10px; z-index:32; display:flex; align-items:center;
+    gap:6px; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:5px 8px; font-size:var(--fs-sm); }
+  #timeline .tlnum { min-width:34px; text-align:right; color:var(--acc); font-family:monospace; }
+  #timeline .tldim { color:var(--dim); }
+  #timeline button.on { background:var(--sel); border-color:var(--acc); }
+  #dimtag { position:absolute; z-index:29; pointer-events:none; background:rgba(20,24,33,0.85);
+    border:1px solid var(--line); border-radius:6px; padding:3px 8px; font-size:var(--fs-sm); color:var(--ink);
+    white-space:nowrap; transform:translate(-50%,-120%); }
+  #refunderlay { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; pointer-events:none; z-index:5; }
+  #refbar { position:absolute; left:50%; bottom:10px; transform:translateX(-50%); z-index:31; display:flex;
+    align-items:center; gap:8px; background:var(--panel); border:1px solid var(--line); border-radius:8px;
+    padding:5px 10px; font-size:var(--fs-sm); color:var(--dim); }
+  #refbar button { padding:1px 6px; }
+  #toolstrip.expanded ~ #viewwrap { left:172px; }
+  #view { width:100%; height:100%; display:block; }
+  #hud { position:absolute; left:12px; top:8px; color:var(--ink); font-size:var(--fs-sm); text-shadow:0 1px 2px #000; background:rgba(20,24,33,0.7); border:1px solid var(--line); border-radius:6px; padding:3px 8px; z-index:30; }
+  #hint { position:absolute; right:12px; top:8px; color:var(--dim); font-size:var(--fs-sm); text-shadow:0 1px 2px #000; }
+  #welcome { position:absolute; left:50%; top:44%; transform:translate(-50%,-50%); z-index:40;
+    background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:20px 22px;
+    box-shadow:0 12px 40px rgba(0,0,0,0.5); width:340px; }
+  #welcome .wtitle { font-size:var(--fs-lg); color:var(--ink-bright); margin-bottom:12px; font-weight:600; }
+  #welcome .wrow { display:flex; justify-content:space-between; gap:16px; padding:5px 0;
+    font-size:var(--fs-base); border-top:1px solid var(--line); }
+  #welcome .wrow b { color:var(--ink); flex:0 0 auto; }
+  #welcome .wrow span { color:var(--dim); text-align:right; }
+  #welcome button { margin-top:16px; width:100%; padding:9px; border-radius:8px; border:none;
+    background:var(--acc); color:#0a0d12; font-weight:600; font-size:var(--fs-md); cursor:pointer; }
+  #welcome button:hover { filter:brightness(1.08); }
+  #status { position:absolute; left:12px; bottom:10px; color:#9fb4d8; font-size:var(--fs-base); text-shadow:0 1px 3px #000; max-width:62%; }
+  #marquee { position:absolute; border:1px dashed var(--acc); background:rgba(88,166,255,0.08); display:none; pointer-events:none; }
+  #brushcursor { position:absolute; border:1.5px solid var(--accent); border-radius:50%; pointer-events:none; display:none; transform:translate(-50%,-50%); }
+
+  /* context cards (sculpt / paint / soft-selection) */
+  .ctxcard { position:absolute; left:58px; top:30px; width:212px; background:rgba(20,24,33,0.94);
+    border:1px solid var(--line); border-radius:10px; padding:8px 10px 10px; z-index:35; }
+  #toolstrip.expanded ~ #viewwrap .ctxcard { left:10px; }
+  .ctxcard h2 { margin-top:2px; }
+
+  /* ---------------- dialogs ---------------- */
+  .dlg { position:absolute; top:60px; right:26px; width:320px; background:var(--panel);
+    border:1px solid var(--line); border-radius:12px; z-index:80; display:none;
+    box-shadow:0 18px 48px rgba(0,0,0,0.55); }
+  .dlg.open { display:block; }
+  .dlghead { display:flex; justify-content:space-between; align-items:center; padding:8px 12px;
+    border-bottom:1px solid var(--line); cursor:grab; font-weight:600; color:var(--ink-bright); border-radius:12px 12px 0 0; background:var(--panel2); }
+  .dlghead .x { cursor:pointer; color:var(--dim); padding:0 4px; } .dlghead .x:hover { color:#fff; }
+  .dlgbody { padding:8px 12px 12px; max-height:calc(100vh - 160px); overflow:auto; }
+  .dlgbody h2:first-child { margin-top:2px; }
+
+  /* C3-3: docked properties panel (Blender N-panel convention) */
+  .dlg.docked { top:44px; right:0; bottom:0; width:300px; border-radius:0; border-right:none;
+    border-top:1px solid var(--line); box-shadow:-8px 0 24px rgba(0,0,0,0.35); }
+  .dlg.docked .dlghead { cursor:default; border-radius:0; }
+  .dlg.docked .dlgbody { max-height:calc(100vh - 90px); }
+  .dockbtn { cursor:pointer; color:var(--dim); padding:0 6px; font-size:var(--fs-md); } .dockbtn:hover { color:#fff; }
+
+  #objlist { max-height:170px; overflow:auto; margin:4px 0; }
+  .objrow { display:flex; justify-content:space-between; padding:4px 8px; border-radius:6px; cursor:pointer; color:var(--ink); }
+  .objrow:hover { background:var(--panel2); } .objrow.sel { background:var(--sel); }
+  .objrow .cnt { color:var(--dim); font-size:var(--fs-sm); }
+  .objrow .boxtog { color:var(--dim); font-size:var(--fs-base); padding:0 3px; border-radius:3px; opacity:0.5; }
+  .objrow .boxtog:hover { opacity:1; color:var(--ink); }
+  .objrow .boxtog.on { opacity:1; color:var(--acc); background:var(--sel-2); }
+
+  #mattabs { display:flex; flex-wrap:wrap; gap:4px; margin:4px 0; }
+  #mattabs button { padding:3px 9px; font-size:var(--fs-sm); border-radius:12px; }
+  #swatches { display:grid; grid-template-columns:repeat(6,1fr); gap:6px; margin:6px 0; max-height:180px; overflow:auto; }
+  .swatch { aspect-ratio:1; border-radius:50%; border:2px solid transparent; cursor:pointer; position:relative; }
+  .swatch.on { border-color:var(--acc); }
+  .swatch span { position:absolute; left:50%; bottom:-15px; transform:translateX(-50%); font-size:var(--fs-xs); color:var(--dim); white-space:nowrap; display:none; }
+  .swatch:hover span { display:block; }
+  #cm_ball { width:100%; border-radius:8px; margin-top:6px; background:#0a0d12; min-height:40px; }
+
+
+  /* ---------------- G4: focus, target size, and touch behaviour ---------------- */
+  /* WCAG 2.2: 2.4.7/2.4.11-13 Focus Appearance (>=3:1 against the surface, 2px perimeter) and
+     2.5.8 Target Size (>=24x24 CSS px). The app previously had no :focus rule at all. */
+  :focus-visible { outline:2px solid var(--acc); outline-offset:2px; border-radius:6px; }
+  button, select, input[type=checkbox], .dlghead .x, .mi, .rvthumb { min-height:24px; }
+  .dlghead .x { min-width:24px; display:inline-flex; align-items:center; justify-content:center; }
+  input[type=checkbox] { min-width:18px; width:18px; height:18px; }
+  input[type=range] { height:24px; }
+  #mattabs button { min-height:24px; }
+  canvas#view { touch-action:none; }
+  @media (pointer:coarse) {                      /* G5: fingers need more than 24px */
+    button, select { min-height:34px; }
+    .rvbar button, .rvbar select { min-height:32px; }
+    #toolstrip button { min-height:38px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; } }
+
+  /* ---------------- G6: background job chips ---------------- */
+  #jobs { position:absolute; left:12px; bottom:32px; display:flex; flex-direction:column; gap:5px; z-index:36; }
+  .jobchip { display:flex; align-items:center; gap:8px; background:rgba(20,24,33,0.94);
+    border:1px solid var(--line); border-radius:999px; padding:4px 6px 4px 12px; font-size:var(--fs-sm);
+    color:var(--ink); box-shadow:0 6px 18px rgba(0,0,0,0.45); max-width:380px; }
+  .jobchip .jl { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .jobchip .jb { width:64px; height:4px; background:var(--panel2); border-radius:2px; overflow:hidden; flex:0 0 auto; }
+  .jobchip .jb div { height:100%; width:0%; background:var(--accent); transition:width 0.2s; }
+  .jobchip .jx { border-radius:50%; padding:0; width:20px; height:20px; min-height:20px; line-height:1;
+    display:flex; align-items:center; justify-content:center; flex:0 0 auto; }
+  .jobchip.done { opacity:0.55; }
+
+  /* ---------------- D4: in-app prompt / confirm / report ---------------- */
+  #uiask { position:fixed; inset:0; background:rgba(6,8,12,0.55); z-index:220; display:none;
+    align-items:center; justify-content:center; }
+  #uiask.open { display:flex; }
+  #uiask .abox { width:min(460px, 92vw); background:var(--panel); border:1px solid var(--line);
+    border-radius:12px; box-shadow:0 24px 64px rgba(0,0,0,0.6); overflow:hidden; }
+  #uiask .ahead { padding:9px 13px; background:var(--panel2); border-bottom:1px solid var(--line);
+    font-weight:600; color:var(--ink-bright); }
+  #uiask .abody { padding:12px 13px; }
+  #uiask .abody p { margin:0 0 8px; color:var(--ink); white-space:pre-wrap; }
+  #uiask pre { margin:0; max-height:46vh; overflow:auto; background:#0c0e12; border:1px solid var(--line);
+    border-radius:8px; padding:9px 11px; font:11px/1.5 monospace; color:var(--ink); white-space:pre-wrap; }
+  #uiask input { width:100%; }
+  #uiask .afoot { display:flex; gap:8px; justify-content:flex-end; padding:0 13px 13px; }
+  #uiask .afoot button { min-width:92px; }
+  #uiask .afoot .go { border-color:var(--acc); }
+
+  /* ---------------- G3: command palette ---------------- */
+  #cmdpal { position:fixed; inset:0; background:rgba(6,8,12,0.55); z-index:200; display:none;
+    align-items:flex-start; justify-content:center; padding-top:12vh; }
+  #cmdpal.open { display:flex; }
+  #cmdpal .cpbox { width:min(620px, 92vw); background:var(--panel); border:1px solid var(--line);
+    border-radius:12px; box-shadow:0 24px 64px rgba(0,0,0,0.6); overflow:hidden; }
+  #cpinput { width:100%; border:none; border-bottom:1px solid var(--line); border-radius:0;
+    background:var(--panel2); padding:12px 14px; font-size:var(--fs-lg); color:var(--ink-bright); }
+  #cplist { max-height:46vh; overflow:auto; padding:4px; }
+  .cprow { display:flex; justify-content:space-between; gap:12px; align-items:center; padding:7px 10px;
+    border-radius:7px; cursor:pointer; color:var(--ink); }
+  .cprow.on { background:var(--sel); }
+  .cprow em { color:var(--dim); font-style:normal; font-size:var(--fs-sm); flex:0 0 auto; }
+  .cpfoot { padding:6px 12px; border-top:1px solid var(--line); margin:0; }
+  /* ---------------- A2/D3: the Render View (framebuffer) ---------------- */
+  /* A framebuffer is not a settings panel with a thumbnail at the bottom -- it is an image surface with
+     a toolbar, its own zoom/pan, its own history, and its own progress. It owns its image buffer: the
+     live preview may never overwrite a finished render (A3). */
+  .dlg.rv { width:760px; min-width:420px; }
+  .rvbar { display:flex; align-items:center; gap:4px; flex-wrap:wrap; padding:6px 8px;
+    border-bottom:1px solid var(--line); background:var(--panel2); }
+  .rvbar button, .rvbar select { padding:4px 8px; min-height:26px; font-size:var(--fs-sm); }
+  .rvbar .rvsep { width:1px; align-self:stretch; background:var(--line); margin:0 3px; }
+  .rvbar .grow { flex:1; }
+  #rvgo { border-color:var(--accent); color:var(--ink-bright); }
+  .rvstage { position:relative; overflow:hidden; background:
+      repeating-conic-gradient(#12151c 0% 25%, #0a0d12 0% 50%) 50% / 20px 20px;
+    height:440px; min-height:180px; cursor:grab; }
+  .rvstage.panning { cursor:grabbing; }
+  .rvstage img { position:absolute; left:0; top:0; transform-origin:0 0; image-rendering:auto;
+    display:none; max-width:none; user-select:none; -webkit-user-drag:none; }
+  .rvstage img.show { display:block; }
+  #rvimgB { clip-path:inset(0 0 0 50%); }
+  #rvwipeline { position:absolute; top:0; bottom:0; width:2px; background:var(--acc); display:none;
+    cursor:ew-resize; box-shadow:0 0 8px rgba(88,166,255,0.7); }
+  #rvwipeline.show { display:block; }
+  .rvempty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    color:var(--dim); font-size:var(--fs-md); text-align:center; padding:0 40px; pointer-events:none; }
+  .rvfoot { display:flex; align-items:center; gap:8px; padding:5px 9px; border-top:1px solid var(--line); }
+  .rvfoot .bar { flex:1; height:4px; background:var(--panel2); border-radius:2px; overflow:hidden; }
+  .rvfoot .bar div { height:100%; width:0%; background:var(--accent); transition:width 0.2s; }
+  .rvfoot .note { margin:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:60%; }
+  #rvhist { display:none; gap:6px; padding:6px 8px; border-top:1px solid var(--line); overflow-x:auto; }
+  #rvhist.show { display:flex; }
+  .rvthumb { flex:0 0 auto; border:1px solid var(--line); border-radius:6px; padding:2px; cursor:pointer;
+    background:var(--panel2); position:relative; }
+  .rvthumb:hover, .rvthumb:focus-visible { border-color:var(--acc); }
+  .rvthumb img { width:76px; height:57px; object-fit:cover; border-radius:4px; display:block; }
+  .rvthumb b { position:absolute; left:3px; top:3px; background:rgba(0,0,0,0.7); border-radius:3px;
+    font-size:var(--fs-2xs); padding:0 3px; color:var(--acc); }
+  .rvthumb .tl { display:block; font-size:var(--fs-2xs); color:var(--dim); text-align:center; }
+  /* D3: drag-to-resize grip, shared by any .dlg that opts in */
+  .rvgrip { position:absolute; right:2px; bottom:2px; width:16px; height:16px; cursor:nwse-resize;
+    background:linear-gradient(135deg, transparent 50%, var(--line) 50%, var(--line) 62%,
+      transparent 62%, transparent 74%, var(--line) 74%, var(--line) 86%, transparent 86%); }
+  #spin { color:var(--acc); } #spin[hidden] { display:none; }
+  #uvmeta img { width:100%; border-radius:8px; margin-top:6px; }
+  textarea { width:100%; background:#0c0e12; color:#c8d2e0; border:1px solid var(--line); border-radius:6px; resize:vertical; font:11px monospace; }
+  .doccard { border:1px solid var(--line); border-radius:8px; padding:7px 9px; margin:5px 0; background:var(--panel2); }
+  .doccard .dname { font-weight:600; color:var(--ink-bright); display:flex; justify-content:space-between; gap:8px; }
+  .doccard .dtheme { color:var(--dim); font-size:var(--fs-2xs); text-transform:uppercase; letter-spacing:0.08em; flex:0 0 auto; }
+  .doccard .ddoes { color:var(--ink); margin:3px 0; }
+  .doccard .dalias { color:var(--dim); font-size:var(--fs-2xs); }
+  .doccard .dex { color:#8fb8e0; font:10px monospace; margin-top:3px; word-break:break-word; }
+  #matbar { position:absolute; left:50%; bottom:12px; transform:translateX(-50%); display:flex; gap:4px;
+    padding:5px 7px; background:rgba(20,24,33,0.92); border:1px solid var(--line); border-radius:10px; z-index:25;
+    max-width:70%; overflow-x:auto; }
+  #matbar .qsw { width:30px; height:30px; border-radius:50%; border:2px solid transparent; cursor:pointer; flex:0 0 30px; background-size:cover; }
+  #matbar .qsw.on { border-color:var(--acc); }
+  #matbar .qsw img { width:100%; height:100%; border-radius:50%; display:block; }
+  #matbar .qhide { color:var(--dim); font-size:var(--fs-base); cursor:pointer; align-self:center; padding:0 5px; }
+  #matbar .qhide:hover { color:#fff; }
+  body.matbar-hidden #matbar { display:none; }
+  #matbarshow { position:absolute; left:50%; bottom:12px; transform:translateX(-50%); z-index:31; display:none;
+    background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:4px 10px; font-size:var(--fs-sm);
+    color:var(--dim); cursor:pointer; }
+  #matbarshow:hover { color:#fff; }
+  body.matbar-hidden #matbarshow { display:block; }
+  #matbar .qlabel { color:var(--dim); font-size:var(--fs-2xs); align-self:center; padding:0 4px; flex:0 0 auto; }
+  #ctxmenu { position:fixed; z-index:200; min-width:180px; background:var(--panel2); border:1px solid var(--line);
+    border-radius:8px; padding:4px; box-shadow:0 10px 30px rgba(0,0,0,0.6); display:none; }
+  #ctxmenu .ci { display:flex; justify-content:space-between; gap:14px; padding:6px 9px; border-radius:5px; cursor:pointer; color:var(--ink); font-size:var(--fs-base); }
+  #ctxmenu .ci:hover { background:var(--sel-2); }
+  #ctxmenu .ci.disabled { color:var(--dim); pointer-events:none; }
+  #ctxmenu .ci kbd { color:var(--dim); }
+  #ctxmenu .sep { border-top:1px solid var(--line); margin:4px 2px; }
+  #ctxmenu .chead { color:var(--dim); font-size:var(--fs-2xs); text-transform:uppercase; letter-spacing:0.08em; padding:4px 9px 2px; }
+  #notify { position:absolute; left:50%; top:44px; transform:translateX(-50%); max-width:64%; z-index:45; display:flex; flex-direction:column; gap:5px; pointer-events:none; }
+  #notify .nrow { pointer-events:auto; display:flex; align-items:flex-start; gap:8px; padding:7px 11px; border-radius:8px;
+    font-size:var(--fs-sm); box-shadow:0 6px 18px rgba(0,0,0,0.4); background:rgba(28,24,16,0.96); border:1px solid #6a5320; color:#f0d9a0; }
+  #notify .nrow.err { background:rgba(40,20,20,0.96); border-color:#7a2a2a; color:#f0b0b0; }
+  #notify .nrow .nx { cursor:pointer; opacity:0.7; flex:0 0 auto; } #notify .nrow .nx:hover { opacity:1; }
+  .insp { display:flex; flex-direction:column; gap:3px; }
+  .insp .prow { display:flex; align-items:center; gap:6px; }
+  .insp .plabel { flex:0 0 62px; color:var(--dim); font-size:var(--fs-2xs); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .insp .scrub { flex:1; display:flex; align-items:center; gap:5px; }
+  .insp .scrub input[type=range] { flex:1; height:4px; }
+  .insp .pnum { flex:0 0 46px; font:10px monospace; padding:2px 4px; text-align:right; cursor:ew-resize; }
+  .insp select.penum { flex:1; font-size:var(--fs-sm); padding:2px 4px; }
+  .insp input.ptext { flex:1; font:10px monospace; padding:2px 4px; }
+  .insp .pbool { cursor:pointer; }
+  /* generic Browser component */
+  .browser { display:flex; flex-direction:column; height:100%; min-height:0; }
+  .browser .btools { display:flex; gap:5px; margin-bottom:6px; align-items:center; }
+  .browser .btools input.bsearch { flex:1; }
+  .browser .btools select.bsort { flex:0 0 auto; font-size:var(--fs-sm); }
+  .browser .btools button.bview { flex:0 0 auto; padding:4px 8px; }
+  .browser .bmain { display:flex; gap:8px; flex:1; min-height:0; }
+  .browser .bfolders { flex:0 0 92px; overflow:auto; border-right:1px solid var(--line); padding-right:6px; }
+  .browser .bfolders .bf { padding:4px 6px; border-radius:5px; cursor:pointer; font-size:var(--fs-sm); color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .browser .bfolders .bf:hover { background:var(--panel2); } .browser .bfolders .bf.on { background:var(--sel); color:#fff; }
+  .browser .bitems { flex:1; overflow:auto; }
+  .browser .bitems.grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(58px,1fr)); gap:8px; align-content:start; }
+  .browser .bitems.list .bi { display:flex; align-items:center; gap:8px; padding:5px 7px; border-radius:6px; cursor:pointer; }
+  .browser .bitems.list .bi:hover { background:var(--panel2); } .browser .bitems.list .bi.on { background:var(--sel); }
+  .browser .bitems.grid .bi { cursor:pointer; text-align:center; border-radius:8px; padding:3px; border:2px solid transparent; }
+  .browser .bitems.grid .bi.on { border-color:var(--acc); }
+  .browser .bitems .bi img { width:44px; height:44px; border-radius:50%; display:block; margin:0 auto; }
+  .browser .bitems.list .bi img { width:26px; height:26px; margin:0; }
+  .browser .bitems .bi .bilabel { font-size:var(--fs-2xs); color:var(--ink); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .browser .bitems .bi .bidot { width:26px; height:26px; border-radius:6px; flex:0 0 26px; }
+  #perfhud { position:absolute; right:10px; top:8px; z-index:40; display:none; background:rgba(12,15,20,0.86);
+    border:1px solid var(--line); border-radius:8px; padding:7px 10px; font:10px/1.5 monospace; color:#9fe0b0; min-width:150px; }
+  #perfhud .ph { display:flex; justify-content:space-between; gap:16px; }
+  #perfhud .ph b { color:var(--ink-bright); font-weight:500; }
+  #perfhud .phwarn b { color:#f0b060; }
+  #perfhud .phhead { color:var(--dim); text-transform:uppercase; letter-spacing:0.08em; font-size:var(--fs-xs); margin-top:4px; }
+  .dispcap { font-size:var(--fs-2xs); color:var(--dim); padding:0 6px; align-self:center; white-space:nowrap; }
+  #dispbar { position:absolute; left:50%; top:8px; transform:translateX(-50%); z-index:30; display:flex; gap:3px;
+    background:rgba(20,24,33,0.9); border:1px solid var(--line); border-radius:8px; padding:3px 5px; align-items:center; }
+  #dispbar button { background:transparent; border:1px solid transparent; color:var(--dim); border-radius:5px;
+    width:26px; height:24px; font-size:var(--fs-md); cursor:pointer; padding:0; }
+  #dispbar button:hover { color:var(--ink); background:var(--panel2); }
+  #dispbar button.on { color:#fff; background:var(--sel-2); border-color:var(--acc); }
+  #dispbar .dsep { width:1px; height:16px; background:var(--line); margin:0 2px; }
+  .histrow.cur { color:#fff; background:var(--sel-2); border-radius:4px; padding:0 4px; }
+  .histrow:hover { color:var(--ink); }
+
+  /* ---- node editor ---- */
+  #nodeeditor { position:absolute; left:0; right:0; bottom:0; height:44%; background:rgba(13,16,22,0.96);
+    border-top:1px solid var(--line); display:none; z-index:30; }
+  #nodetoolbar { display:flex; gap:6px; padding:6px 8px; border-bottom:1px solid var(--line); align-items:center; }
+  #nodetoolbar select, #nodetoolbar button { width:auto; padding:4px 10px; }
+  #nodecanvas { position:relative; width:100%; height:calc(100% - 42px); overflow:hidden; }
+  #nodewires { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+  .node { position:absolute; min-width:150px; background:var(--panel2); border:1px solid var(--line);
+    border-radius:8px; font-size:var(--fs-sm); user-select:none; }
+  .node.sel { border-color:var(--acc); box-shadow:0 0 0 1px var(--acc); }
+  .node.muted { opacity:0.5; filter:grayscale(0.6); }
+  .nodecomment { position:absolute; width:150px; background:rgba(228,204,120,0.14); border:1px dashed rgba(228,204,120,0.5);
+    border-radius:7px; padding:6px; cursor:move; z-index:5; }
+  #nodeselbox { position:absolute; border:1px solid var(--acc); background:rgba(120,170,255,0.10); pointer-events:none; z-index:4; border-radius:3px; }
+  .nodeframe { position:absolute; border:1.5px solid #7aa8ff; border-radius:9px; z-index:2; cursor:move; }
+  .nodeframe .frtitle { position:absolute; top:-2px; left:8px; transform:translateY(-50%); background:var(--panel); border:none;
+    color:var(--ink); font:600 11px inherit; padding:1px 6px; border-radius:5px; outline:none; max-width:60%; }
+  .nodeframe .frx { position:absolute; top:3px; right:6px; cursor:pointer; opacity:0.5; font-size:var(--fs-2xs); }
+  .nodeframe .frx:hover { opacity:1; }
+  .nodecomment textarea { width:100%; background:transparent; border:none; color:var(--ink); font:11px/1.35 inherit; resize:none; outline:none; }
+  .nodecomment .cx { position:absolute; top:2px; right:5px; cursor:pointer; opacity:0.5; font-size:var(--fs-2xs); }
+  .nodecomment .cx:hover { opacity:1; }
+  .node.muted header { text-decoration:line-through; }
+  .node header .mutebtn { cursor:pointer; opacity:0.6; margin-left:auto; margin-right:6px; font-size:var(--fs-2xs); }
+  .node header .mutebtn:hover { opacity:1; color:var(--acc); }
+  .node header { padding:4px 8px; background:rgba(255,255,255,0.05); border-radius:8px 8px 0 0; cursor:grab;
+    font-weight:600; display:flex; justify-content:space-between; }
+  .node header .x { cursor:pointer; opacity:0.6; }
+  .node .sock { display:flex; align-items:center; gap:5px; padding:2px 6px; }
+  .node .sock.outp { justify-content:flex-end; }
+  .dot { width:10px; height:10px; border-radius:50%; border:1px solid #0a0c10; cursor:crosshair; flex:0 0 10px; }
+  .dot.sdf{background:#7aa2ff}.dot.mesh{background:#7fd88f}.dot.scalar{background:#e0c060}
+  .dot.material{background:#e08fd8}.dot.texture{background:#8fd8d0}.dot.field{background:#d88f8f}
+  .dot.color{background:#f0f0f0}.dot.any{background:#999}.dot.signal{background:#c09fe0}
+  .node .params { padding:4px 6px; display:flex; gap:4px; }
+  .node .params input { font:10px monospace; padding:3px 5px; flex:1; }
+  .node .params button { flex:0 0 34px; padding:3px 0; }
+  /* scene-graph view (basics pass): read-only what-the-scene-IS graph over the node canvas */
+  #scenegraphview { position:absolute; left:0; right:0; top:42px; bottom:0; background:var(--bg); z-index:5;
+    display:none; overflow:auto; padding:14px; }
+  #sgwrap { position:relative; min-width:720px; }
+  #sgwires { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+  #scenegraphview .sgcol { position:relative; z-index:1; }
+  #scenegraphview.on { display:block; }
+  #scenegraphview .sgcol { display:inline-block; vertical-align:top; min-width:180px; margin-right:26px; }
+  #scenegraphview h4 { color:var(--dim); font-size:var(--fs-2xs); text-transform:uppercase; letter-spacing:0.08em; margin:8px 0 6px; }
+  #scenegraphview .sgcard { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:7px 10px;
+    margin-bottom:7px; font-size:var(--fs-sm); cursor:pointer; }
+  #scenegraphview .sgcard:hover { border-color:var(--acc); }
+  #scenegraphview .sgcard .sub { color:var(--dim); font-size:var(--fs-2xs); }
+  #scenegraphview .sgcard .swatch { display:inline-block; width:11px; height:11px; border-radius:50%; margin-right:6px; vertical-align:-1px; }
+  #scenegraphview .sglink { color:var(--dim); font-size:var(--fs-2xs); padding:1px 0 4px 8px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="menubar">
+    <span class="title">Poly <i>Studio</i></span>
+    <div class="menu"><button class="mtop">File</button><div class="mdrop">
+      <button id="scenenew">New scene</button>
+      <hr>
+      <button id="scenesave">Save scene (.json)</button>
+      <button id="sceneload">Open scene (.json)…</button>
+      <button id="scenebrowsersave">Save to browser storage…</button>
+      <button id="scenebrowserload">Open from browser storage…</button>
+      <button id="refload">Load reference image…</button>
+      <hr>
+      <button id="glbbtn">Import .glb / .gltf…</button>
+      <button id="objbtn">Import .obj…</button>
+      <button id="lewsbtn">Open shared workspace .lews (leStudio)…</button>
+      <hr>
+      <button id="glbexp">Export .glb (active object)</button>
+      <button id="objexp">Export .obj (active object)</button>
+      <button id="stlexp">Export .stl (active object, 3D print)</button>
+      <button id="lewsexp">Export shared workspace .lews</button>
+      <hr>
+      <button class="mi" data-dlg="dlg-shader" id="mi_shader">Export as SDF shader… <kbd>GLSL/WGSL</kbd></button>
+      <hr>
+      <button id="undobtn">Undo <kbd>Ctrl+Z</kbd></button>
+      <button id="redobtn">Redo <kbd>Ctrl+Shift+Z</kbd></button>
+    </div></div>
+    <div class="menu"><button class="mtop">Create from</button><div class="mdrop">
+      <div class="mglabel">Words &amp; images → geometry</div>
+      <button class="mi" data-dlg="dlg-command">Command bar (describe an edit)…</button>
+      <button class="mi" data-dlg="dlg-photo">Photo → geometry (depth / shapes)…</button>
+      <button class="mi" data-dlg="dlg-data">Data → geometry (CSV / heightfield)…</button>
+    </div></div>
+    <div class="menu"><button class="mtop">Add</button><div class="mdrop">
+      <button class="mi" data-prim="cube">Cube</button>
+      <button class="mi" data-prim="icosphere">Icosphere</button>
+      <button class="mi" data-prim="tetra">Tetra</button>
+      <button class="mi" data-prim="plane">Plane</button>
+      <button class="mi" data-prim="humanoid">Humanoid (parametric biped)</button>
+      <hr>
+      <button class="mi" data-dlg="dlg-compose">From description…</button>
+      <button class="mi" data-dlg="dlg-lathe">Lathe (profile → solid)…</button>
+      <button id="addCloth">Draped cloth (table covering)</button>
+      <button class="mi" data-dlg="dlg-sweep">Sweep (tube along a path)…</button>
+      <button class="mi" data-dlg="dlg-extrude">Extruded profile (CAD / arch)…</button>
+      <button class="mi" data-dlg="dlg-sketch">Parametric sketch (constraint-solved)…</button>
+      <button class="mi" data-dlg="dlg-wall">Wall (two plan points)…</button>
+      <button class="mi" data-dlg="dlg-floorplan">Floor plan (trace a path)…</button>
+    </div></div>
+    <div class="menu"><button class="mtop">Generate</button><div class="mdrop">
+      <div class="mglabel">Worlds</div>
+      <button class="mi gen-item" data-gen="landscape">Landscape (biomes)…</button>
+      <button class="mi gen-item" data-gen="ocean">Ocean / lake…</button>
+      <button class="mi gen-item" data-gen="clouds">Clouds (puffy)…</button>
+      <button class="mi gen-item" data-gen="scatter">Grass · trees · rocks (on a surface)…</button>
+      <hr>
+      <div class="mglabel">Space</div>
+      <button class="mi gen-item" data-gen="planet">Planet…</button>
+      <button class="mi gen-item" data-gen="star">Star…</button>
+      <button class="mi gen-item" data-gen="solar_system">Solar system…</button>
+      <button class="mi gen-item" data-gen="moon">Moon (cratered)…</button>
+      <button class="mi gen-item" data-gen="asteroids">Asteroid belt…</button>
+      <button class="mi gen-item" data-gen="galaxy_field">Galaxy (geometric)…</button>
+      <hr>
+      <div class="mglabel">Parametric</div>
+      <button class="mi gen-item" data-gen="supershape">Supershape (superformula family)…</button>
+      <hr>
+      <div class="mglabel">Life</div>
+      <button class="mi gen-item" data-gen="tree">Tree (recursive)…</button>
+      <button class="mi gen-item" data-gen="creature">Creature…</button>
+      <hr>
+      <div class="mglabel">Backdrop</div>
+      <button class="mi gen-item" data-gen="env">Sky &amp; space backdrop…</button>
+      <button id="envClear">Clear backdrop</button>
+    </div></div>
+    <div class="menu"><button class="mtop">Select</button><div class="mdrop">
+      <button id="selGeo" data-needs="object">Grow selection along surface…</button>
+      <button id="selAllBtn">All <kbd>A</kbd></button>
+      <button id="selNoneBtn">None <kbd>Alt+A</kbd></button>
+      <button id="selInvBtn">Invert <kbd>Ctrl+I</kbd></button>
+      <hr>
+      <button id="selLoop">Edge loop through selected edge <kbd>Alt+click</kbd></button>
+      <button id="selRing">Face ring from selected face</button>
+      <button id="selBoundary">Select open boundary (holes)</button>
+      <button id="selSymX">Add mirror across axis</button>
+      <div class="seg"><button id="symAxisX" class="on">X</button><button id="symAxisY">Y</button><button id="symAxisZ">Z</button></div>
+    </div></div>
+    <div class="menu"><button class="mtop">Mesh</button><div class="mdrop">
+      <button id="tExtrude" data-needs="face">Extrude selected face(s)</button>
+      <button id="tInset" data-needs="face">Inset face</button>
+      <button id="tLoop" data-needs="object">Loop cut at click</button>
+      <button id="tBevel" data-needs="vertex">Bevel vertex</button>
+      <button class="mi" data-dlg="dlg-bevelsel">Bevel edges / corners (chamfer · fillet)…</button>
+      <div class="inline">Bevel segments <input type="number" id="bevsegs" value="1" min="1" max="6" style="width:52px;flex:0 0 52px"></div>
+      <button id="tDissolve" data-needs="vertex">Dissolve vertex</button>
+      <button id="tPoke" data-needs="face">Poke face (fan)</button>
+      <hr>
+      <button id="tSubdiv" data-needs="object">Subdivide object</button>
+      <button id="tSmoothM" data-needs="object">Smooth object (Taubin)</button>
+      <button id="tSmoothLimit" data-needs="object">Smooth to limit (exact)</button>
+      <button id="tSolid" data-needs="object">Solidify shell</button>
+      <button id="tShell" data-needs="object">Shell (hollow, exact thickness)…</button>
+      <button id="tRetopo" data-needs="object">Retopologize (field-guided quads)…</button>
+      <button id="tHalve" data-needs="object">Halve (cut + cross-section face)…</button>
+      <button id="tFlute" data-needs="object">Flute (ribbed relief)…</button>
+      <button id="tTaper" data-needs="object">Taper (narrow / widen)…</button>
+      <button id="tBand" data-needs="object">Band / rim (material stripe)…</button>
+      <button id="tWeather" data-needs="object">Weathering (procedural wear)…</button>
+      <button id="tErode" data-needs="object">Hydraulic erosion (terrain)…</button>
+      <button id="tSurface" data-needs="object">Surface graph (patterns / noises)…</button>
+      <button id="tTess" data-needs="object">Tessellate (flat subdivide ×4)</button>
+      <button id="tValidate" data-needs="object">Check printability…</button>
+      <button id="tDraft" data-needs="object">Draft angle (check / report)…</button>
+      <hr>
+      <button id="tFill" data-needs="object">Fill holes (cap boundaries)</button>
+      <button id="tBridge" data-needs="object">Bridge boundary loops</button>
+      <button id="tTri" data-needs="object">Triangulate n-gons</button>
+      <hr>
+      <button class="mi" data-dlg="dlg-boolean">Boolean (union / subtract / fillet / weld)…</button>
+      <button id="tMerge" data-needs="object">Merge selected objects (combine)</button>
+      <button id="tArray" data-needs="object">Array / pattern (linear · radial)…</button>
+      <button class="mi" data-dlg="dlg-decimate">Reduce to N faces…</button>
+    </div></div>
+    <div class="menu"><button class="mtop">Modifiers</button><div class="mdrop">
+      <button class="mi" data-dlg="dlg-fx">Shader FX — formulas &amp; exact modifiers (displace · twist · bend · onion)…</button>
+      <button class="mi" data-dlg="dlg-milk">Milkdrop motion (.milk)…</button>
+      <button class="mi" data-dlg="dlg-variants">Variant sweep (build a row)…</button>
+      <button class="mi" data-dlg="dlg-lattice">Lattice deform (cage)…</button>
+      <button class="mi" data-dlg="dlg-scatter">Scatter instances on a surface…</button>
+    </div></div>
+    <div class="menu"><button class="mtop">Window</button><div class="mdrop">
+      <div class="mglabel">Panels</div>
+      <button class="mi" data-dlg="dlg-object">Object properties… <kbd>N</kbd></button>
+      <button class="mi" data-dlg="dlg-material">Material editor… <kbd>M</kbd></button>
+      <button class="mi" data-dlg="dlg-renderview">Render view (image)… <kbd>P</kbd></button>
+      <button class="mi" data-dlg="dlg-render">Render settings… <kbd>Shift+P</kbd></button>
+      <button class="mi" data-dlg="dlg-camera">Camera &amp; depth of field… <kbd>C</kbd></button>
+      <button class="mi" data-dlg="dlg-lighting">Lighting &amp; environment… <kbd>L</kbd></button>
+      <button id="tlToggle">Timeline / animation…</button>
+      <hr>
+      <div class="mglabel">Inspect</div>
+      <button class="mi" data-dlg="dlg-history">History &amp; branches… <kbd>H</kbd></button>
+      <button class="mi" data-dlg="dlg-section">Cross-sections… <kbd>X</kbd></button>
+      <button class="mi" data-dlg="dlg-uv">UV unwrap + texture maps…</button>
+      <button class="mi" data-dlg="dlg-inspect" data-needs="object">Inspect (measure · mass · section · bounds)…</button>
+      <button id="tUnits">Set scene units…</button>
+      <button id="tDims">Show dimensions (toggle)</button>
+      <button id="shaderexplain">Explain kernel (described objects)</button>
+      <hr>
+      <div class="mglabel">Analyze surface</div>
+      <button class="mi" data-dlg="dlg-fitprims">Fit primitives (re-analytify)…</button>
+      <button id="curvbtn">Curvature — mean (ridges / creases)</button>
+      <button id="gaussbtn">Curvature — Gaussian (dome / saddle)</button>
+      <button id="devbtn">Developability (does it unroll flat?)</button>
+    </div></div>
+    <div class="menu"><button class="mtop">Help</button><div class="mdrop">
+      <button id="enginestatus">Engine status…</button>
+      <button id="shortcutsBtn">Keyboard shortcuts <kbd>?</kbd></button>
+      <button id="welcomeBtn">Show welcome guide</button>
+      <hr>
+      <button class="mi" data-dlg="dlg-examples">Example graphs…</button>
+      <button class="mi" data-dlg="dlg-docs">Engine reference (ask leCore)…</button>
+    </div></div>
+    <span class="spacer"></span>
+    <span class="note" id="hinttop">Orbit: Alt+drag or right-drag · Pan: MMB · Zoom: wheel · Touch: 1 finger orbit, 2 pinch/pan</span>
+  </div>
+
+  <div id="main">
+    <div id="toolstrip" class="expanded">
+      <button id="stripexpand" title="Collapse toolbar"><span class="ic">☰</span><span class="lb">Collapse</span></button>
+      <hr>
+      <div class="tslabel">Modes</div>
+      <button id="modeObj" class="on" title="Object mode (1)"><span class="ic">◳</span><span class="lb">Object <kbd>1</kbd></span></button>
+      <button id="modeVert" title="Vertex mode (2)"><span class="ic">∴</span><span class="lb">Vertex <kbd>2</kbd></span></button>
+      <button id="modeFace" title="Face mode (3)"><span class="ic">▰</span><span class="lb">Face <kbd>3</kbd></span></button>
+      <button id="modeSculpt" title="Sculpt mode (4)"><span class="ic">◒</span><span class="lb">Sculpt <kbd>4</kbd></span></button>
+      <button id="modePaint" title="Material paint (5)"><span class="ic">❖</span><span class="lb">Paint <kbd>5</kbd></span></button>
+      <hr>
+      <div class="tslabel">Transform</div>
+      <div id="toolseg">
+        <button id="toolMove" class="on" title="Move (W)"><span class="ic">✥</span><span class="lb">Move <kbd>W</kbd></span></button>
+        <button id="toolRot" title="Rotate (E)"><span class="ic">⟳</span><span class="lb">Rotate <kbd>E</kbd></span></button>
+        <button id="toolScale" title="Scale (R)"><span class="ic">⤢</span><span class="lb">Scale <kbd>R</kbd></span></button>
+      </div>
+      <div class="snaprow" title="Snap to grid (or hold Ctrl)"><input type="checkbox" id="snapGrid"><span class="ic">⌗</span><span class="lb">Snap</span><input type="number" id="snapStep" value="0.25" step="0.05" min="0.05"></div>
+      <hr>
+      <div class="tslabel">Panels</div>
+      <button class="mi" data-dlg="dlg-object" title="Object options (N)"><span class="ic">☷</span><span class="lb">Objects <kbd>N</kbd></span></button>
+      <button class="mi" data-dlg="dlg-material" title="Material editor (M)"><span class="ic">◉</span><span class="lb">Materials <kbd>M</kbd></span></button>
+      <button class="mi" data-dlg="dlg-renderview" title="Render view — the image (P)"><span class="ic">✦</span><span class="lb">Render <kbd>P</kbd></span></button>
+      <button id="nodetoggle" title="Node editor"><span class="ic">⬡</span><span class="lb">Node editor</span></button>
+    </div>
+
+    <div id="viewwrap">
+      <canvas id="view"></canvas>
+      <img id="refunderlay" style="display:none">
+      <div id="dimtag" style="display:none"></div>
+      <div id="timeline" style="display:none">
+        <button id="tlPlay" title="Play / pause (Space)">▶</button>
+        <button id="tlStop" title="Stop and rewind">⏮</button>
+        <span id="tlFrame" class="tlnum">0</span>
+        <input type="range" id="tlScrub" min="0" max="90" step="1" value="0" style="flex:1">
+        <span class="tldim">len</span><input type="number" id="tlLen" value="90" min="10" max="1200" step="10" style="width:56px">
+        <span class="tldim">fps</span><input type="number" id="tlFps" value="30" min="6" max="60" step="1" style="width:44px">
+        <button id="tlKeyObj" title="Keyframe the active object's pose here">◆ object</button>
+        <button id="tlKeyCam" title="Keyframe the camera here">◆ camera</button>
+        <button id="tlEdit" title="Edit keys / pose numerically">keys…</button>
+        <button id="tlRec" title="Record one loop of the viewport to .webm">● rec</button>
+        <button id="tlReset" title="Clear posed transforms (back to rest)">rest</button>
+        <button id="tlClose" title="Hide timeline">✕</button>
+      </div>
+      <div id="refbar" style="display:none">
+        <span class="ic">▤</span>
+        <span>Reference</span>
+        <input type="range" id="refopacity" min="0" max="100" value="45" title="Opacity" style="width:80px">
+        <button id="refsample" title="Sample a colour into a new material">⊙ sample</button>
+        <button id="refclear" title="Remove reference">✕</button>
+      </div>
+      <div id="hud"></div>
+      <div id="dispbar">
+        <button data-disp="textured" title="Textured / lit">◑</button>
+        <button data-disp="flat" class="on" title="Flat shaded (default)">◐</button>
+        <button data-disp="wireframe" title="Wireframe">△</button>
+        <button data-disp="vertex" title="Vertex / points">⁘</button>
+        <button data-disp="bbox" title="Bounding boxes">⧉</button>
+        <span class="dsep"></span>
+        <button id="wireoverlay" title="Overlay wireframe on shaded">▦</button>
+        <button id="boxunfocused" title="Box unfocused objects (speed)">⊡</button>
+        <span class="dsep"></span>
+        <button data-split="1" class="on" title="Single view">▢</button>
+        <button data-split="2" title="Two views">▨</button>
+        <button data-split="4" title="Four views">▤</button>
+        <span id="dispcap" class="dispcap">Textured</span>
+      </div>
+      <div id="perfhud"></div>
+      <div id="hint"></div>
+      <div id="welcome" style="display:none">
+        <div class="wtitle">Welcome to Poly Studio</div>
+        <div class="wrow"><b>Orbit / pan / zoom</b><span>Alt-drag · middle-drag · scroll</span></div>
+        <div class="wrow"><b>Select</b><span>Click an object in the viewport</span></div>
+        <div class="wrow"><b>Move / rotate / scale</b><span>Drag the gizmo, or press W / E / R</span></div>
+        <div class="wrow"><b>Edit modes</b><span>Object / Vertex / Face — keys 1 · 2 · 3</span></div>
+        <div class="wrow"><b>Create geometry</b><span>The <b>Add</b> menu (cube, sphere, lathe, sweep…)</span></div>
+        <div class="wrow"><b>Panels &amp; editors</b><span>The <b>Window</b> menu</span></div>
+        <button id="welcomeclose">Start modeling</button>
+      </div>
+      <div id="marquee"></div>
+      <div id="brushcursor"></div>
+      <div id="status"></div>
+      <div id="jobs" aria-live="polite"></div>
+      <div id="notify"></div>
+      <div id="matbar" title="Click = select material · Double-click = apply to selection/object"></div>
+      <div id="matbarshow" title="Show the quick material bar">▲ materials</div>
+
+      <div id="polytools" class="ctxcard">
+        <h2>Soft selection</h2>
+        <label class="inline"><input type="checkbox" id="softsel"> Enabled, radius
+          <input type="number" id="softrad" value="0.6" step="0.1" min="0.05" style="width:56px;flex:0 0 56px"></label>
+        <label class="inline">Falloff
+          <select id="softfall" style="flex:0 0 90px"><option value="smooth">smooth</option>
+            <option value="linear">linear</option><option value="sharp">sharp</option></select></label>
+        <div class="note">Click select · <kbd>shift</kbd> add · drag empty = marquee · dbl-click = island · <kbd>Del</kbd> delete · Mesh menu for tools</div>
+      </div>
+      <div id="sculpttools" class="ctxcard" style="display:none">
+        <h2>Brush</h2>
+        <div class="seg">
+          <button data-brush="inflate" class="on">Inflate</button>
+          <button data-brush="carve">Carve</button>
+        </div>
+        <div class="seg">
+          <button data-brush="smooth">Smooth</button>
+          <button data-brush="flatten">Flatten</button>
+          <button data-brush="grab">Grab</button>
+        </div>
+        <div class="kv">Radius <b id="bradv">0.35</b></div>
+        <input type="range" id="brad" min="0.08" max="1.2" step="0.01" value="0.35">
+        <div class="kv">Strength <b id="bstrv">0.6</b></div>
+        <input type="range" id="bstr" min="0.05" max="1" step="0.05" value="0.6">
+        <div class="kv">Rebuild density <b id="btgtv">6000</b></div>
+        <input type="range" id="btgt" min="1000" max="20000" step="500" value="6000">
+        <div class="note">Field sculpting (DynaMesh-style): brushes edit the signed-distance field; leaving Sculpt re-meshes at the chosen density. A look-around with zero strokes restores your mesh exactly.</div>
+      </div>
+      <div id="painttools" class="ctxcard" style="display:none">
+        <h2>Material paint</h2>
+        <div class="kv">Brush radius <b id="pradval">0.30</b></div>
+        <input type="range" id="pradius" min="0.06" max="1.0" step="0.01" value="0.30">
+        <div class="note">Paints the material selected in the Material editor (<kbd>M</kbd>). One stroke = one undo.</div>
+      </div>
+
+      <div id="nodeeditor">
+        <div id="scenegraphview"></div>
+        <div id="nodetoolbar">
+          <select id="nodetypesel"></select>
+          <button id="nodeadd">Add node</button>
+          <button id="nodebuild">Build selected → scene</button>
+          <button id="nodecomment" title="Add a floating note to annotate the graph">＋ Note</button>
+          <button id="nodeframe" title="Frame the selected nodes into a labeled group">▢ Frame</button>
+          <button id="scenegraphbtn" title="Show the CURRENT SCENE as nodes: objects, materials, textures, lights">⌗ Scene view</button>
+          <button id="nodegroupsave" title="Save the selected nodes as a reusable group (subgraph)">⧉ Save group</button>
+          <select id="nodegroupsel" title="Insert a saved group" style="max-width:120px"><option value="">insert group…</option></select>
+          <button id="nodeclear">Clear graph</button>
+          <span class="note" style="flex:1">Typed sockets: wires refused at connect time on kind mismatch (leCore nodegraph — cycles refused too). Analytic SDF chains build EXACT.</span>
+          <button id="nodeclose">✕ Close</button>
+        </div>
+        <div id="nodecanvas"><svg id="nodewires"></svg></div>
+        <div id="nodepalette" style="display:none; position:absolute; width:260px; height:300px; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:8px; z-index:50; box-shadow:0 12px 32px rgba(0,0,0,0.6)"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== dialogs ==================== -->
+<div class="dlg" id="dlg-lews" style="left:50%; top:110px; transform:translateX(-50%); width:380px">
+  <header><span>Shared workspace</span><span class="x" id="lwclose">✕</span></header>
+  <div style="padding:10px 12px; font-size:var(--fs-base)">
+    <div id="lwfile" style="color:var(--dim); margin-bottom:8px"></div>
+    <div id="lwsections" style="color:var(--dim); font-size:var(--fs-2xs); margin-bottom:8px"></div>
+    <div style="margin-bottom:6px">Painted textures in this workspace:</div>
+    <div id="lwtex" style="max-height:150px; overflow:auto; margin-bottom:8px"></div>
+    <label class="inline"><input type="checkbox" id="lwapply" checked> Apply the first texture to the selected object</label>
+    <div style="color:var(--dim); font-size:var(--fs-2xs); margin-top:6px">Layers are composited by the engine, so the texture matches what the painter sees. Sections this app does not author are carried through untouched when you export.</div>
+    <div style="margin-top:12px; display:flex; gap:8px; justify-content:flex-end">
+      <button id="lwcancel">Cancel</button><button id="lwgo" class="primary">Import</button>
+    </div>
+  </div>
+</div>
+<div class="dlg" id="dlg-scatter" style="right:24px; top:56px; width:330px">
+  <header><span>Scatter on a surface</span><span class="x" id="scclose">✕</span></header>
+  <div style="padding:10px 12px; font-size:var(--fs-base)">
+    <div style="color:var(--dim); margin-bottom:8px">Copies one object across another object's surface and bakes the result to real geometry.</div>
+    <div style="margin-bottom:6px">Instance (copied): <select id="scsrc" style="width:150px"></select></div>
+    <div style="margin-bottom:6px">Surface (scattered on): <select id="sctgt" style="width:150px"></select></div>
+    <div style="margin-bottom:6px">Count <input type="number" id="sccount" value="120" min="1" max="4000" step="10" style="width:70px">
+      &nbsp; Scale <input type="number" id="scscale" value="0.15" min="0.005" max="5" step="0.01" style="width:64px"></div>
+    <div style="margin-bottom:6px">Size jitter <input type="range" id="scjit" min="0" max="1" step="0.05" value="0.25" style="width:88px">
+      <span id="scjitv" class="sub">0.25</span></div>
+    <div style="margin-bottom:6px">Follow surface <input type="range" id="scalign" min="0" max="1" step="0.05" value="1" style="width:88px">
+      <span id="scalignv" class="sub">1.00</span> <span class="sub">(0 = stand upright)</span></div>
+    <div style="margin-bottom:8px">Seed <input type="number" id="scseed" value="1" min="0" max="9999" style="width:64px">
+      &nbsp;<label class="inline"><input type="checkbox" id="scblue"> Even spacing</label></div>
+    <div style="display:flex; gap:8px; justify-content:flex-end">
+      <button id="sccancel">Cancel</button><button id="scgo" class="primary">Scatter</button>
+    </div>
+  </div>
+</div>
+<div class="dlg" id="dlg-import" style="left:50%; top:120px; transform:translateX(-50%); width:360px">
+  <header><span>Import options</span><span class="x" id="impclose">✕</span></header>
+  <div style="padding:10px 12px; font-size:var(--fs-base)">
+    <div id="impfname" style="color:var(--dim); margin-bottom:8px"></div>
+    <label class="inline"><input type="radio" name="impmode" value="auto" checked> Auto (measurement-driven — recommended)</label><br>
+    <label class="inline"><input type="radio" name="impmode" value="asis"> As-is — no processing, full-resolution</label><br>
+    <label class="inline"><input type="radio" name="impmode" value="decimate"> Decimate to a face budget (silhouette-checked)</label><br>
+    <label class="inline"><input type="radio" name="impmode" value="retopo"> Retopology — clean quad-dominant cage</label><br>
+    <label class="inline"><input type="radio" name="impmode" value="voxel"> Voxelize — watertight uniform remesh</label><br>
+    <label class="inline"><input type="radio" name="impmode" value="rebake"> Rebake atlas — decimate + fresh texture bake</label>
+    <div style="margin:10px 0 4px">Target <span id="implabel">faces</span>: <input type="number" id="imptarget" value="60000" min="500" max="400000" step="500" style="width:90px"></div>
+    <label class="inline"><input type="checkbox" id="impreproject" checked> Reproject texture/UVs onto the result</label>
+    <div style="color:var(--dim); font-size:var(--fs-2xs); margin-top:6px">Unchecked: a small material palette is baked from the source texture instead.</div>
+    <div style="margin-top:12px; display:flex; gap:8px; justify-content:flex-end">
+      <button id="impcancel">Cancel</button>
+      <button id="impgo" class="primary">Import</button>
+    </div>
+  </div>
+</div>
+<div class="dlg" id="dlg-object" style="right:24px; top:56px">
+  <div class="dlghead"><span>Properties</span><span><span class="dockbtn" id="objDock" title="Dock to the right edge (N)">⇥</span><span class="x">✕</span></span></div>
+  <div class="dlgbody">
+    <h2>Scene</h2>
+    <div id="objlist"></div>
+    <div class="row"><button id="dupbtn">Duplicate</button><button id="delobjbtn">Delete</button></div>
+    <div class="row"><button id="parentbtn" title="Parent the other selected objects to the active one — moving the active object then moves them all">⛓ Parent to active</button><button id="unparentbtn" title="Detach the active object from its parent">Unparent</button></div>
+    <div id="hiermeta" class="note"></div>
+    <h2>Attributes</h2>
+    <div class="kv"><span>Object</span><b id="a_name">—</b></div>
+    <div class="kv"><span>Points / polys</span><b id="a_counts">—</b></div>
+    <div class="kv"><span>Selection</span><b id="a_sel">—</b></div>
+    <div class="kv"><span>Material</span><b id="a_mat">—</b></div>
+    <div class="row"><button id="matSel">Apply mat → selection</button><button id="matAll">Apply mat → object</button></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-material" style="right:360px; top:56px; width:340px">
+  <div class="dlghead"><span>Material editor</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div id="matbrowser" style="height:300px; margin-bottom:8px"></div>
+    <h2>Author a material (physical PBR)</h2>
+    <div class="row"><input type="text" id="cm_name" placeholder="name, e.g. hot coral"><input type="color" id="cm_color" value="#c2564d" style="flex:0 0 44px;padding:2px"></div>
+    <div class="kv">Metallic <b id="cm_metalv">0.0</b></div><input type="range" id="cm_metal" min="0" max="1" step="0.05" value="0">
+    <div class="kv">Roughness <b id="cm_roughv">0.4</b></div><input type="range" id="cm_rough" min="0.02" max="1" step="0.02" value="0.4">
+    <div class="kv">Transmission (glass) <b id="cm_transv">0.0</b></div><input type="range" id="cm_trans" min="0" max="1" step="0.05" value="0">
+    <div class="kv">IOR <b id="cm_iorv">1.50</b></div><input type="range" id="cm_ior" min="1.0" max="2.4" step="0.02" value="1.5">
+    <div class="kv">Emission <b id="cm_emitv">0.0</b></div><input type="range" id="cm_emit" min="0" max="8" step="0.25" value="0">
+    <button id="cm_save">Save material + render preview ball</button>
+    <img id="cm_ball" alt="">
+    <div class="note">Physically parameterised (glTF-PBR channels; transmission ≥ 1 refracts at the real IOR in the photo renderer). Saved materials appear under the <b>custom</b> tab and paint/assign like presets.</div>
+  </div>
+</div>
+
+<div class="dlg rv" id="dlg-renderview" style="left:96px; top:72px">
+  <div class="dlghead"><span>Render view</span><span class="x" role="button" tabindex="0" aria-label="Close render view">&#10005;</span></div>
+  <div class="rvbar" role="toolbar" aria-label="Render view toolbar">
+    <select id="rvengine" title="Which renderer produces the final image" aria-label="Renderer">
+      <option value="photo">Photo — path-traced GI</option>
+      <option value="engine">Engine — mesh rasteriser</option>
+    </select>
+    <button id="rvgo" title="Render the current camera (Enter)">Render</button>
+    <button id="rvcancel" title="Stop the render in flight (Esc)" disabled>Cancel</button>
+    <span class="rvsep"></span>
+    <button id="rvzoomout" title="Zoom out" aria-label="Zoom out">&#8722;</button>
+    <button id="rvzoomin" title="Zoom in" aria-label="Zoom in">+</button>
+    <button id="rvzoom100" title="Actual pixels (double-click the image)">1:1</button>
+    <button id="rvzoomfit" class="on" title="Fit to the view">Fit</button>
+    <span class="rvsep"></span>
+    <button id="rvlive" class="on" title="Show the live server preview between renders. Turning this off parks the finished render and stops all background preview traffic.">Live</button>
+    <button id="rvsetA" title="Store the shown image as A">A</button>
+    <button id="rvsetB" title="Store the shown image as B">B</button>
+    <button id="rvwipetog" title="Wipe between A and B — drag the divider">A/B</button>
+    <button id="rvhisttog" title="Render history">History</button>
+    <span class="grow"></span>
+    <button id="rvsave" title="Save the shown image as a PNG">Save</button>
+    <button id="rvturntable" title="Render N frames orbiting the target and download them as a .zip">Turntable</button>
+    <button id="rvupscale" title="Upscale the shown render 2x into a new history entry">2&#215;</button>
+    <button id="rvsettings" title="Render settings (P)" aria-label="Render settings">&#9881;</button>
+  </div>
+  <div class="rvstage" id="rvstage">
+    <img id="rvimg" alt="Rendered image">
+    <img id="rvimgB" alt="Comparison image B">
+    <div id="rvwipeline"></div>
+    <div class="rvempty" id="rvempty">Press <b style="color:var(--ink)">&nbsp;Render&nbsp;</b> to trace the current camera — or turn on <b style="color:var(--ink)">&nbsp;Live&nbsp;</b> for a continuous preview.</div>
+  </div>
+  <div class="rvfoot">
+    <div class="bar" id="rvprog"><div></div></div>
+    <span id="rvmeta" class="note" role="status" aria-live="polite"></span>
+  </div>
+  <div id="rvhist" aria-label="Render history"></div>
+  <div class="rvgrip" id="rvgrip" title="Resize"></div>
+</div>
+
+<div class="dlg" id="dlg-render" style="right:24px; top:56px; width:352px">
+  <div class="dlghead"><span>Render settings</span><span class="x" role="button" tabindex="0" aria-label="Close render settings">&#10005;</span></div>
+  <div class="dlgbody">
+    <div class="note">Settings only — the image itself lives in the <b>Render view</b>
+      (<button id="rvopenfromsettings" style="padding:1px 6px">open it</button>, <kbd>P</kbd>).</div>
+    <h2>Output</h2>
+    <div class="inline">Size
+      <select id="photow" style="flex:1" title="Path tracing is CPU work in NumPy: cost scales with pixels x samples.">
+        <option value="380">380 x 285 — draft (fast)</option>
+        <option value="560" selected>560 x 420 — preview</option>
+        <option value="760">760 x 570 — presentable</option>
+        <option value="1024">1024 x 768 — large (slow)</option>
+        <option value="1280">1280 x 960 — full (very slow)</option>
+      </select>
+    </div>
+    <div class="inline">Aspect
+      <select id="photoaspect" style="flex:1">
+        <option value="0.75" selected>4:3</option>
+        <option value="0.5625">16:9</option>
+        <option value="1">1:1 square</option>
+        <option value="1.3333">3:4 portrait</option>
+        <option value="view">Match viewport</option>
+      </select>
+    </div>
+    <div class="kv">Samples per pixel <b id="sppval">24</b></div>
+    <input type="range" id="spp" min="8" max="96" step="4" value="24"
+      title="More samples = less noise and longer renders. The image refines progressively, so you can stop early.">
+    <div class="kv">Photo field detail <b id="photogridval">88</b></div>
+    <input type="range" id="photogrid" min="56" max="112" step="8" value="88">
+    <label class="inline"><input type="checkbox" id="fog" checked> Atmosphere (depth fog)</label>
+    <h2>Backdrop</h2>
+    <div class="inline">Background
+      <select id="bgmode" style="flex:1">
+        <option value="">Studio sky (default)</option>
+        <option value="solid">Solid colour</option>
+      </select>
+      <input type="color" id="bgcolor" value="#1a1f2b" style="flex:0 0 42px; padding:2px">
+    </div>
+    <h2>Post</h2>
+    <div class="note">Applied to the shown render without re-tracing — the traced result is cached per session.</div>
+    <div class="kv">Exposure <b id="exposureval">1.0</b></div>
+    <input type="range" id="exposure" min="0.1" max="4" step="0.05" value="1.0">
+    <div class="kv">Sharpen <b id="sharpenval">0.0</b></div>
+    <input type="range" id="sharpen" min="0" max="1.5" step="0.05" value="0.0">
+    <div class="inline">Diagnostic pass
+      <select id="aov" style="flex:0 0 auto">
+        <option value="">Beauty (full render)</option>
+        <option value="normal">Normal</option>
+        <option value="depth">Depth</option>
+        <option value="albedo">Albedo</option>
+      </select>
+    </div>
+    <h2>Scene inputs</h2>
+    <div class="note">These affect the render but belong to the scene, so they keep their own panels:</div>
+    <div class="row">
+      <button class="mi" data-dlg="dlg-camera">Camera &amp; DOF…</button>
+      <button class="mi" data-dlg="dlg-lighting">Lighting…</button>
+    </div>
+    <h2>Live preview</h2>
+    <div class="note">The preview only runs while the Render view is open with <b>Live</b> on — it is server work, so it does not run behind a closed window.</div>
+    <label class="inline"><input type="checkbox" id="live" checked> Live preview (edits + camera)</label>
+    <label class="inline"><input type="checkbox" id="adaptive" checked> Adaptive quality (target 30 fps)</label>
+    <div class="kv">Preview quality (manual) <b id="qval">0.5</b></div>
+    <input type="range" id="quality" min="0" max="1" step="0.05" value="0.5">
+    <div class="kv">Preview field detail <b id="pgridval">52</b></div>
+    <input type="range" id="pgrid" min="36" max="68" step="4" value="52">
+    <label class="inline"><input type="checkbox" id="gpupreview"> GPU raymarch (WebGPU, client) <span id="gpustatus" class="note"></span></label>
+    <div class="inline">Frame budget
+      <select id="framebudget" style="flex:0 0 auto">
+        <option value="0">off</option>
+        <option value="33">33ms (30fps)</option>
+        <option value="16">16ms (60fps)</option>
+        <option value="50">50ms (20fps)</option>
+      </select>
+      <span class="note">&#183; ~ toggles HUD</span>
+    </div>
+    <span id="spin" hidden>&#9679;</span>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-shader" style="width:430px">
+  <div class="dlghead"><span>SDF shader export</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <button id="shaderexp">Export active object (GLSL / WGSL)</button>
+    <div id="shaderout" style="display:none">
+      <div class="seg"><button id="shGlsl" class="on">GLSL / Shadertoy</button><button id="shWgsl">WGSL</button></div>
+      <div id="shadermeta" class="note"></div>
+      <textarea id="shadercode" readonly style="height:180px"></textarea>
+      <div class="row"><button id="shadercopy">Copy to clipboard</button></div>
+      <div id="explainout" class="note" style="display:none"></div>
+    </div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-compose">
+  <div class="dlghead"><span>Add from description</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <input id="composetext" type="text" placeholder="sphere radius .6 union rounded box size .5 .3 .4 radius .05">
+    <div class="row"><button id="composebtn">Make (leCore codecompose)</button></div>
+    <div id="composemeta" class="note" style="display:none"></div>
+    <div class="note">A controlled vocabulary — sphere / rounded box / plane + union / intersect / subtract. Unknown forms are refused by name; the SDF tree is verified against the kernel before it is trusted.</div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-lathe">
+  <div class="dlghead"><span>Lathe — solid of revolution</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="row">
+      <select id="lathepreset">
+        <option value="0.32,-0.5;0.42,-0.2;0.22,0.15;0.3,0.45;0.24,0.5">Vase</option>
+        <option value="0.45,-0.35;0.5,-0.1;0.42,0.1;0.14,0.32;0.16,0.35">Bowl</option>
+        <option value="0.3,-0.5;0.34,-0.42;0.1,-0.05;0.09,0.3;0.2,0.42;0.2,0.5">Goblet</option>
+      </select>
+      <button id="lathebtn" style="flex:0 0 60px">Make</button>
+    </div>
+    <input type="text" id="latheprof" placeholder="custom: r,y; r,y; …  (revolved about Y)">
+  </div>
+</div>
+
+<div class="dlg" id="dlg-boolean">
+  <div class="dlghead"><span>Boolean (CAD solids)</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="row">
+      <select id="boolkind"><option value="union">Union A ∪ B</option>
+        <option value="subtract">Subtract A − B</option><option value="intersect">Intersect A ∩ B</option>
+        <option value="smooth">Smooth weld (soft blend)</option>
+        <option value="chamfer">Chamfer union (45° flat)</option></select>
+      <input type="number" id="boolfillet" value="0" min="0" max="0.5" step="0.02" title="fillet radius (0 = sharp)" style="flex:0 0 64px">
+      <button id="boolapply" style="flex:0 0 60px">Apply</button>
+    </div>
+    <div class="note">Shift-click TWO objects in Object mode: A (kept) then B (consumed). Fillet &gt; 0 = an <b>exact radius-r arc</b> at the seam. A sharp boolean of two analytic objects stays analytic: exact bake, exact shader.</div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-fx" style="width:340px">
+  <div class="dlghead"><span>Shader FX &amp; exact modifiers</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <h2>Formula f(x, y, z, r) — safe ns-eel2</h2>
+    <select id="fxpreset">
+      <option value="0.5*sin(6*x)*sin(6*z)">waves</option>
+      <option value="abs(sin(5*x)*sin(5*y)*sin(5*z))">ridges</option>
+      <option value="0.5*sin(3*x+2.7*sin(2*z))+0.3*sin(7*y+1.3*sin(4*x))+0.2*sin(13*z+cos(8*y))">trig-fbm</option>
+      <option value="pow(max(0,sin(8*x)*sin(8*y)*sin(8*z)),4)">spikes</option>
+      <option value="sin(9*y)">zebra (y bands)</option>
+      <option value="sign(sin(4*x))*sign(sin(4*y))*sign(sin(4*z))">checker3d</option>
+    </select>
+    <input type="text" id="fxexpr" value="0.5*sin(6*x)*sin(6*z)">
+    <div class="kv">Displace amount <b id="fxamtval">0.12</b></div>
+    <input type="range" id="fxamt" min="-0.4" max="0.4" step="0.01" value="0.12">
+    <button id="fxdisplace">Displace geometry along normals</button>
+    <div class="row">
+      <input type="number" id="fxthresh" value="0" step="0.1" title="threshold t">
+      <button id="fxmat" style="flex:2 0 auto">Assign current material where f ≥ t</button>
+    </div>
+    <h2>Exact modifiers (analytic objects)</h2>
+    <div class="row">
+      <select id="modkind"><option value="twist">Twist</option><option value="bend">Bend</option>
+        <option value="onion">Onion (shell)</option><option value="displace">Displace (sine)</option>
+        <option value="elongate">Elongate X</option><option value="rounded">Round edges</option></select>
+      <input type="number" id="modk" value="1.5" step="0.1" style="flex:0 0 70px">
+      <button id="modapply" style="flex:0 0 60px">Apply</button>
+    </div>
+    <div class="note">iq's operators on the object's SDF tree, re-meshed with the tree KEPT — exact bake, exact Shadertoy export.</div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-milk">
+  <div class="dlghead"><span>Milkdrop motion</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="row"><select id="milkpreset"></select><button id="milkplay" style="flex:0 0 60px">Play</button></div>
+    <div class="note">The engine runs the preset's <b>per_frame</b> ns-eel2 equations (safe evaluator): rot→orbit, zoom→dolly, wave colours→backdrop, bass→pulse. Synthesized beat; per_pixel/HLSL parsed, not executed.</div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-uv">
+  <div class="dlghead"><span>UV — active object</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="row"><button id="uvbtn">Auto unwrap</button><button id="uvmaps">Export maps</button></div>
+    <div id="uvmeta"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-decimate">
+  <div class="dlghead"><span>Reduce (level of detail)</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="row">
+      <input type="number" id="dectarget" value="800" step="100" min="40">
+      <button id="decbtn" style="flex:2 0 auto">Reduce object to N faces</button>
+    </div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-data" style="width:380px; right:24px; top:56px">
+  <div class="dlghead"><span>Data → geometry</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Turn a numeric series into a 3-D object through inspectable steps (leCore demux + lathe/heightfield). Paste numbers (comma/newline separated) or CSV.</div>
+    <textarea id="datainput" rows="4" placeholder="1.0, 2.5, 3.2, 2.8, 4.1, 3.0, 2.2, 3.5, 4.0, 3.3" style="font:11px/1.4 monospace"></textarea>
+    <div class="row"><label class="inline" style="flex:1">CSV column <input type="number" id="datacol" value="0" min="0" style="width:52px"></label>
+      <button id="dataanalyze" style="flex:0 0 90px">Analyze</button></div>
+    <div id="datachannels" class="note"></div>
+    <h2>Build</h2>
+    <div class="inline">Channel <select id="datachan" style="flex:0 0 auto"><option value="0">series</option></select></div>
+    <div class="row"><button id="datalathe" style="flex:1">Revolve (vase)</button><button id="dataribbon" style="flex:1">Height ribbon</button></div>
+    <div id="datameta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-command" style="width:380px; right:24px; top:56px">
+  <div class="dlghead"><span>Command bar</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">A controlled grammar — the engine has no LLM. It understands colour, material, and size on a named/shaped object. Try "paint the cube red", "make the sphere bigger", "give the box a metal material".</div>
+    <div class="row"><input type="text" id="cmdinput" placeholder="paint the cube red" style="flex:1"><button id="cmdrun" style="flex:0 0 60px">Run</button></div>
+    <div id="cmdmeta" class="note"></div>
+    <button id="cmddescribe" style="width:100%; margin-top:4px">Describe scene (agent-readable)</button>
+    <div id="cmddesc" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-photo" style="width:360px; right:24px; top:56px">
+  <div class="dlghead"><span>Photo tools</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Drive the scene from a reference photo, using leCore's photo modules. Results are rough where the module is rough — each says so.</div>
+    <input type="file" id="photofile" accept="image/*" style="width:100%; margin:6px 0">
+    <img id="photoprev" style="width:100%; border-radius:8px; display:none; margin-bottom:6px">
+    <div class="row"><button id="pt_light" style="flex:1" disabled>Match lighting</button><button id="pt_depth" style="flex:1" disabled>Depth → relief mesh</button></div>
+    <div class="row"><button id="pt_texture" style="flex:1" disabled>Match texture</button><button id="pt_shapes" style="flex:1" disabled>Fit shapes (rough)</button></div>
+    <button id="pt_scene" style="width:100%; margin-top:4px" disabled>Bootstrap full scene (terrain + backdrop + light)</button>
+    <button id="pt_camsolve" style="width:100%; margin-top:4px">Camera solve from vanishing points…</button>
+    <div id="pt_meta" class="note"></div>
+    <textarea id="pt_glsl" rows="4" style="display:none; font:11px/1.4 monospace" readonly></textarea>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-validate" style="width:340px; right:24px; top:56px">
+  <div class="dlghead"><span>Printability check</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Slicer readiness from leCore's topology scoreboard. Manifold + watertight are the hard gates; min-feature is a coarse bbox proxy.</div>
+    <div class="inline">Min feature (mm-ish) <input type="number" id="minfeat" value="0.02" min="0.001" max="1" step="0.005" style="width:70px"></div>
+    <button id="validatego" style="width:100%">Check active object</button>
+    <button id="repairgo" style="width:100%; margin-top:6px">Auto-repair (weld + fill holes)</button>
+    <div id="validateresult" style="margin-top:8px"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-sweep" style="width:340px; right:24px; top:56px">
+  <div class="dlghead"><span>Sweep (tube along a path)</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">A circle swept along a curve — real handles, spouts, stems. Pick a preset or paste path points.</div>
+    <div class="inline">Preset <select id="sweeppreset" style="flex:1">
+      <option value="handle">Handle (C-arc)</option>
+      <option value="spout">Spout (tapered)</option>
+      <option value="stem">Stem (straight)</option>
+      <option value="hook">Hook</option>
+      <option value="custom">Custom points…</option>
+    </select></div>
+    <textarea id="sweeppath" rows="3" placeholder="[[0,-0.25,0],[0.18,-0.1,0],[0.18,0.1,0],[0,0.25,0]]" style="font:11px/1.4 monospace; display:none"></textarea>
+    <div class="kv">Radius <b id="sweepradval">0.03</b></div>
+    <input type="range" id="sweeprad" min="0.005" max="0.2" step="0.005" value="0.03">
+    <div class="kv">Taper (end/start) <b id="sweeptaperval">1.0</b></div>
+    <input type="range" id="sweeptaper" min="0.1" max="2" step="0.05" value="1.0">
+    <div class="kv">Sides <b id="sweepsidesval">12</b></div>
+    <input type="range" id="sweepsides" min="4" max="24" step="1" value="12">
+    <button id="sweepgo" style="width:100%">Create sweep</button>
+    <div id="sweepmeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-halve" style="width:320px; right:24px; top:56px">
+  <div class="dlghead"><span>Halve (cut + cap)</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Cut an analytic object (primitive/lathe) on a plane and give the flat face its own material — the halved-fruit look.</div>
+    <div class="inline">Axis <select id="halveaxis" style="flex:0 0 auto"><option value="z">Z (face camera)</option><option value="y">Y</option><option value="x">X</option></select></div>
+    <div class="kv">Offset <b id="halveoffval">0.00</b></div>
+    <input type="range" id="halveoff" min="-0.6" max="0.6" step="0.02" value="0">
+    <label class="inline"><input type="checkbox" id="halveflip"> Keep the other half</label>
+    <div class="inline">Cut-face material <select id="halvemat" style="flex:1"></select></div>
+    <button id="halvego" style="width:100%">Halve active object</button>
+    <div id="halvemeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-shortcuts" style="width:360px; right:24px; top:56px">
+  <div class="dlghead"><span>Keyboard shortcuts</span><span class="x">&#10005;</span></div>
+  <!-- C4: generated from the KEYMAP table at load, so the docs cannot drift from the bindings.
+       Anything typed here by hand would be overwritten. -->
+  <div class="dlgbody"><div class="note">loading…</div></div>
+</div>
+
+<div class="dlg" id="dlg-bevelsel" style="width:310px; right:24px; top:56px">
+  <div class="dlghead"><span>Bevel edges / corners</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Bevels the selected corner vertices (Vertex mode) — or every corner if none are selected. Chamfer = flat cut; Fillet = rounded.</div>
+    <div class="inline">Style
+      <select id="bvmode" style="flex:1">
+        <option value="chamfer">Chamfer (flat)</option>
+        <option value="fillet">Fillet (rounded)</option>
+      </select></div>
+    <div class="kv">Amount <b id="bvratioval">0.20</b></div>
+    <input type="range" id="bvratio" min="0.02" max="0.49" step="0.01" value="0.2">
+    <div id="bvsegrow"><div class="kv">Roundness (segments) <b id="bvsegval">3</b></div>
+      <input type="range" id="bvseg" min="2" max="8" step="1" value="3"></div>
+    <button id="bvgo" style="width:100%">Bevel</button>
+    <div id="bvmeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-lattice" style="width:300px; right:24px; top:56px">
+  <div class="dlghead"><span>Lattice deform</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">A 2×2×2 cage over the object's bounds; presets move the corners with smooth falloff.</div>
+    <div class="inline">Preset <select id="latpreset" style="flex:1">
+      <option value="shear">Shear (top slides X)</option>
+      <option value="flare">Flare (top out)</option>
+      <option value="squash">Squash</option>
+      <option value="skew">Skew (top slides Z)</option>
+    </select></div>
+    <div class="kv">Amount <b id="latamtval">0.30</b></div>
+    <input type="range" id="latamt" min="-1" max="1" step="0.05" value="0.3">
+    <button id="latgo" style="width:100%">Apply</button>
+    <div id="latmeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-fitprims" style="width:320px; right:24px; top:56px">
+  <div class="dlghead"><span>Fit primitives</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Approximates the active object with spheres / boxes / capsules. A good fit can be ADOPTED as the object's analytic form — restoring exact ops (halve, tree booleans) on plain meshes.</div>
+    <div class="kv">Max parts <b id="fpkval">3</b></div>
+    <input type="range" id="fpk" min="1" max="12" step="1" value="3">
+    <label class="inline"><input type="checkbox" id="fpadopt" checked> Adopt the tree if the fit is good</label>
+    <button id="fpgo" style="width:100%">Fit</button>
+    <div id="fpmeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-geodesic" style="width:300px; right:24px; top:56px">
+  <div class="dlghead"><span>Grow selection</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Grows the current vertex selection ALONG the surface (geodesic) — it can't leak across gaps the way a sphere would. Sets soft-selection weights too.</div>
+    <div class="kv">Radius <b id="geoRval">0.30</b></div>
+    <input type="range" id="geoR" min="0.02" max="2" step="0.02" value="0.3">
+    <button id="geogo" style="width:100%">Grow</button>
+    <div id="geometa" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-generate" style="width:340px; right:24px; top:56px">
+  <div class="dlghead"><span id="genTitle">Generate</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div id="genNote" class="note"></div>
+    <div class="inline">Seed <input type="number" id="genSeed" value="0" step="1" style="width:70px">
+      <button id="genShuffle" title="Random seed">🎲</button></div>
+    <div id="genParams"></div>
+    <button id="genGo" style="width:100%">Generate</button>
+    <div id="genMeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-keys" style="width:340px; right:24px; top:56px">
+  <div class="dlghead"><span>Animation keys</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Pose the ACTIVE object at the current frame, then "Key object". Keys interpolate linearly (view-layer: the server geometry stays at rest — exports and booleans are unaffected).</div>
+    <div class="inline" style="gap:4px">Pos <input type="number" id="kpx" value="0" step="0.1" style="width:52px">
+      <input type="number" id="kpy" value="0" step="0.1" style="width:52px">
+      <input type="number" id="kpz" value="0" step="0.1" style="width:52px"></div>
+    <div class="inline" style="gap:4px">Rot° <input type="number" id="krx" value="0" step="15" style="width:52px">
+      <input type="number" id="kry" value="0" step="15" style="width:52px">
+      <input type="number" id="krz" value="0" step="15" style="width:52px"></div>
+    <div class="inline">Scale <input type="number" id="ksc" value="1" step="0.1" min="0.05" style="width:60px">
+      <button id="kApply">Pose now</button>
+      <button id="kKey">◆ Key at frame</button></div>
+    <h2>Keys (active object + camera)</h2>
+    <div id="keylist" style="max-height:130px; overflow:auto; font-size:var(--fs-sm)"></div>
+    <div class="inline"><button id="kSpin" style="flex:1" title="Camera orbit: key here, then +360° at the last frame">Auto turntable (camera)</button></div>
+    <h2>Parameter keys (server-side geometry)</h2>
+    <div class="note">Animate a modifier parameter from the active object's edit history. Unlike pose keys, this changes the real geometry — exports and GI photos see it.</div>
+    <div class="inline">Param <select id="pkParam" style="flex:1"><option value="">— pick a keyable param —</option></select>
+      <button id="pkRefresh" title="Reload keyable params">↻</button></div>
+    <div class="inline" style="gap:4px">Start <input type="number" id="pkV0" value="0" step="0.01" style="width:64px">
+      at frame <input type="number" id="pkF0" value="0" step="1" style="width:50px"></div>
+    <div class="inline" style="gap:4px">End <input type="number" id="pkV1" value="0.1" step="0.01" style="width:64px">
+      at frame <input type="number" id="pkF1" value="30" step="1" style="width:50px"></div>
+    <div class="inline" style="gap:4px"><label style="display:flex;align-items:center;gap:3px"><input type="checkbox" id="pkMidOn">Mid</label>
+      <input type="number" id="pkVm" value="0.05" step="0.01" style="width:60px" disabled>
+      at frame <input type="number" id="pkFm" value="15" step="1" style="width:50px" disabled></div>
+    <div class="inline">Easing <select id="pkEase" style="flex:1">
+      <option value="linear">Linear</option><option value="smooth">Smooth (ease both)</option>
+      <option value="ease_in">Ease in</option><option value="ease_out">Ease out</option>
+      <option value="ease_in_out">Ease in-out (cosine)</option></select></div>
+    <div class="inline"><button id="pkBake" style="flex:1">Bake to current frame</button>
+      <button id="pkScrub" title="Preview across the range">Preview sweep</button></div>
+    <div id="pkmeta" class="note"></div>
+    <h2>Ocean waves (animatable surface)</h2>
+    <div class="note">If the active object is a generated ocean, scrub its swell — waves travel with real motion, and exports/photos see it.</div>
+    <div class="inline">Wave time <input type="range" id="ocT" min="0" max="12" step="0.1" value="0" style="flex:1"><b id="ocTval">0.0</b></div>
+    <button id="ocScrub" style="width:100%">Play a swell loop (preview)</button>
+    <div id="ocmeta" class="note"></div>
+    <h2>Creature walk cycle</h2>
+    <div class="note">If the active object is a generated creature with legs, animate its gait — the legs stride while the body stays put.</div>
+    <div class="inline">Gait time <input type="range" id="wkT" min="0" max="2" step="0.02" value="0" style="flex:1"><b id="wkTval">0.00</b></div>
+    <button id="wkScrub" style="width:100%">Play a walk loop (preview)</button>
+    <div id="wkmeta" class="note"></div>
+    <div id="kmeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-floorplan" style="width:330px; right:24px; top:56px">
+  <div class="dlghead"><span>Floor plan</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Trace a plan as [x,z] corner points — one exact wall per segment, all in one step.</div>
+    <textarea id="fppath" rows="3" style="font:11px/1.4 monospace">[[0,0],[4,0],[4,3],[0,3]]</textarea>
+    <label class="inline"><input type="checkbox" id="fpclosed" checked> Closed (join last corner to first)</label>
+    <div class="inline" style="gap:4px">Thickness <input type="number" id="fpth" value="0.12" step="0.02" style="width:60px">
+      Height <input type="number" id="fphh" value="1.2" step="0.1" style="width:60px"></div>
+    <button id="fpbuild" style="width:100%">Build walls</button>
+    <div id="fpbuildmeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-wall" style="width:320px; right:24px; top:56px">
+  <div class="dlghead"><span>Wall (plan points)</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">An exact wall between two plan points — chain calls to trace a floor plan. Volume is exact (direct box construction).</div>
+    <div class="inline" style="gap:4px">From <input type="number" id="wx1" value="0" step="0.1" style="width:56px">, <input type="number" id="wz1" value="0" step="0.1" style="width:56px"></div>
+    <div class="inline" style="gap:4px">To <input type="number" id="wx2" value="2" step="0.1" style="width:56px">, <input type="number" id="wz2" value="0" step="0.1" style="width:56px"></div>
+    <div class="inline" style="gap:4px">Thickness <input type="number" id="wth" value="0.1" step="0.02" style="width:60px">
+      Height <input type="number" id="whh" value="1.2" step="0.1" style="width:60px"></div>
+    <label class="inline"><input type="checkbox" id="wchain" checked> Chain: next wall starts where this ends</label>
+    <button id="wallgo" style="width:100%">Add wall</button>
+    <div id="wallmeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-draft" style="width:320px; right:24px; top:56px">
+  <div class="dlghead"><span>Draft angle check</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Flags faces that would stick in a mold: undercuts, or walls below the minimum draft against the pull direction. Flagged faces are painted the warning material.</div>
+    <div class="inline">Pull <select id="draftpull" style="flex:1"><option value="0,1,0">+Y (up)</option><option value="0,-1,0">−Y</option><option value="1,0,0">+X</option><option value="0,0,1">+Z</option></select></div>
+    <div class="kv">Minimum draft (°) <b id="draftminval">3.0</b></div>
+    <input type="range" id="draftmin" min="0.5" max="15" step="0.5" value="3">
+    <button id="draftgo" style="width:100%">Run check (paint offending faces)</button>
+    <button id="draftreport" style="width:100%; margin-top:4px">Report only (numbers, no repaint)</button>
+    <div id="draftmeta" class="note" style="font-family:monospace; white-space:pre-wrap"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-storage" style="width:340px; right:24px; top:56px">
+  <div class="dlghead"><span id="storageTitle">Browser storage</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Scenes saved here live in this browser only (localStorage) — no server, no account. Handy for quick local versions; use Save scene (.json) for a real portable file.</div>
+    <div id="storageMode" class="note" style="margin-bottom:6px"></div>
+    <div class="inline" id="storageSaveRow" style="gap:4px">Name <input type="text" id="storageName" placeholder="my scene" style="flex:1">
+      <button id="storageSaveGo">Save</button></div>
+    <div class="kv" style="margin-top:6px"><b>Saved scenes</b> <span id="storageQuota" class="note"></span></div>
+    <div id="storageList" style="max-height:220px; overflow:auto"></div>
+    <div id="storageMeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-erode" style="width:330px; right:24px; top:56px">
+  <div class="dlghead"><span>Hydraulic erosion</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Simulates rain draining across a landscape: droplets flow downhill, cut channels, and drop sediment where the slope flattens — lowering peaks and filling valleys. Works on grid terrain (the Landscape generator).</div>
+    <div class="kv">Rainfall (droplets) <b id="erDropVal">10000</b></div>
+    <input type="range" id="erDrop" min="1000" max="40000" step="1000" value="10000">
+    <div class="kv">Strength <b id="erStrVal">1.0</b></div>
+    <input type="range" id="erStr" min="0.2" max="3" step="0.1" value="1.0">
+    <div class="inline" style="gap:4px">Seed <input type="number" id="erSeed" value="1" step="1" style="width:70px"></div>
+    <button id="erGo" style="width:100%">Erode</button>
+    <div id="erMeta" class="note" style="font-family:monospace; white-space:pre-wrap"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-inspect" style="width:360px; right:24px; top:56px">
+  <div class="dlghead"><span>Inspect</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Engineering numbers for the active object. Measure runs automatically; the others run on demand with their own inputs.</div>
+    <div class="kv"><b>Measure</b></div>
+    <div id="insMeasure" class="note" style="font-family:monospace; white-space:pre-wrap">—</div>
+    <div class="kv" style="margin-top:6px"><b>Mass properties</b></div>
+    <div class="inline" style="gap:4px">Density <input type="number" id="insDensity" value="1.0" step="0.1" min="0.01" style="width:64px">
+      <button id="insMassGo" style="flex:1">Compute</button></div>
+    <div id="insMass" class="note" style="font-family:monospace; white-space:pre-wrap"></div>
+    <div class="kv" style="margin-top:6px"><b>Cross-section</b></div>
+    <div class="inline" style="gap:4px">Axis <select id="insAxis" style="width:52px"><option>z</option><option>y</option><option>x</option></select>
+      Offset <input type="number" id="insOffset" value="0" step="0.05" style="width:60px">
+      <button id="insSecGo" style="flex:1">Cut</button></div>
+    <div id="insSection" class="note" style="font-family:monospace; white-space:pre-wrap"></div>
+    <div class="kv" style="margin-top:6px"><b>Bounding boxes</b></div>
+    <div class="inline"><button id="insBoundsGo" style="flex:1">Fit AABB + oriented box</button></div>
+    <div id="insBounds" class="note" style="font-family:monospace; white-space:pre-wrap"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-camsolve" style="width:360px; right:24px; top:56px">
+  <div class="dlghead"><span>Camera solve (vanishing points)</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Recover a photo's focal length and camera orientation from two families of parallel lines — trace along two perpendicular edge directions in your reference (e.g. the two horizontal sides of a building) and enter their pixel endpoints. Solves via vanishing points; reports the focal so you can trust it.</div>
+    <div class="inline" style="gap:4px">Image px  W <input type="number" id="csW" value="800" step="10" style="width:64px"> H <input type="number" id="csH" value="600" step="10" style="width:64px"></div>
+    <div class="kv">Family A lines (one per row: x1,y1,x2,y2)</div>
+    <textarea id="csA" rows="3" style="width:100%; font:11px/1.4 monospace" placeholder="200,200,1400,320
+250,400,1400,320
+300,300,1400,320"></textarea>
+    <div class="kv">Family B lines</div>
+    <textarea id="csB" rows="3" style="width:100%; font:11px/1.4 monospace" placeholder="600,200,-200,340
+550,400,-200,340
+500,300,-200,340"></textarea>
+    <button id="csGo" style="width:100%">Solve camera</button>
+    <div id="csmeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-sketch" style="width:340px; right:24px; top:56px">
+  <div class="dlghead"><span>Parametric sketch</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">A constraint-solved 2-D profile: pick a template and dimensions, the solver enforces the geometry exactly (Gauss-Newton to zero residual), then extrudes. The residual is shown so you can trust the fit.</div>
+    <div class="inline">Template
+      <select id="skTemplate" style="flex:1">
+        <option value="rect">Rectangle (W×H, square corners)</option>
+        <option value="rtri">Right triangle (legs A,B)</option>
+        <option value="para">Parallelogram (base, slant, height)</option>
+        <option value="lshape">L-bracket (W,H,thickness)</option>
+      </select></div>
+    <div class="inline" style="gap:4px"><span id="skLa">Width</span> <input type="number" id="skA" value="1.0" step="0.05" style="width:60px">
+      <span id="skLb">Height</span> <input type="number" id="skB" value="0.7" step="0.05" style="width:60px"></div>
+    <div class="inline" style="gap:4px"><span id="skLc">Thickness / slant</span> <input type="number" id="skC" value="0.2" step="0.02" style="width:60px"></div>
+    <div class="inline">Extrude depth <input type="range" id="skH" min="0.05" max="3" step="0.05" value="0.4" style="flex:1"><b id="skHval">0.40</b></div>
+    <button id="skGo" style="width:100%">Solve &amp; extrude</button>
+    <div id="skmeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-extrude" style="width:330px; right:24px; top:56px">
+  <div class="dlghead"><span>Extruded profile</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">A 2-D profile extruded to depth — walls, plates, brackets, beams, columns.</div>
+    <div class="inline">Profile <select id="exprofile" style="flex:1">
+      <option value="rect">Rectangle (wall / plate)</option>
+      <option value="L">L-bracket</option>
+      <option value="T">T-beam</option>
+      <option value="U">U-channel</option>
+      <option value="circle">Circle (column / rod)</option>
+      <option value="ngon">N-gon</option>
+      <option value="custom">Custom points…</option>
+    </select></div>
+    <textarea id="expoints" rows="2" placeholder="[[0,0],[0.6,0],[0.3,0.5]]" style="font:11px/1.4 monospace; display:none"></textarea>
+    <div class="inline" style="gap:4px">W <input type="number" id="exw" value="0.6" step="0.05" style="width:56px">
+      H <input type="number" id="exh" value="0.6" step="0.05" style="width:56px">
+      t <input type="number" id="ext" value="0.15" step="0.01" style="width:56px"></div>
+    <div class="kv">Depth <b id="exdval">0.40</b></div>
+    <input type="range" id="exd" min="0.05" max="4" step="0.05" value="0.4">
+    <button id="exgo" style="width:100%">Create profile</button>
+    <div id="exmeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-array" style="width:320px; right:24px; top:56px">
+  <div class="dlghead"><span>Array / pattern</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Repeat the active object — a row of columns, a bolt circle, fence posts.</div>
+    <div class="inline">Kind <select id="arrkind" style="flex:1">
+      <option value="linear">Linear (row)</option>
+      <option value="radial">Radial (circle)</option>
+    </select></div>
+    <div class="kv">Count <b id="arrcval">4</b></div>
+    <input type="range" id="arrcount" min="2" max="24" step="1" value="4">
+    <div id="arrlinrow" class="inline" style="gap:4px">Δ <input type="number" id="arrdx" value="1.0" step="0.1" style="width:52px">
+      <input type="number" id="arrdy" value="0" step="0.1" style="width:52px">
+      <input type="number" id="arrdz" value="0" step="0.1" style="width:52px"></div>
+    <div id="arrradrow" style="display:none">
+      <div class="inline" style="gap:4px">Centre <input type="number" id="arrcx" value="0" step="0.1" style="width:52px">
+        <input type="number" id="arrcz" value="0" step="0.1" style="width:52px"></div>
+      <div class="kv">Sweep degrees <b id="arrdegval">360</b></div>
+      <input type="range" id="arrdeg" min="30" max="360" step="15" value="360">
+    </div>
+    <button id="arrgo" style="width:100%">Build array</button>
+    <div id="arrmeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-variants" style="width:320px; right:24px; top:56px">
+  <div class="dlghead"><span>Variant sweep</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Build a row of copies of the active object, each with a different modifier value — compare, then delete the ones you don't want.</div>
+    <div class="inline">Vary <select id="varop" style="flex:1">
+      <option value="flute">Flute depth</option>
+      <option value="taper">Taper factor</option>
+    </select></div>
+    <div class="inline" style="gap:4px">From <input type="number" id="varlo" value="0" step="0.02" style="width:60px">
+      to <input type="number" id="varhi" value="0.15" step="0.02" style="width:60px"></div>
+    <div class="kv">Count <b id="varcval">5</b></div>
+    <input type="range" id="varcount" min="2" max="9" step="1" value="5">
+    <button id="vargo" style="width:100%">Build variants</button>
+    <div id="varmeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-taper" style="width:300px; right:24px; top:56px">
+  <div class="dlghead"><span>Taper</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Linearly scale the cross-section along an axis — narrow one end, widen the other.</div>
+    <div class="inline">Axis <select id="taperaxis" style="flex:1"><option value="y">Y (up)</option><option value="x">X</option><option value="z">Z</option></select></div>
+    <div class="kv">End scale <b id="taperfval">0.50</b></div>
+    <input type="range" id="taperf" min="0.05" max="2" step="0.05" value="0.5">
+    <button id="tapergo" style="width:100%">Apply taper</button>
+    <div id="tapermeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-surface" style="width:340px; right:24px; top:56px">
+  <div class="dlghead"><span>Surface graph</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Substance-style surfacing: a generator drives a material ramp per face. Generator → Levels → Gradient map. Low-poly objects: run Tessellate first so patterns can resolve.</div>
+    <div class="inline">Preset <select id="sgpreset" style="flex:1">
+      <option value="">— custom —</option>
+      <option value="bricks">Brick wall (clay + plaster)</option>
+      <option value="checker">Checker floor (marble + obsidian)</option>
+      <option value="patina">Patina (keep + copper)</option>
+      <option value="scratched">Scratched (keep + steel)</option>
+      <option value="dirt">Dirt gradient (keep + clay, low)</option>
+    </select></div>
+    <div class="inline">Generator <select id="sggen" style="flex:1">
+      <option value="perlin">Perlin fBm (organic)</option>
+      <option value="cells">Cells / Voronoi</option>
+      <option value="checker">Checker</option>
+      <option value="stripes">Stripes</option>
+      <option value="bricks">Bricks</option>
+      <option value="scratches">Scratches</option>
+      <option value="gradient">Gradient</option>
+    </select></div>
+    <div class="inline">Axis <select id="sgaxis"><option value="y">Y</option><option value="x">X</option><option value="z">Z</option></select>
+      Seed <input type="number" id="sgseed" value="0" step="1" style="width:56px"></div>
+    <div class="kv">Scale <b id="sgscaleval">4</b></div>
+    <input type="range" id="sgscale" min="1" max="24" step="0.5" value="4">
+    <div class="kv">Levels balance <b id="sgbalval">0.50</b></div>
+    <input type="range" id="sgbal" min="0.05" max="0.95" step="0.05" value="0.5">
+    <label class="inline"><input type="checkbox" id="sginv"> Invert</label>
+    <div class="inline">Low <select id="sgmat1" style="flex:1"></select> ≤ <input type="number" id="sgstop1" value="0.5" step="0.05" min="0.05" max="0.95" style="width:56px"></div>
+    <div class="inline">High <select id="sgmat2" style="flex:1"></select></div>
+    <button id="sggo" style="width:100%">Apply surfacing</button>
+    <div id="sgmeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-weather" style="width:320px; right:24px; top:56px">
+  <div class="dlghead"><span>Weathering</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Scatter a second material by a procedural mask — patina, dirt pooling low, or wear on convex edges.</div>
+    <div class="inline">Material <select id="weathermat" style="flex:1"></select></div>
+    <div class="inline">Pattern <select id="weathermask" style="flex:1">
+      <option value="noise">Noise (patina)</option>
+      <option value="gradient">Gradient (dirt, low)</option>
+      <option value="edges">Edges (convex wear)</option>
+    </select></div>
+    <div class="kv">Amount <b id="weatheraval">0.35</b></div>
+    <input type="range" id="weathera" min="0.05" max="0.9" step="0.05" value="0.35">
+    <button id="weathergo" style="width:100%">Apply weathering</button>
+    <div id="weathermeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-band" style="width:320px; right:24px; top:56px">
+  <div class="dlghead"><span>Band / rim</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Paint a material stripe at a height on a surface of revolution — gold rims, painted trim.</div>
+    <div class="inline">Material <select id="bandmat" style="flex:1"></select></div>
+    <div class="inline">Placement <select id="bandmode" style="flex:1">
+      <option value="top">Top rim (lip)</option>
+      <option value="bottom">Bottom rim (foot)</option>
+      <option value="mid">Middle band</option>
+    </select></div>
+    <div class="kv">Width / height <b id="bandwval">0.10</b></div>
+    <input type="range" id="bandw" min="0.02" max="0.4" step="0.01" value="0.1">
+    <div id="bandmidrow" style="display:none">
+      <div class="kv">Center (0 bottom – 1 top) <b id="bandcval">0.50</b></div>
+      <input type="range" id="bandc" min="0" max="1" step="0.02" value="0.5">
+    </div>
+    <button id="bandgo" style="width:100%">Apply band</button>
+    <div id="bandmeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-flute" style="width:300px; right:24px; top:56px">
+  <div class="dlghead"><span>Flute</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Angular ribs on a surface of revolution (cups, columns).</div>
+    <div class="kv">Lobes <b id="flutelobesval">12</b></div>
+    <input type="range" id="flutelobes" min="3" max="48" step="1" value="12">
+    <div class="kv">Depth <b id="flutedepthval">0.06</b></div>
+    <input type="range" id="flutedepth" min="0" max="0.3" step="0.01" value="0.06">
+    <div class="kv">Twist <b id="flutetwistval">0.0</b></div>
+    <input type="range" id="flutetwist" min="-3" max="3" step="0.1" value="0">
+    <button id="flutego" style="width:100%">Flute active object</button>
+    <div id="flutemeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-retopo" style="width:340px; right:24px; top:56px">
+  <div class="dlghead"><span>Retopologize</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">Field-guided, resolution-independent retopology (leCore cross-field). Edge flow follows the surface, not a voxel grid.</div>
+    <div class="inline">Mode
+      <select id="retopomode" style="flex:0 0 auto">
+        <option value="quad">Field-guided quads (smoothest flow)</option>
+        <option value="deformation">Deformation-aware (follows how it bends)</option>
+      </select>
+    </div>
+    <div id="retopodefnote" class="note" style="display:none">Deformation-aware mode uses the object's current pose as the deformation guide — pose it (or scale a limb) before retopo so edge loops follow the stretch. With no deformation captured it falls back to smoothest flow.</div>
+    <button id="retopogo" style="width:100%">Retopologize active object</button>
+    <button id="retopoquality" style="width:100%; margin-top:4px">Check edge-flow quality</button>
+    <div id="retopometa" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-history" style="width:340px; right:24px; top:56px">
+  <div class="dlghead"><span>History &amp; branches</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note">The active object's edit log. Click a step to travel there; edits made mid-history keep the later steps (they replay on top). Non-replayable ops (boolean, sculpt, paint) restart the log.</div>
+    <div class="row">
+      <select id="histbranch" style="flex:1"></select>
+      <button id="histnewbranch" style="flex:0 0 92px">Branch here</button>
+    </div>
+    <div id="histlist" style="max-height:200px; overflow:auto; margin:6px 0; font:11px/1.7 monospace"></div>
+    <div class="row">
+      <select id="histmergefrom" style="flex:1"></select>
+      <button id="histmerge" style="flex:0 0 92px">Merge in</button>
+    </div>
+    <div id="histmeta" class="note"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-section" style="width:400px; right:24px; top:56px">
+  <div class="dlghead"><span>Cross-sections</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <h2>3D cut (live preview + photo)</h2>
+    <label class="inline"><input type="checkbox" id="clipon"> Clip the 3D view</label>
+    <div class="row">
+      <select id="clipaxis" style="flex:0 0 70px"><option value="x">X</option><option value="y">Y</option><option value="z" selected>Z</option></select>
+      <input type="range" id="clipoff" min="-2" max="2" step="0.05" value="0" style="flex:1">
+      <b id="clipoffval" style="flex:0 0 40px">0.00</b>
+      <button id="clipflip" style="flex:0 0 52px">flip</button>
+    </div>
+    <h2>Exact 2D section (resolution-independent sampling)</h2>
+    <div class="row">
+      <select id="secaxis" style="flex:0 0 70px"><option value="x">X</option><option value="y">Y</option><option value="z" selected>Z</option></select>
+      <input type="range" id="secoff" min="-2" max="2" step="0.05" value="0" style="flex:1">
+      <b id="secoffval" style="flex:0 0 40px">0.00</b>
+    </div>
+    <div class="row">
+      <label class="inline" style="flex:1">Series <input type="number" id="seccount" value="1" min="1" max="6" style="width:48px"></label>
+      <label class="inline" style="flex:1">Span <input type="number" id="secspan" value="1.0" min="0.2" max="4" step="0.1" style="width:56px"></label>
+      <label class="inline" style="flex:1"><input type="checkbox" id="seconly"> Selected object only</label>
+    </div>
+    <button id="secbtn" style="width:100%">Render section</button>
+    <img id="secimg" alt="" style="width:100%; border-radius:8px; margin-top:6px">
+    <div id="secmeta" class="note"></div>
+    <h2>Shell layers of the active object</h2>
+    <div class="note">Layers of exact thickness, outermost first — revealed by the section above (e.g. 0.08 gold, 0.10 copper).</div>
+    <textarea id="layersbox" rows="2" placeholder='0.08 gold, 0.10 copper'></textarea>
+    <button id="layersbtn" style="width:100%">Apply layers to active object</button>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-lighting" style="width:320px; right:24px; top:56px">
+  <div class="dlghead"><span>Lighting &amp; environment</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <h2>Key light</h2>
+    <div class="kv">Direction (azimuth) <b id="lightazval">300°</b></div>
+    <input type="range" id="lightaz" min="0" max="360" step="5" value="300">
+    <div class="kv">Height (elevation) <b id="lightelval">55°</b></div>
+    <input type="range" id="lightel" min="-20" max="89" step="1" value="55">
+    <div class="kv">Intensity <b id="sunval">3.14</b></div>
+    <input type="range" id="sun" min="0" max="8" step="0.1" value="3.14">
+    <h2>Environment</h2>
+    <div class="kv">Ambient fill <b id="ambval">0.28</b></div>
+    <input type="range" id="ambient" min="0" max="1" step="0.02" value="0.28">
+    <div class="note">Applies to the live preview and the photo. The renderer uses one directional key light plus ambient fill; area lights and HDRI environments are a later addition.</div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-camera" style="width:320px; right:24px; top:56px">
+  <div class="dlghead"><span>Camera &amp; depth of field</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <h2>Lens</h2>
+    <div class="kv">Field of view <b id="fovval">45°</b></div>
+    <input type="range" id="fov" min="20" max="90" step="1" value="45">
+    <h2>Depth of field (photo)</h2>
+    <label class="inline"><input type="checkbox" id="dof"> Enable depth of field</label>
+    <div class="kv">Focus distance <b id="focusval">3.0</b></div>
+    <input type="range" id="focus" min="0.5" max="12" step="0.1" value="3.0">
+    <button id="focuspick" style="width:100%">Pick focus point (click an object)</button>
+    <div class="kv">Aperture (f-stop) <b id="fstopval">4.0</b></div>
+    <input type="range" id="fstop" min="1" max="16" step="0.1" value="4.0">
+    <div class="note">DOF is a depth-driven post-blur applied to the path-traced photo (not the live preview).</div>
+    <h2>View bookmarks</h2>
+    <div class="row"><button id="bmsave" style="flex:1">Save current view</button></div>
+    <div id="bmlist" class="note"></div>
+    <div class="note">Turntable rendering moved to the <b>Render view</b> toolbar, next to the other renders.</div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-examples" style="width:340px; right:24px; top:56px">
+  <div class="dlghead"><span>Example graphs</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <div class="note" style="margin-bottom:6px">Load a ready-made node graph, then open the Node editor and Build the output node. Loading replaces the current graph.</div>
+    <div id="examplelist" style="height:260px"></div>
+  </div>
+</div>
+
+<div class="dlg" id="dlg-docs" style="width:420px; right:24px; top:56px">
+  <div class="dlghead"><span>Engine reference — ask leCore</span><span class="x">✕</span></div>
+  <div class="dlgbody">
+    <input type="text" id="docsq" placeholder="search the engine: fillet, make a vase, curl noise, decompose signal…" autocomplete="off">
+    <div id="docsthemes" class="note" style="margin:6px 0"></div>
+    <div id="docsresults" style="max-height:calc(100vh - 240px); overflow:auto; margin-top:4px"></div>
+    <div class="note">Searches leCore's own capability index (name · aliases · description). This is the same index the app uses to answer "does the engine do X?" — 375 documented capabilities.</div>
+  </div>
+</div>
+
+<div id="ctxmenu"></div>
+
+<div style="display:none" id="legacy">
+  <input type="file" id="glbfile" accept=".glb,.gltf">
+  <input type="file" id="lewsfile" accept=".lews">
+  <input type="file" id="objfile" accept=".obj">
+</div>
+
+<!-- three.js: LOCAL FIRST (app.py caches it into vendor/ on first run), then CDNs. app.js builds
+     materials at module scope, so an undefined THREE kills the entire script -- menus and all -- which
+     is why this is a chain with a visible failure message rather than one <script> tag and hope. -->
+<script>
+  // one chain, local first. Relative AND root-absolute local paths are both tried so this works whether
+  // the app is served at / (standalone) or at /demos/10_polystudio/ (gallery).
+  window.__threeSources = [
+    "vendor/three.min.js",
+    "/vendor/three.min.js",
+    "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js",
+    "https://unpkg.com/three@0.128.0/build/three.min.js",
+    "https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"
+  ];
+  function __loadThree(i){
+    if (window.THREE) { __startApp(); return; }
+    if (i >= window.__threeSources.length) { __threeFailed(); return; }
+    var s = document.createElement('script');
+    s.src = window.__threeSources[i];
+    s.onload = function(){ window.THREE ? __startApp() : __loadThree(i+1); };
+    s.onerror = function(){ __loadThree(i+1); };
+    document.head.appendChild(s);
+  }
+  function __startApp(){
+    var s = document.createElement('script');
+    s.src = 'app.js';
+    s.onerror = function(){ __banner('app.js failed to load.', ''); };
+    document.body.appendChild(s);
+  }
+  function __threeFailed(){
+    __banner('The 3D viewport library (three.js) could not be loaded, so the app cannot start.',
+             'This machine appears to be offline or behind a proxy that blocks the CDNs. Fix it once: '
+             + 'on a networked machine run <code>python app.py</code> (it caches three.js into '
+             + '<code>vendor/</code>), or download three.js r128 yourself and save it as '
+             + '<code>vendor/three.min.js</code> next to app.py. Then reload.');
+  }
+  function __banner(title, detail){
+    var d = document.createElement('div');
+    d.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#151a22;color:#e6edf6;'
+      + 'font:14px system-ui,sans-serif;padding:40px;line-height:1.6';
+    d.innerHTML = '<h2 style="margin:0 0 12px">Poly Studio could not start</h2><p>' + title + '</p>'
+      + (detail ? '<p style="color:#9fb0c7">' + detail + '</p>' : '');
+    document.body.appendChild(d);
+  }
+  window.addEventListener('DOMContentLoaded', function(){ __loadThree(0); });
+</script>
+</body>
+</html>

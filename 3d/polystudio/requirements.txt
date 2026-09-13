@@ -1,0 +1,12 @@
+# The ENGINE. Without this line `pip install -r requirements.txt` installs a web server and no leCore,
+# and the app only runs because a copy happens to be vendored -- which is how it silently drifted before.
+# The version floor is the release that carries what this app calls: composite_layers + BLEND_MODES
+# (shared-workspace texture handoff), the container's image_section/register_kind, LiveSession,
+# render_sdf(mask=), decimate_to(target_faces=), and the fixed terrain.erode.
+leos-core[ui] >= 0.2.11
+
+# leos-core[ui] already pulls Flask and Pillow; numpy is the engine's own hard dependency.
+# Optional, each a real speedup rather than a requirement:
+#   pip install "leos-core[jit]"   # numba-compiled kernels
+#   pip install "leos-core[zig]"   # native kernels
+#   pip install "leos-core[gpu]"   # CuPy
