@@ -761,8 +761,20 @@ def timeline_post():
             DOC.del_key(d["kind"], d["id"], d["prop"], t=d.get("t"))
             return jsonify(ok=True)
         if act == "range":
-            DOC.frame_range = [float(d.get("lo", 0.0)),
-                               float(d.get("hi", 96.0))]
+            # R71: a nonsense range is refused here too, not only in the UI
+            # -- an agent or a script driving this door could freeze every
+            # connected browser for minutes with one number.
+            try:
+                _lo = float(d.get("lo", 0.0))
+                _hi = float(d.get("hi", 96.0))
+            except (TypeError, ValueError):
+                return jsonify(error="lo and hi must be numbers"), 400
+            if not (_lo == _lo and _hi == _hi):          # NaN
+                return jsonify(error="lo and hi must be numbers"), 400
+            if _hi - _lo < 1 or _hi - _lo > 100000:
+                return jsonify(error="the timeline must be between 1 and "
+                                     "100000 frames long"), 400
+            DOC.frame_range = [_lo, _hi]
             from . import _MUT_REV
             _MUT_REV[0] += 1
             return jsonify(ok=True)
@@ -1175,6 +1187,73 @@ def _stamp_author():
             WS.docs[_viewing_doc_id()]._last_author = _req_uid()
         except Exception:
             pass
+
+
+# R71 -- Devin: "Undo doesn't seem to work."
+#
+# It did, for a plain brush stroke. What did not work was every gesture the
+# client has to send as MORE THAN ONE mutating request: each one took its
+# own undo entry, so the first Ctrl+Z reverted a piece of the gesture the
+# person never thought of as a separate act and the picture did not move.
+# Twenty of these were found: stitching (the fill, then its relief), a
+# mirrored stroke (one request per twin), the first FX stroke (the stroke,
+# then the layer it needs), a stamp DRAG (one request per dab), soloing a
+# layer (one request per other layer), a stirred medium (six steps), adding
+# an animation frame (three), and so on. On a 12-layer document, solo cost
+# twelve Ctrl+Z.
+#
+# The fix is one mechanism rather than twenty: the client stamps every
+# request belonging to one gesture with the same `gesture` id, and the
+# first request under a given id is the one that takes the undo entry. The
+# rest fold into it, so the entry holds the state from before the whole
+# gesture. A request with no id ends any open gesture, which is what makes
+# an ordinary action after a gesture behave normally.
+#
+# Deliberately NOT applied to /api/undo and /api/redo (they walk the stack
+# rather than adding to it) or to the read routes.
+_GESTURE_EXEMPT = ("/api/undo", "/api/redo", "/api/history")
+
+
+@app.before_request
+def _gesture_undo_grouping():
+    if request.method in ("POST", "PATCH", "DELETE") \
+            and request.path.startswith("/api/"):
+        _note_work()          # R71: the warm-up stands down while you work
+    if request.method not in ("POST", "PATCH", "DELETE") \
+            or not request.path.startswith("/api/") \
+            or request.path in _GESTURE_EXEMPT:
+        return
+    try:
+        doc = WS.docs[_viewing_doc_id()]
+    except Exception:
+        return
+    gid = None
+    if request.is_json:
+        try:
+            body = request.get_json(silent=True)
+            if isinstance(body, dict):
+                gid = body.get("gesture")
+        except Exception:
+            gid = None
+    if gid in (None, "", False):
+        gid = request.headers.get("X-Gesture") or None
+    if not gid:
+        doc._undo_group = 0
+        doc._undo_group_armed = False
+        doc._gesture_id = None
+        return
+    gid = str(gid)[:64]
+    doc._undo_group = 1
+    if gid == getattr(doc, "_gesture_id", None):
+        doc._undo_group_armed = False      # fold into the entry already taken
+    else:
+        doc._gesture_id = gid
+        doc._undo_group_armed = True       # this request takes the entry
+        # A NEW gesture is a new act, so it also ends any coalescing run
+        # (edit_layer's slider run, simulate_stroke's). Without this, two
+        # separate drags of the same slider would still fold together
+        # because the run only cared about elapsed time.
+        doc._sim_run = None
 
 
 @app.before_request
@@ -2620,9 +2699,14 @@ _ACCEL_HINTS = {
 _STATUS = {"accel": None, "engine": None, "lock": threading.Lock()}
 
 
-def _status_parts(fresh=False):
+def _status_parts(fresh=False, wait=True):
+    """wait=False answers with whatever has been measured so far rather than
+    paying the 10 s to finish it -- R71: nothing a person is waiting on may
+    block on the warm-up, or the politeness above just moves the stall."""
     if fresh:
         _STATUS["accel"] = _STATUS["engine"] = None
+    if not wait and (_STATUS["accel"] is None or _STATUS["engine"] is None):
+        return (_STATUS["accel"] or {}), (_STATUS["engine"] or {}).get("v")
     if _STATUS["accel"] is None or _STATUS["engine"] is None:
         with _STATUS["lock"]:            # one worker pays, the rest wait once
             if _STATUS["accel"] is None:
@@ -2640,20 +2724,79 @@ def _status_parts(fresh=False):
     return _STATUS["accel"], _STATUS["engine"]["v"]
 
 
+# R71 -- Devin: "Sometimes tools take a while to process (they shouldn't be
+# slow, so I'm not sure why that's the case)."
+#
+# Measured: importing this module makes a 40-point brush stroke on a
+# 768x512 canvas take 190 ms instead of 12 ms -- for about twelve seconds,
+# and then it is fast forever. The cause is the warm-up thread above. R59
+# was right to move that 10.4 s off the request path, but a daemon thread
+# is not free on a 2-core machine: it burns both cores for twelve seconds
+# starting at import, which is exactly the window in which a person opens
+# the app and makes their first few strokes. Every one of them costs 15-20x
+# what it should, and nothing on screen explains it -- the app is simply
+# sluggish when you first meet it and fine later, which is the hardest kind
+# of slowness to report.
+#
+# So the warm-up yields:
+#   * it starts a beat late, so the page's own boot requests land first;
+#   * it runs at a low scheduling priority (Linux applies nice per thread),
+#     so a stroke arriving mid-warm wins the core;
+#   * it stands down entirely while the person is actually working, and
+#     resumes when they pause.
+# None of this can make anything wait on it: /api/status answers with
+# whatever is measured so far (see `partial` there) rather than blocking.
+_WARM = {"busy_until": 0.0, "done": False}
+
+
+def _note_work():
+    """Called on every mutating request: 'someone is working right now'."""
+    _WARM["busy_until"] = time.time() + 1.5
+
+
 def _warm_status():
+    try:
+        os.nice(10)                      # per-thread on Linux
+    except Exception:
+        pass
+    time.sleep(1.5)                      # let the page finish booting first
+    for _ in range(600):                 # up to ~5 min of waiting for a gap
+        if time.time() >= _WARM["busy_until"] + 2.0:
+            break                        # a real pause, not a gap between strokes
+        time.sleep(0.5)
     try:
         _status_parts()
     except Exception:
         pass
+    finally:
+        _WARM["done"] = True
 
 
-threading.Thread(target=_warm_status, daemon=True).start()
+# NOT started at import. R71: it used to be, and on a 2-core machine it made
+# the first ten seconds of every session 15-20x slower to paint in -- the
+# worst possible ten seconds, because they are the ones where a person is
+# forming their impression of whether the app is quick. `serve()` does this
+# work BEFORE the server accepts its first request, where the cost is part
+# of a launch that already prints a line and nobody is mid-stroke. Anything
+# that imports this module without serving (the test suite, an embedding
+# host) gets the lazy path: /api/status answers `measuring: true` until
+# something asks for it with ?wait=1.
+def warm_status_async():
+    threading.Thread(target=_warm_status, name="lestudio-warm",
+                     daemon=True).start()
 
 
 @app.get("/api/status")
 def status():
     """Engine status: gpu availability, leCore version, faculty report. Cached (process-static); ?fresh=1 recomputes."""
-    a, _eng_cached = _status_parts(fresh=request.args.get("fresh"))
+    # R71: a status call is a panel refresh, not something to stall a
+    # session for. Unless ?wait=1 is asked for, answer with what is
+    # measured; `measuring: true` tells the client to ask again.
+    _fresh = request.args.get("fresh")
+    _wait = bool(_fresh) or request.args.get("wait") in ("1", "true", "yes")
+    a, _eng_cached = _status_parts(fresh=_fresh, wait=_wait)
+    _measuring = not _WARM["done"] and not _wait
+    a = a or {}
     have_map = a.get("accel") or {}
     missing = [{"name": n, "install": _ACCEL_HINTS[n][0],
                 "unlocks": _ACCEL_HINTS[n][1]}
@@ -2696,7 +2839,8 @@ def status():
         "shaders": {"device": "gpu", "note": "shader previews run in your "
                                              "browser's GPU"},
     }
-    return jsonify(engine=eng, lews=lews, gpu=gpu_flag, jit=a["jit"],
+    return jsonify(engine=eng, lews=lews, gpu=gpu_flag, jit=a.get("jit"),
+                   measuring=_measuring,
                    live=LIVE["on"],
                    live_error=LIVE["error"], accel=have_map,
                    accel_missing=missing, subsystems=subsystems,
@@ -3387,7 +3531,7 @@ def fill():
                 selection=d.get("selection") or None,
                 sel_invert=bool(d.get("sel_invert")),
                 softness=float(src.get("softness", 2.0)),
-                sample=str(src.get("sample", "layer")),
+                sample=_sample_mode(src.get("sample")),
                 seed=src.get("seed"), _report=_rpt, **kw)
             GRAPH.commit_layer_outputs()
             # WHY DIDN'T THAT PAINT? (generated fills): `filled` used to be
@@ -3725,6 +3869,40 @@ def transform():
         return jsonify(error=str(e)), 400
 
 
+def _sample_mode(v):
+    """Which layers an op may READ. R70 -- Devin, on a multi-layer doc:
+
+        paint related things should not be aware of other layers by
+        default. Each layer is separate.
+
+    So an absent or unrecognised value means "layer". A caller has to name
+    "below" or "composite" to get more, and the routes never infer it."""
+    v = str(v or "layer").lower()
+    return v if v in ("layer", "below", "composite") else "layer"
+
+
+def _clean_path(p):
+    """A dragged path from the client: a list of [x, y], validated.
+
+    R69 gave the generator brushes a stroke; this is the door it comes
+    through, so it refuses anything that is not a short list of finite
+    pairs rather than handing the rasteriser something odd."""
+    if not isinstance(p, (list, tuple)) or not p:
+        return None
+    out = []
+    for q in p[:4096]:
+        if not isinstance(q, (list, tuple)) or len(q) < 2:
+            continue
+        try:
+            x, y = float(q[0]), float(q[1])
+        except (TypeError, ValueError):
+            continue
+        if x != x or y != y or abs(x) > 1e6 or abs(y) > 1e6:
+            continue
+        out.append([x, y])
+    return out or None
+
+
 @app.post("/api/scribble")
 def scribble():
     """R47 scribble brush: {"layer", "x", "y", "radius", "curl" 0..1,
@@ -3749,6 +3927,10 @@ def scribble():
             sel_invert=bool(d.get("sel_invert")),
             feather=float(d.get("feather", 0.0)),
             poly=d.get("poly"),
+            # R69: a DRAGGED stroke. x,y stay required so a plain click
+            # still works exactly as it did; a path simply widens the
+            # region the strands are seeded into.
+            path=_clean_path(d.get("path")),
             record=bool(d.get("record", True)))
         GRAPH.commit_layer_outputs()
         return jsonify(ok=True, strokes=int(n))
@@ -3764,9 +3946,11 @@ def hatchfill():
     "weave": "plain"|"twill"|"satin"|"basket" interlacement),
     "color", "opacity", "hardness", "wobble", "cross_angle"?, "seed"?,
     "selection"?, "sel_invert"?, "feather"?, "area": "brush"|"selection",
-    "record"}. 'both' is value-aware: composite darks cross-hatch, lights
-    fade to sparse broken lines. area='selection' shades the whole
-    (feathered) gate. Returns {ok, strokes}."""
+    "record", "sample"}. 'both' is value-aware: darks cross-hatch, lights
+    fade to sparse broken lines -- read from `sample` ("layer" by default,
+    R70: a paint op is sandboxed to its layer; "below" or "composite" to
+    read wider). area='selection' shades the whole (feathered) gate.
+    Returns {ok, strokes}."""
     d = request.json or {}
     try:
         n = DOC.hatch_fill(
@@ -3783,7 +3967,11 @@ def hatchfill():
             cross_angle=d.get("cross_angle"),
             weave=d.get("weave", "twill"),
             depth=float(d.get("depth", 0.0)),
+            sample=_sample_mode(d.get("sample")),
             poly=d.get("poly"),
+            # R69: the dragged stroke, same door as scribble. Hatch AND
+            # textile both come through hatch_fill, so both get it.
+            path=_clean_path(d.get("path")),
             seed=d.get("seed"),
             selection=d.get("selection") or None,
             sel_invert=bool(d.get("sel_invert")),
@@ -4264,6 +4452,14 @@ def _api_error(e):
     if isinstance(e, HTTPException):
         return e
     if request.path.startswith("/api"):
+        # R71: a DELIBERATE refusal is a 400, not a 500. The locked-layer
+        # guard raised through here as an unhandled exception, so declining
+        # to delete a locked layer logged a stack trace and answered 500 --
+        # which reads to the client as "leStudio broke", when in fact it
+        # just protected the thing the person asked it to protect.
+        from . import LayerLocked
+        if isinstance(e, LayerLocked):
+            return jsonify(error=str(e), locked=True), 400
         app.logger.exception("unhandled error on %s", request.path)
         msg = str(e) or e.__class__.__name__
         if isinstance(e, KeyError):
@@ -4889,14 +5085,28 @@ def layer_edit():
         GRAPH.commit_layer_outputs()
         return jsonify(ok=True, id=_nl.id)
     elif act == "duplicate":
-        DOC.duplicate_layer(d["id"])
+        # R71: SELECT WHAT YOU JUST MADE. Duplicating left the ORIGINAL
+        # selected, so "work on the copy" edited the original; merging left
+        # neither result selected and the client fell back to the topmost
+        # layer, so the next stroke landed somewhere the person never chose.
+        _dup = DOC.duplicate_layer(d["id"])
         GRAPH.commit_layer_outputs()
+        return jsonify(ok=True, id=getattr(_dup, "id", None),
+                       select=getattr(_dup, "id", None))
     elif act == "merge_down":
-        DOC.merge_layer_down(d["id"])
+        _rpt = {}
+        _m = DOC.merge_layer_down(d["id"], _report=_rpt)
         GRAPH.commit_layer_outputs()
+        return jsonify(ok=True, id=getattr(_m, "id", None),
+                       select=getattr(_m, "id", None),
+                       why=_rpt.get("why"), merged_hidden=_rpt.get("hidden"))
     elif act == "merge":
-        DOC.merge_layers(d.get("ids", []))
+        _rpt = {}
+        _m = DOC.merge_layers(d.get("ids", []), _report=_rpt)
         GRAPH.commit_layer_outputs()
+        return jsonify(ok=True, id=getattr(_m, "id", None),
+                       select=getattr(_m, "id", None),
+                       merged_hidden=_rpt.get("hidden"))
     elif act == "merge_visible":
         DOC.merge_visible_layers()
         GRAPH.commit_layer_outputs()
@@ -5254,7 +5464,14 @@ def select():
             return jsonify(error=str(e)), 400
         d["params"] = prm
     try:
-        sel = DOC.select(d["tool"], d.get("params", {}), mode=d.get("mode", "new"),
+        # R70: the pixel-reading selection tools read the ACTIVE LAYER by
+        # default. The route carries both the layer and the sample mode
+        # into the tool params so `_tool_field` can honour them.
+        _prm = dict(d.get("params", {}))
+        if d.get("layer") is not None and "layer" not in _prm:
+            _prm["layer"] = d["layer"]
+        _prm.setdefault("sample", _sample_mode(d.get("sample")))
+        sel = DOC.select(d["tool"], _prm, mode=d.get("mode", "new"),
                          target=d.get("target"), name=d.get("name"),
                          feather=float(d.get("feather", 0)))
         GRAPH.commit_layer_outputs()
@@ -5298,6 +5515,14 @@ def selection_edit():
         DOC.merge_selections(d.get("ids") or None)
     elif act == "modify":
         DOC.modify_selection(d["id"], d["op"], d.get("amount", 1))
+        # R71: report the coverage back, so Expand/Contract/Feather/Invert
+        # can say what they did instead of leaving the person to squint at
+        # marching ants that barely moved.
+        try:
+            _cov = float(np.asarray(DOC.selection_by_id(d["id"]).data).mean())
+        except Exception:
+            _cov = None
+        return jsonify(ok=True, coverage=_cov)
     elif act == "to_mask":
         m = DOC.selection_to_mask(d["id"], d.get("name"))
         GRAPH.commit_layer_outputs()
@@ -5391,6 +5616,15 @@ def _paint_locked():
         d = _clean_paint(d)
     except _Gone as e:
         return jsonify(error=str(e)), 400
+    # R71: a MISSING layer id is a bad request, not a crash. `layer: null`
+    # reaches here whenever a stroke starts in the window between a delete
+    # or a document switch clearing the client's selection and the refresh
+    # that restores it -- and it came back as a 500 with a stack trace and
+    # the generic "that layer or item is gone" toast, which tells a person
+    # nothing they can act on.
+    if d.get("layer") in (None, "", False):
+        return jsonify(error="no layer chosen - pick one in the layer list, "
+                             "then paint"), 400
     mode = d.get("mode", "brush")
     # WHY DIDN'T THAT PAINT? Professional trust: a stroke that can have
     # no visible effect gets a diagnosis, never a silent no-op. These
@@ -5435,6 +5669,24 @@ def _paint_locked():
                 warn = ("this layer clips onto %r, which is empty here — "
                         "the paint shows only where the base has pixels"
                         % base.name)
+        if warn is None and d.get("selection"):
+            # R71: A STROKE ENTIRELY OUTSIDE THE SELECTION GATE. Nothing
+            # appears, nothing is said, and -- worse -- the stroke still
+            # takes an undo entry, so the next Ctrl+Z also appears to do
+            # nothing and the person has to press it once per invisible
+            # stroke before anything moves. The status bar's standing
+            # "brush limited to selection" is not tied to the moment it
+            # bites, which is when it matters.
+            try:
+                _g = DOC._resolve_gate(d.get("selection"),
+                                       bool(d.get("sel_invert")))
+            except Exception:
+                _g = None
+            if _g is not None and float(_g[y0:y1, x0:x1].max(initial=0.0)) < 0.02:
+                warn = ("that stroke is entirely OUTSIDE the selection the "
+                        "brush is limited to — clear the selection, or set "
+                        "Sel back to 'anywhere' in the Brush panel, to paint "
+                        "here")
         if warn is None and mode == "knife" and pts:
             # R58 UX sweep: the palette knife shapes paint BODY. On flat paint
             # (no impasto under the path) it is a silent no-op -- the drag
@@ -5556,7 +5808,8 @@ def _paint_dispatch(d, mode):
         DOC.clone(d["layer"], d["points"], d["source"],
                   radius=float(d.get("radius", 12)),
                   opacity=float(d.get("opacity", 1)), brush=d.get("brush"),
-                  record=bool(d.get("record", True)), origin=d.get("origin"))
+                  record=bool(d.get("record", True)), origin=d.get("origin"),
+                  sample=_sample_mode(d.get("sample")))
     elif mode == "node":
         # Node paint: pigment from a Paint-out node's image. Evaluated through
         # the graph's memoised cache, so mid-stroke flushes cost one lookup.
@@ -7704,6 +7957,17 @@ def serve(host=None, port=None, debug=False):
     host = host or os.environ.get("LESTUDIO_HOST", "127.0.0.1")
     port = int(port or _env_int("LESTUDIO_PORT", 5050))
     print(f"leStudio -> http://{host}:{port}")
+    # R71: measure the engine's capabilities NOW, while the browser is still
+    # opening, rather than on a thread that competes with the person's first
+    # strokes. One pass, once; afterwards /api/status is free.
+    print("leStudio: checking engine capabilities...", flush=True)
+    _t0 = time.time()
+    try:
+        _status_parts()
+    except Exception:
+        pass
+    _WARM["done"] = True
+    print("leStudio: ready (%.1fs)" % (time.time() - _t0), flush=True)
     _autosave_tick()             # R65: the crash net runs here, not in a tab
     app.run(host=host, port=port, debug=debug, threaded=True)
 

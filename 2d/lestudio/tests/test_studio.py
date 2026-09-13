@@ -345,12 +345,14 @@ def test_smudge_and_clone():
     assert ls.pixels[32, 58, 0] > 0.15          # red dragged into the blue side
     assert doc.undo()                            # smudge is one undo step
     assert ls is not doc.layers[-1] or True
-    # clone: constant offset, samples the composite
+    # clone: constant offset. R70 -- it samples the ACTIVE LAYER now ("each
+    # layer is separate"), so lifting the green patch off layer 0 onto a
+    # different layer is the explicit sample="below", not the default.
     doc2 = _doc()
     doc2.layers[0].pixels[..., :3] = 1
     doc2.layers[0].pixels[12:24, 12:24, :3] = [0, 1, 0]
     lc = doc2.add_layer("cl", record=False)
-    doc2.clone(lc.id, [(70, 18)], source=(18, 18), radius=9)
+    doc2.clone(lc.id, [(70, 18)], source=(18, 18), radius=9, sample="below")
     assert lc.pixels[18, 70, 1] > 0.8 and lc.pixels[18, 70, 0] < 0.2
     assert doc2.undo()
 
@@ -403,15 +405,26 @@ def test_chunked_strokes_single_undo_and_clone_origin():
     assert l.pixels[10, 70, 3] > 0.5
     assert doc.undo()                      # ONE undo removes the whole stroke
     assert np.allclose(doc.layer(l.id).pixels, before)
-    # chunked clone keeps a stable offset via origin
+    # chunked clone keeps a stable offset via origin.
+    #
+    # R70 moved this contract: the clone stamp used to read the flattened
+    # picture always, so this cloned the green patch off layer 0 onto a
+    # different layer with nothing asked for. "Each layer is separate" --
+    # so the cross-layer lift is now sample='below' (or 'composite'), and
+    # the offset behaviour being tested here is unchanged either way.
     doc2 = _doc()
     doc2.layers[0].pixels[..., :3] = 1
     doc2.layers[0].pixels[12:24, 12:24, :3] = [0, 1, 0]
     lc = doc2.add_layer("c", record=False)
-    doc2.clone(lc.id, [(70, 18), (78, 18)], source=(18, 18), radius=9)
+    doc2.clone(lc.id, [(70, 18), (78, 18)], source=(18, 18), radius=9,
+               sample="below")
     doc2.clone(lc.id, [(78, 18), (86, 18)], source=(18, 18), radius=9,
-               record=False, origin=(70, 18))
+               record=False, origin=(70, 18), sample="below")
     assert lc.pixels[18, 70, 1] > 0.8 and lc.pixels[18, 84, 1] > 0.4
+    # and the default does NOT reach across layers
+    lc2 = doc2.add_layer("c2", record=False)
+    doc2.clone(lc2.id, [(70, 18), (78, 18)], source=(18, 18), radius=9)
+    assert lc2.pixels[..., 3].max() < 0.03
 
 
 def test_modify_merge_and_reorder():
@@ -553,8 +566,12 @@ def test_splines_and_aligned_clone():
     doc2.layers[0].pixels[..., :3] = 1
     doc2.layers[0].pixels[12:24, 12:24, :3] = [0, 1, 0]
     lc = doc2.add_layer("c", record=False)
-    doc2.clone(lc.id, [(70, 18)], source={"offset": (52, 0)}, radius=9)
-    doc2.clone(lc.id, [(70, 40)], source={"offset": (52, 0)}, radius=9, record=False)
+    # R70: sample="below" -- the patch being cloned is on the layer under
+    # the one being painted, which is no longer the default read.
+    doc2.clone(lc.id, [(70, 18)], source={"offset": (52, 0)}, radius=9,
+               sample="below")
+    doc2.clone(lc.id, [(70, 40)], source={"offset": (52, 0)}, radius=9,
+               record=False, sample="below")
     assert lc.pixels[18, 70, 0] < 0.2 and lc.pixels[18, 70, 1] > 0.8
     assert lc.pixels[40, 70, 0] > 0.8             # sampled 52px left, NOT restarted at source
     # splines persist through undo and the workspace file
@@ -5758,10 +5775,25 @@ def test_sweep_every_endpoint_is_reachable():
         "/api/paint_batch": "the agent/swarm fast path (R16): many strokes, "
             "one round trip, one undo entry; a human's strokes arrive one at "
             "a time through /api/paint",
+        "/api/memory": "per-user memory door (R56, app_substrate): "
+            "agents and scripts remember/recall/observe per X-User; a "
+            "memory panel in the UI is future work",
+        "/api/agent/tools": "engine-mounted standard agent door (R55, "
+            "leCore agent_surface): the manifest agents discover tools by",
+        "/api/agent/invoke": "engine-mounted: call-by-name with data-URL "
+            "images -- the only way an agent sees its own render",
+        "/api/engine": "engine-mounted engine_status panel for agents; the "
+            "UI's own /api/status carries the same report",
+        "/api/presence": "engine-mounted presence roster (GET); the UI uses "
+            "its own SSE /api/events feed",
         "/api/scatter": "the swarm/scripting path to the R53 scatter "
             "generator with ATOMIC inline poly gates (the selection-race "
             "fix); the UI reaches scatter through the fill tool's Scatter "
             "source via /api/fill",
+        "/api/agent/tick": "R63: the reactive agent's own poll loop "
+            "(CONTRACT.md section 2) -- a connected agent calls this "
+            "itself to learn may_act/changed/brief; a human never clicks "
+            "anything that hits it, so there is no UI path to reach for",
     }
     unreached = []
     for rule in sorted({str(r.rule) for r in app.url_map.iter_rules()
@@ -6996,7 +7028,8 @@ def test_ux_sweep_discoverability():
     import re as _re
     ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
                            "static", "index.html")).read()
-    api_only = {"/api/scatter",
+    api_only = {"/api/scatter", "/api/agent/tools", "/api/agent/invoke",
+                "/api/engine", "/api/presence", "/api/memory",
                 "/api/analyze", "/api/graph/node/<nid>", "/api/histogram",
                 "/api/mind", "/api/presence/name", "/api/schema", "/api/prefs",
                 # probes for a host's orchestrator: deliberately not controls
@@ -7005,7 +7038,11 @@ def test_ux_sweep_discoverability():
                 "/api/replay/timelapse.gif",
                 # the agent/swarm fast path (R16); humans paint one stroke
                 # at a time through /api/paint
-                "/api/paint_batch"}
+                "/api/paint_batch",
+                # R63: the reactive agent's own poll loop (CONTRACT.md
+                # section 2) -- an agent calls this itself; no human control
+                # ever reaches it, so it has no discoverability story to tell
+                "/api/agent/tick"}
     for rule in sorted({str(x.rule) for x in app.url_map.iter_rules()
                         if str(x.rule).startswith("/api")}):
         stem = rule.split("<")[0].rstrip("/")
@@ -7076,7 +7113,10 @@ def test_lecore_027_gpu_report_and_advice():
     a = accel_status()
     assert "accel" in a and "jit" in a          # the original contract survives
 
-    j = c.get("/api/status").json
+    # R71: /api/status answers with whatever is measured so far, because
+    # nothing a person is waiting on may block on the several seconds the
+    # capability report costs. A test asking ABOUT that report asks for it.
+    j = c.get("/api/status?wait=1").json
     assert isinstance(j["gpu"], bool), "the chip reads this as a flag"
     assert isinstance(j.get("advice", []), list)
 
@@ -7251,7 +7291,7 @@ def test_determinism_is_reported():
         mind().resource_policy(gpu="auto")
     assert accel_status()["determinism"]["bit_exact"] is True
 
-    j = c.get("/api/status").json
+    j = c.get("/api/status?wait=1").json     # R71: see the note above
     assert j["determinism"]["bit_exact"] is True
 
     ui = open(os.path.join(os.path.dirname(__file__), "..", "src", "lestudio",
@@ -13913,8 +13953,12 @@ def test_timeline_sovereignty_and_ui_repair():
                 "const clip=t.querySelector('.clipb');"
                 "return {n:t.querySelectorAll('button').length, bad,"
                 "vis:parseFloat(getComputedStyle(clip).opacity)>0.6};})()")
-            # 10 buttons: full-lock joined, then the field child (✥+)
-            assert lt and lt["n"] == 10 and lt["bad"] == 0 and lt["vis"], lt
+            # 11 buttons: full-lock joined, then the field child (✥+), then
+            # R63's 🔑 (who may paint on this layer). The count is a
+            # change-detector; `bad` is the real assertion -- every button
+            # must still FIT inside the tools bar at 660px tall, which is
+            # exactly what adding an eleventh could have broken.
+            assert lt and lt["n"] == 11 and lt["bad"] == 0 and lt["vis"], lt
             tr = pg.evaluate(
                 "(()=>{const cv=document.createElement('canvas');"
                 "const cx=cv.getContext('2d');const out=[];"
@@ -14851,7 +14895,11 @@ def test_control_coverage_sweep():
     props -= {"x", "y", "none", "axis"}
     # R5 W1's validation code quotes a few non-property strings inside the
     # edit_layer body (dunder/message text) -- not controls, drop them
-    props -= {"__iter__", "_sim_run", "edit_layer", "inf"}
+    props -= {"__iter__", "_sim_run", "edit_layer", "inf",
+              # R71: the bookkeeping for the slider-coalescing run. Same
+              # class as _sim_run above -- internal state quoted inside the
+              # body, not a layer property anyone could put a control on.
+              "_edit_run_t"}
     missing = [p for p in sorted(props)
                if not re.search(r"\b%s\b" % re.escape(p), ui)]
     assert not missing, \

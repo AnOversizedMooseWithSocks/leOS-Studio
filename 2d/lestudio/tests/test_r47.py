@@ -73,16 +73,31 @@ def test_r47_hatch_modes_line_hatch_both():
     d.layers[0].pixels[..., :3] = np.repeat(g, d.height, 0)[..., None]
     d.layers[0].pixels[..., 3] = 1.0
     Lh = d.add_layer("hatch").id
+    # R70 moved this contract. 'both' is VALUE-AWARE -- it reads pixels to
+    # find the darks -- and it used to read the flattened picture with no
+    # parameter, so shading a clean layer over someone's gradient behaved
+    # one way and shading the gradient itself behaved another, invisibly.
+    # "Each layer is separate": the read is now the layer unless asked,
+    # and reading the drawing UNDERNEATH the shading layer -- which is the
+    # technique this test is about -- is sample='below'.
     n_line = d.hatch_fill(Lh, 100, 75, radius=60, mode="line", seed=3)
     d.undo()
     n_hatch = d.hatch_fill(Lh, 100, 75, radius=60, mode="hatch", seed=3)
     d.undo()
-    n_both = d.hatch_fill(Lh, 100, 75, radius=60, mode="both", seed=3)
+    n_both = d.hatch_fill(Lh, 100, 75, radius=60, mode="both", seed=3,
+                          sample="below")
     assert n_line > 0 and n_hatch > n_line, \
         "'hatch' adds a cross pass everywhere, so it must out-stroke 'line'"
     assert n_line < n_both <= n_hatch, \
         "'both' crosses only the darks: between 'line' and 'hatch'"
     assert d.replay_is_faithful(Lh)
+    # ...and the DEFAULT reads the (empty) shading layer. There is nothing
+    # to read, so rather than fading to almost nothing -- which is what a
+    # pure-white read means to the value-aware pass, and reads as a broken
+    # tool -- 'both' falls back to its plain line pass.
+    d.undo()
+    n_alone = d.hatch_fill(Lh, 100, 75, radius=60, mode="both", seed=3)
+    assert n_alone == n_line, (n_alone, n_line)
 
 
 def test_r47_hatch_in_feathered_selection_area():

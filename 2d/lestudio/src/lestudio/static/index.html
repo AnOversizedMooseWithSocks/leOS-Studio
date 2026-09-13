@@ -29,6 +29,20 @@ button.active{border-color:var(--wire-a);color:var(--ink-hi);
   background:linear-gradient(120deg,rgba(85,224,212,.14),rgba(154,123,255,.14))}
 button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--wire-a);outline-offset:1px}
 #top{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line)}
+/* R58: the top bar must never wrap -- at laptop widths its buttons broke
+   into two-line pills and the tagline wrapped under the wordmark. Buttons
+   stay one line; the tagline goes first, then the gaps tighten. */
+#top>*,#top button,#top select{white-space:nowrap;flex-shrink:0}
+#top #brand{white-space:nowrap}
+@media (max-width:1240px){#top #brand small{display:none}}
+@media (max-width:1100px){#top{gap:6px;padding:6px 8px}}
+/* R60: nowrap alone pushed the PAGE sideways on a narrow window -- measured
+   185px of horizontal page scroll at 760px wide, with Share, Lights and
+   Persp off the right edge and unreachable. The bar scrolls itself now, so
+   the page never does and every control stays reachable. */
+#top{overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
+#top::-webkit-scrollbar{height:6px}
+#top::-webkit-scrollbar-thumb{background:var(--ink-dim);border-radius:3px}
 #brand{font-family:var(--mono);font-size:14px;letter-spacing:.04em;color:var(--ink-hi)}
 #brand b{background:linear-gradient(90deg,var(--wire-a),var(--wire-b));-webkit-background-clip:text;background-clip:text;color:transparent}
 #brand small{color:var(--ink-dim);font-size:10px;margin-left:8px;letter-spacing:.12em;text-transform:uppercase}
@@ -55,6 +69,15 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid 
 .keydia.hollow{color:var(--ink-dim)}
 .keydia.dirty{text-shadow:0 0 4px #e07030;color:#e07030}
 .doctab{display:flex;align-items:center;gap:7px;padding:3px 11px;border:1px solid var(--line);border-bottom:none;border-radius:7px 7px 0 0;background:var(--panel2);cursor:pointer;font-size:12px;white-space:nowrap;transition:background .12s}
+/* R59: with twenty documents open the strip ran off the right edge and the
+   ACTIVE tab could be the one off-screen -- you could not see which
+   document you were in. Names now ellipsise, the strip scrolls with the
+   wheel, and the active tab is always scrolled into view. */
+.doctab>span{overflow:hidden;text-overflow:ellipsis;max-width:15ch}
+.doctab.on>span{max-width:26ch}
+#docbar{scrollbar-width:thin}
+#docbar::-webkit-scrollbar{height:7px}
+#docbar::-webkit-scrollbar-thumb{background:var(--ink-dim);border-radius:4px}
 .doctab:hover{background:var(--panel)}
 .doctab.on{border-color:var(--wire-a);color:var(--ink-hi);background:linear-gradient(120deg,rgba(85,224,212,.12),rgba(154,123,255,.12))}
 .doctab .x{background:none;border:none;padding:0;color:var(--ink-dim);cursor:pointer}
@@ -82,6 +105,10 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid 
 .tgc::after{content:'';position:absolute;right:2px;bottom:2px;width:0;height:0;
   border-left:5px solid transparent;border-bottom:5px solid var(--ink-dim)}
 .tgrp:hover .tgc::after{border-bottom-color:var(--wire-a)}
+/* R60: the caret is focusable now -- give it a ring, and make it show
+   its arrow while focused so the keyboard user can see where they are */
+.tgc:focus-visible{outline:2px solid var(--wire-a);outline-offset:1px;border-radius:3px}
+.tgc:focus-visible::after{border-bottom-color:var(--wire-a)}
 .tgrp.solo .tgc,.tgrp.open .tgc{display:none}
 
 /* stage: canvas mode = single pane; nodes mode = 2x2 grid (canvas | output / node editor) */
@@ -99,6 +126,18 @@ button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid 
 #nodePane{display:none;grid-area:2/1/3/3;background:var(--bg)}
 #stage.nodes #nodePane{display:block}
 #view{position:absolute;box-shadow:var(--shadow);border-radius:2px}
+/* R58: every surface that draws with the pointer must opt OUT of browser
+   gestures. Without touch-action:none a pen display, Surface, iPad or
+   touchscreen laptop delivers pointerdown + one move, then POINTERCANCEL --
+   the browser takes the drag as a scroll -- so a stroke collapsed to a
+   single dab and the client was left mid-stroke. The canvas pane, its
+   overlays and gizmos, and every panel widget that calls
+   setPointerCapture (curve/ramp editors, the timeline strip, the drip
+   compass, colour pickers, the 3D preview) get it. user-select:none keeps
+   a mouse drag from selecting the page's text as a side effect. */
+#canvasPane,#canvasPane canvas,#canvasPane svg,#lgiz,#overlay,#tlStrip,
+.cpsv,.cphue,.cpalpha,#glCanvas,#dripCompass,#palCanvas,canvas.ramp,
+[data-drag],.dragsurf{touch-action:none;user-select:none;-webkit-user-select:none}
 .hud{position:absolute;top:8px;left:10px;z-index:7;display:flex;gap:8px;align-items:center;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 10px;box-shadow:var(--shadow);flex-wrap:wrap;max-width:92%}
 .hud select,.hud input[type=number]{background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:5px;padding:3px 6px;font-size:11px}
 #toolDock .hud{position:static;top:auto;left:auto;background:none;border:none;box-shadow:none;padding:0;margin:0;max-width:none;display:flex;flex-direction:column;align-items:stretch;gap:8px}
@@ -149,6 +188,16 @@ body.wiring{cursor:crosshair}
 .animBtn:hover{opacity:1}
 .mitem.tpl{color:#c9a6ff}
 .mtplhead{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-dim);padding:6px 10px 2px}
+/* R59: the intro tip and the autosave banner both sat bottom-centre over
+   the canvas, together hiding the lower fifth of the picture. They now
+   share ONE bottom stack that grows upward (so they can never overlap each
+   other), and the tip retires itself the moment the person paints -- it has
+   said what it had to say by then. */
+#bannerStack{position:fixed;left:50%;transform:translateX(-50%);bottom:14px;z-index:60;
+  display:flex;flex-direction:column-reverse;gap:8px;align-items:center;
+  pointer-events:none;max-width:min(92vw,660px)}
+#bannerStack>*{pointer-events:auto;position:static !important;left:auto !important;
+  bottom:auto !important;transform:none !important}
 #firstRun{position:fixed;left:50%;transform:translateX(-50%);bottom:64px;z-index:59;
   background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 13px;
   display:none;gap:12px;align-items:center;box-shadow:var(--shadow);font-size:12px;
@@ -179,8 +228,33 @@ body.wiring{cursor:crosshair}
 .sidegroup{display:flex;flex-direction:column;min-height:0;flex:1 1 0}
 #groupA{flex:0 1 auto;max-height:55%}
 #groupB{flex:1 1 0;border-top:2px solid var(--line)}
+/* R59: at 800px tall the Layers half cut "Layer options" in half against
+   the Brush tab header. The body DID scroll, but with no sign that it
+   did -- so a clipped button read as a broken layout, not as "there is
+   more below". Two answers, both needed: the split between the halves is
+   now DRAGGABLE (and remembered), and a body with more content than room
+   fades at its bottom edge so the scroll is visible. */
+/* The grabber costs ZERO layout height -- it hangs over the border between
+   the halves as a pseudo-element. A 7px in-flow bar took 7px from the
+   Brush half and broke its "painting sliders never need a scroll at
+   desktop size" contract by 5px, which is a pin, and rightly so. */
+#sideSplit{flex:none;height:0;position:relative;z-index:3;touch-action:none}
+#sideSplit::before{content:'';position:absolute;left:0;right:0;top:-4px;height:9px;
+  cursor:row-resize}
+#sideSplit::after{content:'';position:absolute;left:50%;top:-1px;width:26px;height:2px;
+  margin-left:-13px;border-radius:2px;background:var(--ink-dim);opacity:0;
+  transition:opacity .12s;pointer-events:none}
+#sideSplit:hover::after{opacity:.85}
+#side.split #groupA{max-height:none}
+.sidebody.more{-webkit-mask-image:linear-gradient(180deg,#000 calc(100% - 22px),transparent);
+  mask-image:linear-gradient(180deg,#000 calc(100% - 22px),transparent)}
 .sidetabs{display:flex;border-bottom:1px solid var(--line);background:var(--panel2);flex:none}
-.sidetabs button{flex:1;border:none;border-radius:0;background:none;padding:7px 0;font-size:11px;letter-spacing:.02em;color:var(--ink-dim);border-bottom:2px solid transparent;white-space:nowrap}
+.sidetabs button{flex:1;border:none;border-radius:0;background:none;padding:7px 0;font-size:11px;letter-spacing:.02em;color:var(--ink-dim);border-bottom:2px solid transparent;white-space:nowrap;
+  /* R60: without min-width:0 a flex item will not shrink below its own
+     text, so at a 196px panel the fourth tab (Splines) hung 12px past
+     the right edge, unclickable. Truncate instead -- the icon and the
+     title attribute still say which tab it is. */
+  min-width:0;overflow:hidden;text-overflow:ellipsis}
 .sidetabs button:hover{color:var(--ink-hi)}
 .sidetabs button.on{color:var(--ink-hi);border-bottom-color:var(--wire-a);background:linear-gradient(180deg,transparent,rgba(85,224,212,.07))}
 .sidebody{flex:1;overflow-y:auto;min-height:0}
@@ -256,7 +330,14 @@ body.wiring{cursor:crosshair}
 #modalBack,#modalBack2,#glModalBack{position:fixed;inset:0;background:rgba(8,10,16,.65);backdrop-filter:blur(2px);z-index:50;display:flex;align-items:center;justify-content:center}
 #glModal{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;box-shadow:var(--shadow)}
 #glCanvas{border-radius:6px;background:#000;display:block;cursor:grab;max-width:calc(96vw - 60px);max-height:calc(88vh - 90px);object-fit:contain}
-#toast{position:fixed;left:50%;bottom:46px;transform:translate(-50%,14px);background:#2a1518;color:#ffd7d7;border:1px solid #a33;border-radius:8px;padding:8px 16px;font-size:12px;opacity:0;pointer-events:none;transition:all .25s;z-index:99}
+/* R71: z-index 99 put the toast BEHIND every overlay that stacks above it --
+   the leCore panel (300), the replay dialog and the kicked banner (200). So a
+   failure raised from inside one of those panels was reported to a strip of
+   pixels nobody could see, and the button read as dead. Two real cases
+   measured: "Grade -> GLSL" with no grade nodes, and "Dream v2" with too few
+   references. A message about what just failed must outrank whatever the
+   person is looking at. */
+#toast{position:fixed;left:50%;bottom:46px;transform:translate(-50%,14px);background:#2a1518;color:#ffd7d7;border:1px solid #a33;border-radius:8px;padding:8px 16px;font-size:12px;opacity:0;pointer-events:none;transition:all .25s;z-index:2000}
 #toast.info{background:#12241a;color:#c9f2d8;border-color:#2a7}
 #toast.show{opacity:1;transform:translate(-50%,0)}
 .tbm{position:relative;display:inline-block}
@@ -281,11 +362,56 @@ button.primary{border-color:var(--wire-a);color:var(--ink-hi);background:linear-
 #playBtn.on{border-color:var(--wire-a);color:var(--ink-hi)}
 #liveBtn.on{border-color:#ff5470;color:#ff8298;background:rgba(255,84,112,.12);animation:livepulse 1.6s ease-in-out infinite}
 @keyframes livepulse{0%,100%{box-shadow:0 0 0 0 rgba(255,84,112,.25)}50%{box-shadow:0 0 8px 2px rgba(255,84,112,.22)}}
+/* R71 -- Devin: "there's no indication that we are supposed to be waiting
+   for a result to be rendered. There should be a status bar or an indicator
+   that a task is being worked on when that happens."
+   A tool that round-trips to the engine leaves the canvas looking idle, so
+   a person cannot tell a slow tool from a dead one. This says which tool is
+   working, and only appears once the wait is long enough to notice (250 ms)
+   so ordinary fast work never flickers a badge. */
+#busyBadge{position:absolute;top:8px;left:50%;transform:translateX(-50%);
+  z-index:8;display:flex;align-items:center;gap:7px;pointer-events:none;
+  padding:5px 11px;border-radius:13px;font-size:12px;
+  background:rgba(18,20,28,.88);color:var(--ink-hi);
+  border:1px solid var(--line);box-shadow:0 2px 10px rgba(0,0,0,.35);
+  animation:busyIn .16s ease-out}
+@keyframes busyIn{from{opacity:0;transform:translate(-50%,-4px)}to{opacity:1;transform:translate(-50%,0)}}
+#busyBadge .spin{width:11px;height:11px;flex:0 0 auto;border-radius:50%;
+  border:2px solid var(--wire-a);border-top-color:transparent;
+  animation:busySpin .7s linear infinite}
+@keyframes busySpin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){
+  #busyBadge{animation:none}
+  #busyBadge .spin{animation:busySpin 2.4s linear infinite}
+}
+#canvasPane.busy{cursor:progress}
 .row{display:flex;align-items:center;gap:5px;margin:1px 0;min-height:18px;flex-wrap:wrap}
 .row label{flex:0 0 62px;color:var(--ink-dim);font-size:12px}
 .row input[type=range]{flex:1;accent-color:var(--wire-a);min-width:0}
 #bRail{flex:1 1 40px;min-width:40px;max-width:96px}
 .row label.inl{flex:0 0 auto;width:auto;margin-left:4px}
+/* R70: the paint-gate row carries three controls -- the selection, its
+   invert, and which layers a tool may READ -- in a 207px panel. The
+   default 62px label plus two intrinsically-wide selects wrapped it onto
+   three lines and pushed the brush panel past the viewport (the measured
+   fit contract in test_layout_fits_the_viewport). Size it explicitly. */
+/* R70: one row carries what a tool may TOUCH (the selection gate, and
+   its invert) and what it may SEE (which layers it reads). The default
+   62px label plus two intrinsically-wide selects wrapped it onto three
+   lines and pushed the brush panel past the viewport, which the measured
+   fit contract in test_layout_fits_the_viewport catches; the labels go
+   and the selects say what they are. The widths are the narrowest that
+   do not truncate their own longest option -- measured for real by the
+   select-truncation check in test_timeline_sovereignty_and_ui_repair. */
+#bGateRow{gap:4px}
+#bGateRow>#bSel{flex:1 1 78px;min-width:78px}
+/* a button, not a select: it sizes to its own text instead of reserving
+   the ~26px a select spends on its arrow, which is the difference
+   between this row fitting on one line and the brush panel scrolling. */
+#bGateRow>#bSample{flex:0 0 auto;font-size:11px;padding:1px 5px;white-space:nowrap}
+#bGateRow>#bSample[data-value="below"],
+#bGateRow>#bSample[data-value="composite"]{border-color:var(--wire-a);color:var(--ink-hi)}
+
 #lStyle{width:72px;flex:0 0 auto;padding:2px 2px}
 #bMirror{width:44px;flex:0 0 auto}
 .row{min-width:0}
@@ -298,6 +424,27 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
 #layers{display:flex;flex-direction:column;gap:4px;max-height:34vh;overflow-y:auto;overscroll-behavior:contain}
 .layer{display:flex;align-items:center;gap:6px;padding:5px 7px;border:1px solid var(--line);border-radius:5px;background:var(--panel2);cursor:pointer;flex-wrap:wrap}
 .layer .stat{font-size:10px;opacity:.75;flex:0 0 auto}
+/* R63 -- WHOSE layer is this. The badge is deliberately ABSENT in a solo
+   session (see ownerBadge()): a lock label on every row of a picture only
+   you are painting teaches nothing and eats the name's width. It appears
+   the moment the document is actually shared. */
+.layer .ownb{font-family:var(--mono);font-size:9px;padding:1px 6px;border-radius:8px;border:1px solid var(--line);flex:0 0 auto;white-space:nowrap;background:none;color:var(--ink-dim);cursor:default}
+.layer .ownb.mine{color:var(--wire-a);border-color:rgba(85,224,212,.4)}
+.layer .ownb.theirs{color:#e8b26a;border-color:rgba(232,178,106,.45);cursor:pointer}
+.layer .ownb.theirs:hover{background:rgba(232,178,106,.12);color:#f3c88a}
+.layer .ownb.bot{color:#b98ce8;border-color:rgba(185,140,232,.45)}
+#accessChip.hot{color:#e8b26a;border-color:#6a5426}
+/* the ownership refusal banner: never a bare toast -- a refusal with no way
+   forward is the reason the whole access flow exists */
+.accessBanner{display:flex;gap:9px;align-items:center;flex-wrap:wrap;background:var(--panel2);border:1px solid #6a5426;border-radius:10px;padding:8px 12px;box-shadow:var(--shadow);font-size:12px;max-width:min(92vw,620px)}
+.accessBanner b{color:var(--ink-hi)}
+.arow{display:flex;align-items:center;gap:6px;font-size:11px}
+.arow .an{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.arow button{font-size:10px;padding:2px 8px}
+#agentBrief{width:100%;box-sizing:border-box;font:12px/1.45 var(--mono),ui-monospace,monospace;background:var(--panel2);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:6px 7px;resize:vertical}
+#agentEffective,#agentReading{white-space:pre-wrap;font-size:11px;line-height:1.45;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:6px 7px}
+#agentReading{font-family:var(--mono);font-size:10px}
+#agentReading .warnr{color:#e8b26a}
 .ltools{flex-basis:100%;display:flex;align-items:center;gap:3px;padding:2px 0 0 24px;border-top:1px dashed var(--line);margin-top:3px;flex-wrap:wrap;height:auto}
 .ltools .rowbtn{opacity:1}
 .ltools .togoff{opacity:.75;color:var(--ink-dim)}
@@ -378,6 +525,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
   <button id="tabCanvas" class="active">Canvas</button>
   <button id="tabNodes">Node graph</button><select id="viewMode" title="The document camera. Flat: the classic realtime canvas. Ortho 3D / Persp 3D: layers become SLABS — thickness, refraction through water and glass, coloured absorption, fog, clouds — composited looking straight down (ortho) or with depth parallax (persp)."><option value="flat">Flat</option><option value="ortho">Ortho 3D</option><option value="persp">Persp 3D</option></select><select id="vantage" style="display:none" title="Which SIDE of the refracting sheets you stand on. Above: you see the water's own surface, its reflections and refraction. Below: the surface becomes a rippling ceiling — dispersion splits colour and the caustics swim toward you."><option value="above">↑ Above surface</option><option value="below">↓ Below surface</option></select>
   <button id="presenceChip" style="display:none;font-family:var(--mono);font-size:10px;color:var(--wire-a);border:1px solid var(--line);border-radius:10px;padding:2px 8px;background:none;cursor:pointer" title="Who is editing — click for the list">👥</button>
+  <button id="accessChip" style="display:none;font-family:var(--mono);font-size:10px;color:var(--ink-dim);border:1px solid var(--line);border-radius:10px;padding:2px 8px;background:none;cursor:pointer" title="Layer access — who may paint on whose layers">&#128273;</button>
   <span id="accelChip" style="font-family:var(--mono);font-size:10px;color:var(--ink-dim);border:1px solid var(--line);border-radius:10px;padding:2px 8px"></span>
   <span class="spacer"></span>
   <input type="file" id="file" accept="image/*" style="display:none">
@@ -525,6 +673,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
     </div>
   </div>
   <div id="stage">
+    <div id="bannerStack"></div>
     <div id="firstRun">
     <span>Pick a colour and just paint — <b>B</b> brush, <b>E</b> eraser, <b>Ctrl+Z</b> undo.
       For real paint you can dip a brush into, choose a studio from <b>Media</b> in the Brush panel.</span>
@@ -554,7 +703,9 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
       <div class="row" id="lcC2Row"><label style="width:52px" title="Ground-bounce colour for the dome environment">Ground</label><input type="color" id="lcColor2"></div>
       <div class="row"><label style="width:52px">Scale</label><input type="range" id="lcScale" min="10" max="400" title="Physical size — broadens the pool (also: drag the outer ring)"><span class="val" id="lcScaleV"></span></div>
     </div>
-    <div id="brushRing"></div><div id="brushRingCore"></div><span class="cap" id="canvasCap"></span><canvas id="view"></canvas><canvas id="overlay"></canvas>
+    <div id="brushRing"></div><div id="brushRingCore"></div><span class="cap" id="canvasCap"></span>
+    <div id="busyBadge" role="status" aria-live="polite" hidden><span class="spin" aria-hidden="true"></span><span id="busyText">working…</span></div>
+    <canvas id="view"></canvas><canvas id="overlay"></canvas>
       <div id="trHud" class="hud" style="display:none">
         <select id="trTarget2"></select>
         <span id="trRead" class="mu"></span>
@@ -566,6 +717,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
         <label class="mu" title="How curly: 0 loose jitter, 100 tight swirls">curl <input type="range" id="scCurl" min="0" max="100" value="55" style="width:70px"></label>
         <label class="mu" title="Line thickness (px)">th <input type="number" id="scThick" value="1.6" step="0.2" min="0.4" max="12" style="width:52px"></label>
         <label class="mu" title="Strand density">dens <input type="range" id="scDens" min="20" max="300" value="100" style="width:70px"></label>
+        <button class="genBrushLink mu" title="These tools are brushes: size, colour, opacity, hardness and the selection gate all come from the Brush panel. This opens it." style="background:none;border:0;padding:0;color:var(--acc);cursor:pointer;text-decoration:underline">brush settings ↗</button>
       </div>
       <div id="hatchHud" class="hud" style="display:none">
         <select id="haMode" title="line: one direction · hatch: crossed everywhere · both: value-aware — cross-hatch in the darks fading to plain lines · weave: interleaved cloth threads · cross: cross-stitch Xs · stitch: satin-stitch embroidery with a sheen pass">
@@ -580,6 +732,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
         <label class="mu" title="Line spacing (px)">gap <input type="number" id="haSpace" value="7" step="1" min="3" max="40" style="width:52px"></label>
         <label class="mu" title="Line thickness (px)">th <input type="number" id="haThick" value="1.2" step="0.2" min="0.4" max="8" style="width:52px"></label>
         <label class="mu" title="Ignore the click point and shade the whole active selection (needs one)"><input type="checkbox" id="haArea">whole selection</label>
+        <button class="genBrushLink mu" title="These tools are brushes: size, colour, opacity, hardness and the selection gate all come from the Brush panel. This opens it." style="background:none;border:0;padding:0;color:var(--acc);cursor:pointer;text-decoration:underline">brush settings ↗</button>
       </div>
       <div id="textileHud" class="hud" style="display:none">
         <img id="txtPrev" width="95" height="70" title="Live swatch — rendered with the real thread generators at your current settings" style="border:1px solid var(--line);border-radius:4px;background:#f3f0e9;flex:0 0 auto">
@@ -590,7 +743,6 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
             <option value="cross">cross-stitch</option><option value="stitch" selected>embroidery (satin stitch)</option>
           </select>
           <span style="display:flex;gap:6px;align-items:center">
-            <input type="color" id="txtColor" value="#9e2640" title="Thread colour">
             <label class="mu" title="Thread thickness (px)">thread <input type="number" id="txtThick" value="1.6" step="0.2" min="0.4" max="8" style="width:48px"></label>
             <label class="mu" title="Stitch/thread spacing — the scale of the pattern">scale <input type="range" id="txtSpace" min="3" max="24" value="7" style="width:50px"></label>
           </span>
@@ -600,7 +752,9 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
           </span>
           <span style="display:flex;gap:6px;align-items:center">
             <label class="mu" title="Click inside any shape to fill that whole region with stitching (samples all layers)"><input type="checkbox" id="txtRegion" checked>fill clicked region</label>
-            <label class="mu" id="txtRadRow" title="Patch radius when not region-filling">r <input type="range" id="txtRadius" min="20" max="300" value="80" style="width:50px"></label>
+            <label class="mu" id="txtRadRow" title="Patch radius when not region-filling — the brush tool's size wins when it is set">r <input type="range" id="txtRadius" min="20" max="300" value="80" style="width:50px"></label>
+            <label class="mu" id="txtTolRow" title="Colour distance from the clicked pixel when filling a region">tol <input type="range" id="txtTol" min="1" max="60" value="12" style="width:50px"></label>
+            <button class="genBrushLink mu" title="These tools are brushes: size, colour, opacity, hardness and the selection gate all come from the Brush panel. This opens it." style="background:none;border:0;padding:0;color:var(--acc);cursor:pointer;text-decoration:underline">brush settings ↗</button>
           </span>
         </span>
       </div>
@@ -656,7 +810,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
         <span id="fiGenRow" style="display:none">
           <select id="fiHMode" title="line: one direction · hatch: crossed · both: value-aware, crossing only the darks · weave: cloth threads · cross: cross-stitch · stitch: satin embroidery"><option value="both">both</option><option value="line">line</option><option value="hatch">hatch</option><option value="weave">weave</option><option value="cross">cross-stitch</option><option value="stitch">embroidery</option></select>
           <label class="mu" title="Curl for scribble fills: 0 loose, 100 tight swirls">curl <input type="range" id="fiCurl" min="0" max="100" value="55" style="width:60px"></label>
-          <label class="mu" title="Flood the flattened picture instead of the active layer — shade onto a clean layer above your lineart"><input type="checkbox" id="fiComp" checked>all layers</label>
+          <button class="genBrushLink mu" title="Which layers this fill reads lives in the Brush panel, with every other tool that reads pixels. This opens it." style="background:none;border:0;padding:0;color:var(--acc);cursor:pointer;text-decoration:underline">reads ↗</button>
         </span>
         <span id="fiScatRow" style="display:none">
           <select id="fiScEl" title="What to scatter across the region — every instance is journaled strokes, sized and counted by the perspective controls">
@@ -889,6 +1043,11 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
         <button id="selExpand" title="Grow the active selection outward by the px amount">Expand</button>
         <button id="selContract" title="Shrink the active selection inward by the px amount">Contract</button>
         <button id="selFeatherBtn" title="Soften the ACTIVE selection's edge by the px amount now (the slider above only affects new selections)">Feather</button>
+        <!-- R71: the engine has had invert all along (modify_selection op
+             'invert'), and the brush has a sel_invert flag, but there was no
+             way to invert a selection from the UI and no shortcut — a
+             reflex in every other editor, missing from this one. -->
+        <button id="selInvert" title="Select everything the active selection does NOT cover (Ctrl+Shift+I)">Invert</button>
         <label style="flex:0 0 auto;display:flex;gap:3px;align-items:center;font-size:11px" title="How many pixels Expand / Contract / Feather move by">by<input type="number" id="selAmt" value="4" min="1" max="64" style="width:44px">px</label>
       </div>
       <div class="subh">Use it</div>
@@ -912,11 +1071,13 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
     
       </div>
     </div>
+    <div id="sideSplit" title="Drag to give either half more room — double-click to even them up"></div>
     <div class="sidegroup" id="groupB">
       <div class="sidetabs" id="sidetabsB">
         <button data-st="brush" class="on" title="Brush &amp; stroke settings">🖌 Brush</button>
         <button data-st="tool" title="Settings for the active tool" style="display:none">⚙ Tool</button>
         <button data-st="node" title="Selected node properties">◈ Node</button>
+        <button data-st="agent" title="The agent working beside you — and the document prompt that tells it what to do">🤖 Agent</button>
       </div>
       <div class="sidebody" id="sidebodyB">
     
@@ -948,9 +1109,10 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
       <div class="row" id="bLoadRow" style="display:none"><label title="How much paint is on the brush for each stroke. Heavier loads build thicker ridges - and past what the medium can hold, gravity takes the excess downhill.">Load</label><input type="range" id="bLoad" min="10" max="150" value="60" title="How much paint the brush carries into each stroke."><span class="val" id="bLoadV">.60</span><label style="flex:0 0 auto;margin-left:8px" title="Wet-on-wet. At 0 the brush lays pure colour. Above 0 it PICKS UP the wet paint it crosses and carries it forward, so a stroke changes colour from the crossing onward - the way real paint mixes on the canvas rather than in a picker.">Mix</label><input type="range" id="bMix" min="0" max="100" value="0" style="flex:1 1 40px" title="How readily the brush lifts wet paint it crosses."><span class="val" id="bMixV">0</span></div><div class="row" id="bBrushModeRow" style="display:none"><label title="How the brush behaves as a physical object.">Brush</label><button id="bReal" style="flex:1 1 auto;font-size:10px" title="Turn the brush into a real one that RUNS OUT of paint. While it is on, the meter beside it shows how much is left; it empties as you work and eventually lays nothing. Reload by dragging across a colour in the palette strip below, or click the meter to fill it from the current colour. Off means an endless brush.">runs out</button><button id="bCharge" style="flex:0 0 62px;font-size:10px" title="Paint left on the brush. Click to fill it right up from the current colour." disabled>paint &#8734;</button><button id="bStrat" style="flex:1 1 auto;font-size:10px" title="Let paint build up past a layer's limit. A layer holds a finite amount; past that the surface stops getting thicker and a worked passage flattens to a plateau. With this on, the excess starts a new layer and the build-up keeps going - the way heavy impasto is built up in campaigns.">build up</button></div>
       <div class="row"><label>Smoothing</label><input type="range" id="bSmooth" title="Stroke smoothing: steadies shaky lines as you draw" min="0" max="95" value="0" style="min-width:0"><span class="val" id="bSmoothV">.00</span><label style="margin-left:6px;font-size:11px;white-space:nowrap" title="Inference — stroke starts snap to nearby stroke endpoints, and direction locks to VP rays, verticals, or horizontals">snap <input type="checkbox" id="bInfer" title="Inference assist: snaps stroke starts to nearby stroke ends and straightens toward vanishing points" style="vertical-align:middle"></label></div><div class="row"><label title="Ramp the stroke's width in at the start and out at the end — brush-pen feel; recorded into the stroke, so it replays and the joint tools still work on top">Taper</label><input type="range" id="bTaper" min="0" max="50" value="0" title="Fraction of the stroke that ramps at each end (0 = uniform width)"><span class="val" id="bTaperV">.00</span><label style="margin-left:4px;font-size:11px;white-space:nowrap" title="Shape assist: after a freehand stroke, offer to replace it with a clean circle, rectangle or line. Only offers when two independent recognisers agree — it stays quiet rather than guess. Press S to accept.">shapes <input type="checkbox" id="bShapeSnap" title="Shape assist: offer to tidy a freehand circle, rectangle or line into a clean one. Press S to accept the offer; it stays silent unless it is sure." style="vertical-align:middle"></label></div><div class="row" id="eModeRow" style="display:none"><label title="What the eraser removes">Eraser</label><select id="eMode" title="Eraser mode — pixels (classic), whole strokes, the topmost stroke only, paint-undo (restore the area to its pre-stroke state), or depth (carve the impasto body first). Shift+E cycles."><option value="pixel">▭ Pixels (classic)</option><option value="erase_strokes">✂ Whole strokes</option><option value="erase_top">≣ Topmost stroke (peel)</option><option value="erase_undo">⤺ Paint undo (history brush)</option><option value="erase_depth">⛏ Depth (carve impasto)</option></select></div>
       <div class="row"><label>Rail</label><select id="bRail" title="Constrain freehand strokes to slide along this spline"></select><label class="inl" title="Stream strokes to the server while dragging (needs a fast machine). Off: a lightweight preview is drawn and the stroke applies on release.">Live</label><input type="checkbox" id="bLive" title="Send the stroke to the engine WHILE dragging (off = only on release)"><label class="inl" title="Symmetry — every stroke paints twice, mirrored across the canvas centre. Both copies are real strokes: select, nudge, and edit them independently.">mirror</label><select id="bMirror" title="Mirror every stroke as you paint. Left-right and up-down mirror across the canvas centre; 'across' mirrors left-to-right and 'down' mirrors top-to-bottom; the N-way options repeat the stroke around the centre like a kaleidoscope. Every copy is a real stroke you can select and edit."><option value="">off</option><option value="v">across</option><option value="h">down</option><option value="3">3-way</option><option value="6">6-way</option><option value="8">8-way</option></select></div>
-      <div class="row"><label>Selection</label><select id="bSel" title="Paint only inside a selection, or leave it unset to paint anywhere on the layer. Selections are made with the marquee, wand and lasso tools."><option value="">anywhere</option></select>
-        <label style="flex:0 0 auto;display:flex;gap:4px;align-items:center;font-size:11px">
-          <input type="checkbox" id="bSelInv" title="Paint OUTSIDE the active selection instead of inside">inv</label></div>
+      <div class="row" id="bGateRow"><select id="bSel" title="Paint only inside a selection, or leave it unset to paint anywhere on the layer. Selections are made with the marquee, wand and lasso tools."><option value="">anywhere</option></select>
+        <label style="flex:0 0 auto;display:flex;gap:3px;align-items:center;font-size:11px">
+          <input type="checkbox" id="bSelInv" title="Paint OUTSIDE the active selection instead of inside">inv</label>
+        <button id="bSample" data-value="layer" title="Which layers a tool may READ when it has to look at the picture to decide what to do — the paint bucket finding its region, value-aware hatching finding the darks, the clone stamp finding its pixels, the wand finding its shape. It never changes what gets painted INTO: that is always the active layer. Click to cycle: this layer (the default, because each layer is separate) → this layer and the ones below it (how you shade or hatch on a clean layer over someone else&#39;s lineart) → every layer.">reads: layer</button></div>
     </div>
     <div class="sect" data-tab="tool" id="toolSect">
       <h3 id="toolSectTitle">Tool</h3>
@@ -974,9 +1136,40 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
       </div>
       <div id="toolDockEmpty" class="mu" style="font-size:12px">This tool has no settings. Brush-family tools use the Brush tab.</div>
     </div>
+    <!-- R63: the agent that works beside you. The rules it obeys live on the
+         server (CONTRACT.md); this panel is where a person SAYS what they want
+         it doing, and sees what it has made. -->
+    <div class="sect" data-tab="agent" id="agentSect">
+      <h3 class="dup">Agent</h3>
+      <div class="mu" style="font-size:11px;line-height:1.45;margin-bottom:7px">An agent can sit in this document beside you. It watches what you paint, waits until you stop for a moment, and then works <b>on its own layers</b> — never on yours. Everything it makes is yours to keep, hide, merge or throw away.</div>
+      <div class="subh" title="The standing instruction for any agent connected to this document. Saved with the picture.">Document prompt</div>
+      <div class="mu" style="font-size:10px;margin-bottom:4px">What do you want it doing? Leave this empty and it quietly supports whatever you are painting.</div>
+      <textarea id="agentBrief" rows="6" spellcheck="false" title="What the agent should do in this document. Saved with the picture, so it is still here next time you open it."></textarea>
+      <div class="row" style="margin-top:5px">
+        <button id="agentBriefSave" class="primary" style="flex:1" title="Save this prompt with the document — any connected agent picks it up on its next check">Save prompt</button>
+        <button id="agentBriefClear" title="Clear the prompt and go back to quiet support">Use the default</button>
+      </div>
+      <div class="mu" id="agentBriefWho" style="font-size:10px;margin-top:4px"></div>
+      <div class="subh" title="Exactly what a connected agent is following right now — your prompt, or the default when you have not written one">Following right now</div>
+      <div id="agentEffective" class="mu"></div>
+      <div class="subh" title="How each connected agent says it read your prompt. If this is not what you meant, rewrite the prompt above — this is the loop.">How it read you</div>
+      <div id="agentReading" class="mu"></div>
+      <div class="row" style="margin-top:6px"><button id="agentPause" style="flex:1" title="Not right now. A paused agent keeps watching but paints nothing until you resume — no need to disconnect it or rewrite the prompt.">⏸ Pause the agent</button></div>
+      <div class="subh" title="Each thing an agent has done here, newest first. Every one can be taken back on its own — that one, no — without touching the rest of its work.">What it did</div>
+      <div id="agentAssists" style="display:flex;flex-direction:column;gap:4px"></div>
+      <div class="subh">Agents here</div>
+      <div id="agentWho" style="display:flex;flex-direction:column;gap:4px"></div>
+      <div class="subh" title="Layers an agent owns. It never touches yours; you can do anything you like to these.">Its layers</div>
+      <div id="agentLayers" style="display:flex;flex-direction:column;gap:4px"></div>
+    </div>
     <div class="sect" data-tab="node" id="propSect">
       <h3>Node</h3>
       <div id="props" style="color:var(--ink-dim);font-size:12px"></div>
+      <!-- R59: every other panel says what an empty state means; this one
+           showed a bare header and nothing at all -->
+      <div id="propsEmpty" class="emptynote">no node selected — open <b>Node
+        graph</b> and click a node to see what it does and set its
+        parameters</div>
     </div>
       </div>
     </div>
@@ -986,6 +1179,15 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
   <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-dim);margin-bottom:7px">Editors</div>
   <div id="editorsList" style="display:flex;flex-direction:column;gap:5px;max-height:40vh;overflow-y:auto"></div>
   <div class="mu" id="editorsNote" style="font-size:10px;margin-top:7px"></div>
+</div>
+<div id="accessPop" class="cpop" style="width:290px">
+  <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-dim);margin-bottom:7px">Layer access</div>
+  <div id="accessList" style="display:flex;flex-direction:column;gap:6px;max-height:46vh;overflow-y:auto"></div>
+  <div class="mu" style="font-size:10px;margin-top:8px">You automatically hold any layer you paint on, so nobody can paint over your work. Share one and they can edit it too. A lock left behind by someone who has gone (2 minutes silent) passes to whoever needs it, so a document is never frozen.</div>
+</div>
+<div id="sharePop" class="cpop" style="width:290px">
+  <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-dim);margin-bottom:7px" id="shareHead">Sharing</div>
+  <div id="shareBody" style="display:flex;flex-direction:column;gap:6px;max-height:46vh;overflow-y:auto"></div>
 </div>
 <div id="kickedBack" style="display:none;position:fixed;inset:0;background:rgba(8,10,16,.88);z-index:200;align-items:center;justify-content:center">
   <div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:26px 30px;max-width:380px;text-align:center">
@@ -1088,14 +1290,20 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
       </div>
     </div>
   </div>
-<div id="modalBack" style="display:none">
-  <div id="shortcutsBack" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:60" onclick="toggleShortcuts()">
-    <div style="max-width:560px;margin:6vh auto;max-height:88vh;overflow-y:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px 26px" onclick="event.stopPropagation()">
-      <h2 style="font-size:13px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:12px">Keyboard shortcuts</h2>
-      <div id="shortcutsBody" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;font-size:12px;line-height:1.9"></div>
-      <div class="mu" style="margin-top:10px">Press ? any time to toggle this.</div>
-    </div>
+<!-- R71: the shortcuts overlay used to be nested INSIDE #modalBack, which is
+     display:none except while the New-document dialog is open. So `?`, the
+     ? button and "Show me more" in the welcome banner all filled it with
+     10,000 characters of documentation and then showed a 0x0 box: the
+     single most important discoverability surface in the app could only be
+     seen by accident. It is its own top-level overlay now. -->
+<div id="shortcutsBack" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:210" onclick="toggleShortcuts()">
+  <div style="max-width:560px;margin:6vh auto;max-height:88vh;overflow-y:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px 26px" onclick="event.stopPropagation()">
+    <h2 style="font-size:13px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:12px">Keyboard shortcuts</h2>
+    <div id="shortcutsBody" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;font-size:12px;line-height:1.9"></div>
+    <div class="mu" style="margin-top:10px">Press ? any time to toggle this. Esc closes it.</div>
   </div>
+</div>
+<div id="modalBack" style="display:none">
   <div id="newDocModal">
     <h2>New document</h2>
     <div class="mrow"><label>Name</label><input id="ndName" type="text" placeholder="Untitled"></div>
@@ -1210,7 +1418,7 @@ let USER_NAME='';
 try{USER_NAME=localStorage.getItem('lestudio_name')||'';}catch(e){}
 let thumbTok=Date.now();      // layer-thumbnail cache key; moves on mutations only
 const HINT=$('hint')?$('hint').textContent:'';
-const TABGROUP={layers:'A',select:'A',masks:'A',splines:'A',brush:'B',tool:'B',node:'B'};
+const TABGROUP={layers:'A',select:'A',masks:'A',splines:'A',brush:'B',tool:'B',node:'B',agent:'B'};
 const tabState={A:'layers',B:'brush'};
 function sideTab(name){
   const g=TABGROUP[name]; if(!g)return;
@@ -1219,6 +1427,14 @@ function sideTab(name){
   document.querySelectorAll('#sidebody'+g+' .sect').forEach(s=>s.classList.toggle('on',s.dataset.tab===name));
 }
 document.querySelectorAll('.sidetabs button').forEach(b=>b.onclick=()=>sideTab(b.dataset.st));
+// R69: the generator brushes dock in the TOOL tab, but their nib, colour,
+// opacity, hardness and selection gate live in the BRUSH tab -- same tab
+// group, so only one can be on screen. Each generator panel carries a
+// link across rather than leaving the person to guess that the brush row
+// they cannot see is the one steering the tool.
+document.addEventListener('click',e=>{
+  if(e.target&&e.target.classList&&e.target.classList.contains('genBrushLink')) sideTab('brush');
+});
 sideTab('layers'); sideTab('brush');
 (function dockHuds(){
   const dock=$('toolDock'); if(!dock)return;
@@ -1417,7 +1633,7 @@ function ssOne(){
   return ssStrokes[0].id;
 }
 $('ssWidth').oninput=e=>{ $('ssWidthV').textContent=(e.target.value/100).toFixed(2); };
-$('ssWidth').onchange=async e=>{
+$('ssWidth').onchange=async e=>gesture(async()=>{
   const w=+e.target.value/100;
   const id=ssOne(); if(!id)return;
   // With joints selected, swell just those; with none, taper the whole stroke.
@@ -1435,7 +1651,7 @@ $('ssWidth').onchange=async e=>{
   if(r&&r.error){toast('width: '+r.error);return;}
   await strokeSelRefresh(); await drawCompositeOnce(); repaintCanvas();
   toast(mine.length? mine.length+' joint(s) widened' : 'stroke tapered to '+w.toFixed(2)+' at the tip','info');
-};
+});
 $('ssFx').onclick=()=>{
   if(!ssStrokes.length){toast('select some strokes first');return;}
   const ids=ssStrokes.map(s=>s.id).join(',');
@@ -2108,6 +2324,11 @@ async function setLayerVolume(kind){
       :{reflect:0,dispersion:0};
     const r=await api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:sel,...patch})});
     if(r&&r.error){toast(r.error);return;}
+    // R60: these are properties of a WATER or GLASS slab seen in a 3D view.
+    // On flat paint they changed a number that nothing reads, and the toast
+    // below still announced success -- measured 0 pixels different, in every
+    // view. The server says what actually happened; say THAT instead.
+    if(r&&r.warning){ await refresh(); toast(r.warning,'warn'); return; }
     await refresh(); drawComposite();
     toast(kind==='reflect'?'the water now MIRRORS the scene above its waterline'
       :kind==='disp'?'refraction now splits per channel — rainbow fringes on edges under this slab'
@@ -2280,7 +2501,12 @@ async function mediaBurstAfterStroke(lid){
 // R6 menu IA: the slab-posing verbs are invisible no-ops in the Flat view
 // (nothing shows tilt or dome until a 3D camera looks at the stack), so they
 // only appear in Ortho/Persp. Contact-print affects pixels, so it stays.
-const POSE_ONLY_ACTIONS=['vol_tilt','vol_lower','vol_raise','vol_domeup','vol_dish'];
+// R60: reflect and dispersion join the pose verbs -- on a real water or
+// glass slab they are just as invisible in Flat view as a tilt is (the
+// flat composite has no waterline to show them on). vol_optoff stays
+// out for the same reason vol_print does: it is a real edit either way.
+const POSE_ONLY_ACTIONS=['vol_tilt','vol_lower','vol_raise','vol_domeup','vol_dish',
+  'vol_reflect','vol_disp'];
 function syncActionMenu(){
   const flat=($('viewMode').value||'flat')==='flat';
   [...$('lActions').options].forEach(o=>{
@@ -2400,14 +2626,19 @@ $('ssToLayer').onclick=async()=>{
      title:'Where the strokes — ink and all — move to'}],'Move');
   if(!v)return;
   let target=v.target;
-  if(target==='__new__'){
-    const nr=await api('/api/layer',{...J,body:JSON.stringify({action:'add',name:'Strokes'})});
-    if(nr&&nr.error){toast(nr.error);return;}
-    const st=await api('/api/state'); state.layers=st.layers;
-    target=state.layers[state.layers.length-1].id;
-  }
-  const r=await api('/api/strokes/tolayer',{...J,body:JSON.stringify(
-    {ids:ssStrokes.map(s=>s.id), layer:target})});
+  // R71: making the destination layer and moving the strokes into it is one
+  // act -- one Ctrl+Z used to leave an empty "Strokes" layer behind.
+  const r=await gesture(async()=>{
+    if(target==='__new__'){
+      const nr=await api('/api/layer',{...J,body:JSON.stringify({action:'add',name:'Strokes'})});
+      if(nr&&nr.error){toast(nr.error);return null;}
+      const st=await api('/api/state'); state.layers=st.layers;
+      target=state.layers[state.layers.length-1].id;
+    }
+    return await api('/api/strokes/tolayer',{...J,body:JSON.stringify(
+      {ids:ssStrokes.map(s=>s.id), layer:target})});
+  });
+  if(!r)return;
   if(r&&r.error){toast('to layer: '+r.error);return;}
   sel=target;                              // follow the strokes to their new home
   strokeOpRefresh('moved '+r.moved+' stroke'+(r.moved===1?'':'s'));
@@ -2739,15 +2970,23 @@ function dsPhys(){
 ['dsW','dsH','dsDpi'].forEach(id=>$(id).addEventListener('input',dsPhys));
 $('dsCancel').onclick=()=>{$('modalBack2').style.display='none';};
 $('modalBack2').onclick=e=>{ if(e.target===$('modalBack2'))$('modalBack2').style.display='none'; };
-$('dsApply').onclick=async()=>{
+$('dsApply').onclick=async()=>gesture(async()=>{
+  // R71: one Apply in the Image Size dialog is ONE act, even though it is
+  // up to three requests (the resize, the re-vector, the resource reload).
   $('modalBack2').style.display='none';
   const newW=Math.max(8,Math.min(16384,+$('dsW').value||state.width));
-  await api('/api/doc',{...J,body:JSON.stringify({action:'settings',
+  // R71: this threw the result away, and '/api/doc' is on the quiet list --
+  // so a DPI of -5 came back as a 400, the toast was suppressed, the dialog
+  // closed, and the valid width change went with it. A rejected Apply must
+  // say so, and must not look like it worked.
+  const _dpi=Math.round(+$('dsDpi').value);
+  const _ds=await api('/api/doc',{...J,quiet:true,body:JSON.stringify({action:'settings',
     name:$('dsName').value||undefined,
     width:newW,
     height:Math.max(8,Math.min(16384,+$('dsH').value||state.height)),
-    dpi:+$('dsDpi').value||undefined,
+    dpi:(isFinite(_dpi)&&_dpi>0)?Math.min(2400,_dpi):undefined,
     mode:$('dsMode').value})});
+  if(_ds&&_ds.error){ toast('image size: '+_ds.error); switchedDoc(); return; }
   // An IMAGE-size change scales the artwork, so the brush should scale with
   // it -- otherwise the next stroke is the wrong weight against everything
   // already on the canvas.
@@ -2771,7 +3010,7 @@ $('dsApply').onclick=async()=>{
     if(p&&p.ok)toast('image re-rendered from the original','info');
   }
   switchedDoc();
-};
+});
 function ndPhys(){
   const w=+$('ndW').value||0, h=+$('ndH').value||0, dpi=+$('ndDpi').value||72;
   $('ndPhys').textContent='= '+(w/dpi).toFixed(2)+' × '+(h/dpi).toFixed(2)+' in';
@@ -2806,6 +3045,123 @@ let zoom=1;
 const nv={x:40,y:40,k:1};
 let graph=[], nid=1;
 
+// R71 -- "Undo doesn't seem to work."
+//
+// It did, for a plain brush stroke. What did not was any gesture the client
+// sends as more than one mutating request: each took its own undo entry, so
+// one Ctrl+Z reverted a piece of the gesture nobody thinks of as a separate
+// act -- the relief behind stitching, the layer behind the first FX stroke,
+// one twin of a mirrored stroke, one dab of a stamp drag, one layer of a
+// solo -- and the picture did not move. Soloing a 12-layer document cost
+// twelve Ctrl+Z.
+//
+// `gesture()` marks the boundary. Everything inside one call shares an id;
+// the server keeps the undo entry the first request took and folds in the
+// rest. Nesting is safe: an inner gesture joins the outer one.
+// `var`, not `let`: api() is called during boot from code that runs above
+// this line, and a `let` in the temporal dead zone throws there ("Cannot
+// access 'GESTURE' before initialization") -- which is a page that half
+// loads, silently.
+var GESTURE=null, _gestureN=0, _gestureHold=0;
+
+// R71 -- "there's no indication that we are supposed to be waiting for a
+// result to be rendered."
+//
+// Every tool that reaches the engine has a round trip, and while it is in
+// flight the canvas looks exactly like a canvas with nothing happening. A
+// person cannot tell a slow tool from a broken one, so they click again --
+// which makes it slower. The badge names the work and appears only after
+// 250 ms, so the ordinary fast case never flashes anything; the pane also
+// takes a progress cursor, which is the cue people already know.
+//
+// It counts requests rather than being switched on and off by callers, so a
+// tool added tomorrow is covered without anyone remembering to do it.
+var BUSY={n:0, t:null, label:''};
+const BUSY_WORDS=[
+  [/\/api\/hatchfill/,   'shading'],
+  [/\/api\/scribble/,    'scribbling'],
+  [/\/api\/scatter/,     'scattering'],
+  [/\/api\/fill/,        'filling'],
+  [/\/api\/paint_batch/, 'painting'],
+  [/\/api\/paint/,       'painting'],
+  [/\/api\/nudge/,       'nudging'],
+  [/\/api\/transform/,   'transforming'],
+  [/\/api\/strokes\//,  'editing strokes'],
+  [/\/api\/media\//,    'advancing the medium'],
+  [/\/api\/select/,      'selecting'],
+  [/\/api\/stamp/,       'stamping'],
+  [/\/api\/text/,        'setting text'],
+  [/\/api\/place|\/api\/paste/, 'placing the image'],
+  [/\/api\/layer\/revector|\/api\/layer\/resource/, 're-rendering at the new size'],
+  [/\/api\/doc/,         'resizing'],
+  [/\/api\/workspace|\/api\/open|\/api\/save/, 'saving'],
+  [/\/api\/export/,      'exporting'],
+  [/\/api\/graph/,       'running the graph'],
+  [/\/api\/undo/,        'undoing'],
+  [/\/api\/redo/,        'redoing'],
+];
+function busyWord(p){
+  for(const [re,w] of BUSY_WORDS) if(re.test(p))return w;
+  return 'working';
+}
+function busyShow(){
+  const el=$('busyBadge'); if(!el)return;
+  $('busyText').textContent=BUSY.label+'…';
+  // sit just under the timeline strip, not on top of it -- the strip lives
+  // in the same pane and its height depends on whether animation is on
+  const tb=$('timebar');
+  const off=(tb&&tb.offsetParent)?(tb.getBoundingClientRect().height+10):8;
+  el.style.top=Math.round(off)+'px';
+  el.hidden=false;
+  const cp=$('canvasPane'); if(cp)cp.classList.add('busy');
+}
+function busyHide(){
+  const el=$('busyBadge'); if(el)el.hidden=true;
+  const cp=$('canvasPane'); if(cp)cp.classList.remove('busy');
+}
+function busyStart(p,label){
+  BUSY.n++;
+  if(BUSY.n===1){
+    BUSY.label=label||busyWord(p);
+    clearTimeout(BUSY.t);
+    BUSY.t=setTimeout(()=>{ if(BUSY.n>0)busyShow(); }, 250);
+  }
+  busyWatchdog();
+}
+function busyStop(){
+  BUSY.n=Math.max(0,BUSY.n-1);
+  if(!BUSY.n){ clearTimeout(BUSY.t); BUSY.t=null; clearTimeout(BUSY.dead); busyHide(); }
+}
+// A badge that never clears is worse than no badge: it says the app is busy
+// forever. If a response is lost in a way that skips busyStop (a body that
+// fails to parse, a tab suspended mid-request), the count is reset rather
+// than left to leak.
+function busyWatchdog(){
+  clearTimeout(BUSY.dead);
+  BUSY.dead=setTimeout(()=>{ BUSY.n=0; busyHide(); }, 90000);
+}
+function gestureBegin(){                   // for a DRAG: open now, close on release
+  if(!GESTURE)GESTURE='g'+(++_gestureN)+'-'+Date.now().toString(36);
+  _gestureHold++;
+  return GESTURE;
+}
+function gestureEnd(){
+  if(_gestureHold>0)_gestureHold--;
+  if(!_gestureHold)GESTURE=null;
+}
+async function gesture(fn){
+  if(GESTURE)return await fn();            // already inside one: join it
+  gestureBegin();
+  try{ return await fn(); }
+  finally{ gestureEnd(); }
+}
+// Wrap a named async function so every mutating request it makes shares one
+// undo entry. Done by name rather than by editing twenty bodies, so the
+// list of what is one gesture reads as a list.
+function asGesture(name){
+  const f=window[name]; if(typeof f!=='function')return;
+  window[name]=function(...a){ return gesture(()=>f.apply(this,a)); };
+}
 async function api(p,opt){
   if(opt&&opt.method!=='GET'&&!/undo|redo|presence|events|state|autosave/.test(p)){
     DIRTY=true; thumbTok=Date.now();   // thumbs refetch only after a real change
@@ -2822,19 +3178,39 @@ async function api(p,opt){
   // client treated its OWN writes as foreign, running the full heavy refresh
   // (with its run/cancel job churn) after each of its own POSTs.
   opt=opt||{}; opt.headers=Object.assign({'X-Client':CLIENT_ID,'X-User':USER_ID}, opt.headers||{});
+  // R71: one gesture is one undo step. While a gesture is open every
+  // mutating request it sends carries the same id, and the server folds
+  // them into the undo entry the first one took. Sent as a HEADER so no
+  // route has to know about it and no request body has to be rewritten.
+  if(GESTURE&&opt.method&&opt.method!=='GET'&&!/\/api\/(undo|redo|history)\b/.test(p))
+    opt.headers['X-Gesture']=GESTURE;
+  // Poll-ish background traffic must never raise the badge: the person is
+  // not waiting on a presence ping or an SSE reconnect.
+  const _watch = !!(opt.method && opt.method!=='GET')
+    && !/\/api\/(events|presence|autosave|status|prefs|state)\b/.test(p);
+  if(_watch)busyStart(p,opt.busy);
   let r;
   try{
     r=await fetch(p,opt);
   }catch(netErr){
+    if(_watch)busyStop();
     // the server went away mid-action; a click that does nothing with no
     // explanation is the worst possible outcome
     toast('lost contact with leStudio — is it still running?');
     return {error:'network'};
   }
   const j = r.headers.get('content-type')?.includes('json') ? await r.json() : r;
+  if(_watch)busyStop();
   // Surface failures the caller does not handle. Every caller used to have to
   // remember to check r.error, and most did not, so a failed action simply did
   // nothing and the reason lived only in a log the user never sees.
+  // R63: the ownership refusal (CONTRACT.md's ONE shape, recognised by
+  // can_request) never becomes a bare toast. A refusal that only says "no"
+  // is exactly the dead end the access flow exists to remove, so it gets a
+  // banner with the way forward attached -- and it is thrown even when the
+  // caller asked to be quiet, because a silently discarded stroke is the
+  // worst outcome of all.
+  if(j && j.error && j.can_request && j.layer){ refusedForOwnership(j); return j; }
   if(j && j.error && !(opt && opt.quiet)){
     if(!apiQuiet.has(p.split('?')[0])) toast(friendlyError(p, j.error));
   }
@@ -2866,6 +3242,41 @@ function canvasDisplayWidth(){
   return Math.max(256, Math.round(Math.min(r.width, vc.width*zoom)*dpr));
 }
 let compCanvas=null, compCtx=null;
+// R59: THE CANVAS IS NOT READY UNTIL ITS PIXELS ARE. On a slow machine or a
+// big document the chrome paints about a second before the first composite
+// arrives, and every tool that READS the picture (eyedropper, clone source,
+// stroke selection) misbehaved in that window while looking perfectly
+// ready. One flag, one visible state, one guard on the tools that need it.
+function canvasReady(){ return !!lastComp; }
+// R71: after a layer operation, SELECT WHAT IT MADE. Merge left nothing
+// selected and duplicate left the original selected, and in both cases the
+// client's fallback picked the TOPMOST layer -- so the next stroke landed on
+// a layer the person had not chosen and could not see was chosen. The route
+// now names the layer to follow, and the reasons a no-op happened, so a
+// click that does nothing says why.
+function followLayerOp(r, verb){
+  if(!r||r.error)return r;
+  if(r.why){ toast(r.why,'info'); return r; }
+  if(r.select)sel=r.select;
+  if(r.merged_hidden&&r.merged_hidden.length)
+    toast('merged in '+r.merged_hidden.join(', ')
+          +' — hidden, but kept: the merge would otherwise have thrown '
+          +(r.merged_hidden.length===1?'it':'them')+' away','info');
+  else if(verb)setStatus(verb);
+  return r;
+}
+function setCanvasBusy(on){
+  const el=$('canvasCap'); if(!el)return;
+  if(on){ el.textContent='loading canvas…'; el.style.opacity='1'; vc.style.opacity='0.45'; }
+  else { el.textContent=''; vc.style.opacity=''; }
+}
+// tools that cannot work without pixels to read
+const NEEDPIX={pick:1,clone:1,strokesel:1,heal:1,smudge:1,wand:1,lum:1,obj:1};
+function needsPixels(t){
+  if(!NEEDPIX[t]||canvasReady())return false;
+  toast('the canvas is still loading — one moment','info');
+  return true;
+}
 function compIntoCanvas(img){
   // the backing canvas the region patches blit into. Full fetches repaint it
   // wholesale; patches replace just their window. lastComp stays a drawable
@@ -2877,6 +3288,7 @@ function compIntoCanvas(img){
   compCtx.clearRect(0,0,compCanvas.width,compCanvas.height);
   compCtx.drawImage(img,0,0);
   lastComp=compCanvas;
+  setCanvasBusy(false);
 }
 function applyCompPatch(p){
   // region-patch delivery: the server sends only the stroke's dirty window
@@ -2907,7 +3319,7 @@ function drawCompositeOnce(){          // like drawComposite, but awaitable so t
   return new Promise(res=>{             // resolved stroke is on screen before the
     const seq=++compSeq, img=new Image(); // local preview is dropped
     img.onload=()=>{ if(seq===compSeq){ compIntoCanvas(img); } res(); };
-    img.onerror=()=>res();
+    img.onerror=()=>{ setCanvasBusy(false); res(); };   // never dim forever
     img.src='/api/composite.png?fmt=auto&maxw='+canvasDisplayWidth()+'&t='+Date.now();
   });
 }
@@ -2915,6 +3327,7 @@ function drawComposite(){
   const seq=++compSeq, img=new Image();
   img.onload=()=>{ if(seq!==compSeq) return;             // stale response: drop
     compIntoCanvas(img); repaintCanvas(); };
+  img.onerror=()=>setCanvasBusy(false);
   img.src='/api/composite.png?fmt=auto&maxw='+canvasDisplayWidth()+'&t='+Date.now();
 }
 function repaintOverlay(){          // cheap: no image data touched
@@ -3073,8 +3486,17 @@ function setZoom(f,cx,cy){                        // zoom about a pane point (cx
 }
 function fitOutput(){ if(mode==='nodes') fitPane($('outImg'),$('outputPane')); }
 
+let _activeTab=null;
 function drawDocbar(){
-  const bar=$('docbar'); bar.innerHTML='';
+  const bar=$('docbar'); bar.innerHTML=''; _activeTab=null;
+  if(!bar._wheel){        // a horizontal strip should answer a vertical wheel
+    bar._wheel=true;
+    bar.addEventListener('wheel',e=>{
+      if(Math.abs(e.deltaY)<=Math.abs(e.deltaX))return;
+      if(bar.scrollWidth<=bar.clientWidth)return;
+      e.preventDefault(); bar.scrollLeft+=e.deltaY;
+    },{passive:false});
+  }
   for(const d of (state.docs||[])){
     const t=document.createElement('div'); t.className='doctab'+(d.active?' on':'');
     const nm=document.createElement('span');
@@ -3117,7 +3539,12 @@ function drawDocbar(){
       switchedDoc();
       toast('layer copied into "'+d.name+'"','info'); };
     bar.appendChild(t);
+    if(d.active)_activeTab=t;
   }
+  // keep the document you are IN on screen, however many are open
+  if(_activeTab)requestAnimationFrame(()=>{
+    try{ _activeTab.scrollIntoView({block:'nearest',inline:'nearest'}); }catch(e){}
+  });
   const peers=(state.peers||[]).filter(p=>!p.me);
   if(peers.length){
     const box=document.createElement('div');
@@ -3141,7 +3568,7 @@ function drawDocbar(){
 function switchedDoc(){          // per-document client state resets on switch
   sel=null; selNode=null; activeSel=null; curBrush=null; cloneSrc=null;
   graph=[]; GREV=null; BASE_GRAPH=[];    // new doc, new graph revision line
-  mergeChecks.clear(); antsIdx=null; lastComp=null;
+  mergeChecks.clear(); antsIdx=null; lastComp=null; setCanvasBusy(true);
   refresh().then(()=>{ if(mode==='nodes'){renderNodes(true); frameAll(); drawOutput();} });
 }
 function _syncCapButtons(){
@@ -3173,6 +3600,14 @@ async function refresh(){
   if(mode==='nodes'){ if(!document.querySelector('.node')) renderNodes(true); else refreshNodeParamPickers(); }
   $('canvasCap').textContent=mode==='nodes'?'Canvas':'';
   if(typeof syncDripButton==='function')syncDripButton();
+  // R63: ownership badges are drawn by drawLayers above; these two carry the
+  // parts of the same picture that live OUTSIDE the layer list
+  if(typeof syncAccessChip==='function')syncAccessChip();
+  if(typeof syncAgentPanel==='function')syncAgentPanel();
+  if(typeof syncPresenceChip==='function')syncPresenceChip(null);
+  // the count says someone is waiting but we have not fetched who yet
+  if(typeof pollAccess==='function'&&(state.access_pending||0)>
+     ACCESS_IN.filter(x=>x.state==='pending').length) pollAccess();
   if(typeof drawAnimStrip==='function'&&animOn)drawAnimStrip();
   setStatus();
   ensurePlayback();
@@ -3249,10 +3684,14 @@ function drawLayers(){
         gh.onclick=e=>{ if(e.target.tagName!=='BUTTON'){
           closed?groupCollapsed.delete(g.id):groupCollapsed.add(g.id); box.dataset.treekey=''; refresh();} };
         gh.querySelector('.eye').onclick=async e=>{e.stopPropagation();
-          const members=state.layers.filter(x=>g.layers.includes(x.id));
-          const anyVis=members.some(m=>m.visible);
-          for(const m of members)
-            await api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:m.id,visible:!anyVis})});
+          // R71: hiding a GROUP is one click, so it is one undo step --
+          // it used to be one entry per member layer.
+          await gesture(async()=>{
+            const members=state.layers.filter(x=>g.layers.includes(x.id));
+            const anyVis=members.some(m=>m.visible);
+            for(const m of members)
+              await api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:m.id,visible:!anyVis})});
+          });
           refresh();};
         box.appendChild(gh);
       }
@@ -3263,6 +3702,7 @@ function drawLayers(){
       // selected row (the old row buried the name under seven buttons)
       d.innerHTML=`<input type="checkbox" class="mergechk" title="check this layer for Merge ✓">`+
         `<button class="eye">👁</button><img><span class="nm"></span>`+
+        `<span class="ownb" style="display:none"></span>`+
         `<span class="volbadge" title=""></span><span class="stat statwall" title=""></span><span class="stat statlock" title="alpha-locked">🔒</span><span class="stat statclip" title="clipped to the layer below">◒</span>`;
       d.draggable=true;                     // drag to reorder, like every editor
       d.ondragstart=e=>{ dragLayerId=l.id; e.dataTransfer.effectAllowed='move'; };
@@ -3317,6 +3757,14 @@ function drawLayers(){
     d.querySelector('.eye').className='eye'+(l.visible?'':' off');
     d.querySelector('.statlock').style.display=l.alpha_lock?'':'none';
     d.querySelector('.statclip').style.display=l.clip?'':'none';
+    // R63: whose layer is this. Clicking a stranger's badge asks for access,
+    // so the answer to "why can't I paint here" is one click from the thing
+    // that told you.
+    { const ob=d.querySelector('.ownb'), bi=ownerBadge(l);
+      if(bi){ ob.style.display=''; ob.textContent=bi.txt; ob.title=bi.title;
+        ob.className='ownb'+(bi.cls?' '+bi.cls:'');
+        ob.onclick=bi.ask?(e=>{e.stopPropagation();askForAccess(l.id);}):null; }
+      else { ob.style.display='none'; ob.onclick=null; } }
     // A layer standing on a wall LEAVES THE PICTURE -- it lights the
     // room from outside instead. Without a marker in the list that
     // reads as "my layer vanished", which is the same complaint the
@@ -3377,7 +3825,47 @@ function drawLayers(){
     const nmEl=d.querySelector('.nm');
     if(nmEl.firstChild&&nmEl.firstChild.nodeType===3){ nmEl.firstChild.nodeValue=l.name; }
     else { nmEl.insertBefore(document.createTextNode(l.name), nmEl.firstChild); }
-    nmEl.title=l.name;                        // full name on hover, always
+    nmEl.title=l.name+'  ·  double-click to rename';
+    // R59: every other list in this app renames in place -- masks,
+    // selections, splines, document tabs -- and the layer row, the one
+    // people organise a real picture with, had no way to rename at all
+    // (the server has accepted a name on /api/layer edit the whole time).
+    // Double-click, like the document tabs, with Enter to keep and Escape
+    // to abandon; the keyboard shortcuts stand down while you type.
+    nmEl.ondblclick=e=>{
+      e.stopPropagation();
+      if(nmEl.querySelector('input'))return;
+      const was=l.name;
+      const inp=document.createElement('input');
+      inp.value=was; inp.className='nmedit';
+      inp.style.cssText='background:var(--panel2);color:var(--ink-hi);border:1px solid var(--wire-a);'
+        +'border-radius:4px;padding:0 4px;font:inherit;width:11em;max-width:100%';
+      // ONCE. Enter commits and refresh() redraws the row, and the blur
+      // that follows would otherwise run done() a second time -- against a
+      // node no longer in the document (a DOM exception) and, after
+      // Escape, saving the very text Escape just abandoned.
+      let fin=false;
+      const done=async keep=>{
+        if(fin)return; fin=true;
+        inp.onblur=null;
+        const v=inp.value.trim();
+        try{ inp.remove(); }catch(_){}
+        nmEl.style.display='';
+        if(!keep||!v||v===was)return refresh();
+        const r=await api('/api/layer',{...J,body:JSON.stringify(
+          {action:'edit',id:l.id,name:v})});
+        if(r&&r.error)toast(r.error);
+        refresh();
+      };
+      inp.onkeydown=ev=>{ ev.stopPropagation();
+        if(ev.key==='Enter'){ev.preventDefault();done(true);}
+        else if(ev.key==='Escape'){ev.preventDefault();done(false);} };
+      inp.onblur=()=>done(true);
+      inp.onclick=ev=>ev.stopPropagation();
+      nmEl.style.display='none';
+      nmEl.parentNode.insertBefore(inp,nmEl);
+      inp.focus(); inp.select();
+    };
     if(l.id===sel){
       const th=$('lThickMM'); if(th&&document.activeElement!==th)th.value=((l.thickness||1)*0.1).toFixed(2);
       const bk=$('lBgKind');
@@ -3617,7 +4105,17 @@ function tlSettle(){                 // one full sync after motion stops
   strip.addEventListener('pointerup',e=>{ scrubbing=false; tlSetFrame(stripFrame(e)); tlSettle(); });
   $('tlFrame').onchange=e=>{ tlSetFrame(+e.target.value); tlSettle(); };
   $('tlEnd').onchange=async e=>{
-    await api('/api/timeline',{...J,body:JSON.stringify({action:'range',lo:0,hi:+e.target.value})});
+    // R71: this sent whatever was typed. `1e9` made drawTimeline() loop
+    // twenty-one million times per redraw and the page stopped responding
+    // for SIX AND A HALF MINUTES with no error and no way out; `-5` pinned
+    // the playhead at frame -5 and killed Home/End/,/. because tlStep's
+    // wrap lands back on the negative bound. The input's own min="8" was
+    // never enforced by anything.
+    const want=Math.round(+e.target.value);
+    const hi=(!isFinite(want))?96:Math.max(2,Math.min(100000,want));
+    if(hi!==want)toast('timeline length must be between 2 and 100000 frames — using '+hi,'info');
+    e.target.value=hi;
+    await api('/api/timeline',{...J,body:JSON.stringify({action:'range',lo:0,hi})});
     loadTimeline();
   };
   $('tlPlay').onclick=()=>{
@@ -4424,6 +4922,7 @@ function layerTools(){
     `<button class="rowbtn lockb" title="Lock layer — refuses EVERY edit (paint, erase, fill, flip, move, placement) until unlocked">🔒</button>`+
     `<button class="rowbtn alock" title="Alpha lock — the brush recolors existing pixels only; transparency is frozen and the eraser can't cut">▧</button>`+
     `<button class="rowbtn clipb" title="Clipping mask — this layer shows only where the layer below has pixels (a run of clipped layers shares one base)">◒</button>`+
+    `<button class="rowbtn shareb" title="Who may paint on this layer — hold it, let it go, or share it with someone else">🔑</button>`+
     `<span class="lsep"></span>`+
     `<button class="rowbtn addlamp" title="Add a POINT light inside this layer — a light object that lives in the layer, rides its pose, and hides with it">💡+</button>`+
     `<button class="rowbtn addspot" title="Add a SPOT light inside this layer — position, aim, cone; edit with the on-canvas gizmo">🔦+</button>`+
@@ -4431,9 +4930,11 @@ function layerTools(){
   t.querySelector('.up').onclick=e=>{e.stopPropagation();moveLayerBy(sel,+1);};
   t.querySelector('.dn').onclick=e=>{e.stopPropagation();moveLayerBy(sel,-1);};
   t.querySelector('.dup').onclick=e=>{e.stopPropagation();
-    api('/api/layer',{...J,body:JSON.stringify({action:'duplicate',id:sel})}).then(refresh);};
+    api('/api/layer',{...J,body:JSON.stringify({action:'duplicate',id:sel})})
+      .then(r=>{followLayerOp(r,'duplicated — the copy is selected');refresh();});};
   t.querySelector('.md').onclick=e=>{e.stopPropagation();
-    api('/api/layer',{...J,body:JSON.stringify({action:'merge_down',id:sel})}).then(refresh);};
+    api('/api/layer',{...J,body:JSON.stringify({action:'merge_down',id:sel})})
+      .then(r=>{followLayerOp(r,'merged down');refresh();});};
   t.querySelector('.lockb').onclick=e=>{e.stopPropagation();
     const cur=state.layers.find(x=>x.id===sel);
     api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:sel,locked:!cur.locked})}).then(()=>{
@@ -4444,6 +4945,8 @@ function layerTools(){
   t.querySelector('.clipb').onclick=e=>{e.stopPropagation();
     const cur=state.layers.find(x=>x.id===sel);
     api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:sel,clip:!cur.clip})}).then(refresh);};
+  t.querySelector('.shareb').onclick=e=>{e.stopPropagation();
+    openSharePop(sel, e.currentTarget.getBoundingClientRect());};
   t.querySelector('.addlamp').onclick=async e=>{e.stopPropagation();
     const W=(state.doc&&state.doc.width)||800, H=(state.doc&&state.doc.height)||600;
     const r=await api('/api/light',{...J,body:JSON.stringify({action:'add',kind:'point',layer:sel,x:W/2,y:H/2,z:50,intensity:1.2})});
@@ -4652,7 +5155,14 @@ const mergeChecks=new Set();
 function moveLayerBy(lid,dir){          // dir +1 = up in the PANEL = later in the stack
   const idx=state.layers.findIndex(l=>l.id===lid);
   const to=idx+dir;
-  if(to<0||to>=state.layers.length)return;
+  // R71: a bare return. At the top or bottom of the stack the ▲/▼ buttons
+  // stayed enabled at full opacity and a click produced no request, no
+  // toast and no status change -- indistinguishable from a broken button.
+  if(to<0||to>=state.layers.length){
+    setStatus(dir>0?'this layer is already at the top of the stack'
+                   :'this layer is already at the bottom of the stack');
+    return;
+  }
   api('/api/layer',{...J,body:JSON.stringify({action:'move',id:lid,index:to})}).then(refresh);
 }
 function drawGroups(){
@@ -4726,6 +5236,10 @@ function strokeBody(points,record){
     brush:curBrush||undefined,
     mode:(tool==='erase'&&$('eMode').value!=='pixel'?$('eMode').value:tool==='knife'?'knife':tool==='blend'?'blend':tool==='smudge'?'smudge':tool==='clone'?'clone':tool==='heal'?'heal':tool==='nodepaint'?'node':'brush'),
     source:tool==='clone'?{offset:cloneOffset||[0,0]}:undefined,
+    // R70: the clone stamp used to read the flattened picture with no way
+    // to say otherwise, so cloning a patch of sky on its own layer quietly
+    // dragged the foreground along with it.
+    sample:tool==='clone'?sampleMode():undefined,
     node:tool==='nodepaint'?nodePaintSource():undefined,
     patch_ok:true,
     record};
@@ -4770,6 +5284,22 @@ async function flushStroke(final){
     // work is still visible while you decide what to do.
     strokeError=String(err&&err.message||err);
     if(flushTimer){clearInterval(flushTimer);flushTimer=null;}
+    // R71: SELF-HEAL A DEAD LAYER ID. If the layer was deleted out from
+    // under us (another editor, an agent, an undo elsewhere), `sel` kept
+    // pointing at it and EVERY later stroke failed the same way until the
+    // person happened to click another row. The message was good; the
+    // stuck state after it was not.
+    if(/is gone|no such item/.test(strokeError)){
+      const live=(state.layers||[]).filter(l=>l.id!==sel);
+      if(live.length){
+        sel=live[live.length-1].id;
+        refresh();
+        setStatus('⚠ that layer is gone — switched to "'+live[live.length-1].name+'"');
+        toast('that layer was deleted — now painting on "'
+              +live[live.length-1].name+'"','info');
+        flushing=false; return;
+      }
+    }
     setStatus('⚠ stroke not saved: '+strokeError);
     toast('stroke not saved — '+strokeError);
     flushing=false; return;
@@ -4784,18 +5314,68 @@ async function flushStroke(final){
   if(final&&!strokeError)mediaBurstAfterStroke(sel);
 }
 const SELTOOLS={rect:1,ellipse:1,wand:1,lum:1,obj:1};
+// R69: the generator brushes. They take a dragged path like any brush.
+const GENTOOLS={scribble:1,hatch:1,textile:1};
+let genStroke=null, stampDrag=false;
+function drawGenStroke(){
+  // A generator round-trips through the server, so the only thing the hand
+  // has to go on while dragging is this trail. Width tracks the brush size
+  // because that is the radius the swept band is actually built at.
+  if(!genStroke||!lastComp)return;
+  vctx.clearRect(0,0,vc.width,vc.height); vctx.drawImage(lastComp,0,0);
+  drawAnts();
+  vctx.save();
+  vctx.lineCap='round'; vctx.lineJoin='round';
+  vctx.strokeStyle=$('bColor').value;
+  vctx.globalAlpha=Math.max(0.18,+$('bOp').value/100*0.35);
+  vctx.lineWidth=genRadius(tool==='textile'?'txtRadius':(tool==='hatch'?'haRadius':'scRadius'))*2;
+  vctx.beginPath(); vctx.moveTo(genStroke[0][0],genStroke[0][1]);
+  for(const [x,y] of genStroke) vctx.lineTo(x,y);
+  vctx.stroke();
+  vctx.globalAlpha=0.9; vctx.lineWidth=1.2; vctx.setLineDash([5,4]);
+  vctx.strokeStyle='rgba(85,224,212,.9)'; vctx.stroke();
+  vctx.restore();
+}
 async function runSelect(tool,params){
   const body={tool:(tool==='wand'?'color':tool==='lum'?'brightness':tool==='obj'?'object':tool),
     params, mode:$('selMode').value, feather:+$('selFeather').value,
     target:$('selMode').value==='new'?undefined:activeSel||undefined};
   if(tool==='wand'||tool==='lum')body.params.tolerance=+$('selTol').value/100;
   if(tool==='obj')body.params.k=6;
+  // R70: the wand/luminance/object tools READ pixels to find their shape.
+  // Every other editor calls that "Sample All Layers" and ships it OFF;
+  // this one had it on with no switch, so a wand click selected the shape
+  // of whatever happened to be under the layer you were working on.
+  body.layer=sel||undefined; body.sample=sampleMode();
   const r=await api('/api/select',{...J,body:JSON.stringify(body)});
   if(r.error){toast(r.error);return;}
+  paintWarn(r);                     // R59: a selection that caught nothing says so
   activeSel=r.selection.id;
+  // R59: SAY WHAT YOU SELECTED. A selection gates every stroke after it, and
+  // the only sign of one was the ants -- so an object-select on bare paper
+  // handed back a mystery fifth of the canvas with no word about it. The
+  // server reports coverage; show it, and speak up at the useless extremes.
+  const cov=r.selection.coverage;
   await refresh(); syncSelGate(); loadAnts();
+  if(typeof cov==='number'){
+    const pct=cov>=0.995?100:cov<=0.0005?0:Math.max(1,Math.round(cov*100));
+    // after refresh(), which resets the status line to the tool's own text
+    setStatus(pct?('selected '+pct+'% of the canvas'):'that selected nothing');
+    if(cov>0.995)toast('that selected the whole canvas — every stroke is '
+                       +'unrestricted until you clear it (Ctrl+D)','warn');
+  }
 }
 function canvasXY(e){const r=vc.getBoundingClientRect();return [(e.clientX-r.left)/zoom,(e.clientY-r.top)/zoom];}
+// R59: the browser menu over a drawing surface is never what a person wants
+// (and it fired mid-stroke on a right-drag). Right-click is the editor's:
+// on the knife it cycles the blade, everywhere else it picks the colour
+// under the cursor -- the one thing every paint program does with it.
+$('canvasPane').addEventListener('contextmenu',e=>{
+  e.preventDefault();
+  if(tool==='knife'){ cycleKnife(); return; }
+  if(!state)return;
+  pickColorAt(canvasXY(e));
+});
 $('canvasPane').addEventListener('wheel',e=>{
   e.preventDefault();
   const r=$('canvasPane').getBoundingClientRect();
@@ -4849,10 +5429,105 @@ let lastRingEvt=null;
 $('canvasPane').addEventListener('pointermove',e=>{lastRingEvt=e;});
 $('canvasPane').addEventListener('pointerup',()=>{panDrag=null;});
 let spaceHeld=false;
-window.addEventListener('keydown',e=>{ if(e.code==='Space'&&!e.repeat&&document.activeElement.tagName!=='INPUT'){spaceHeld=true;} });
+let splinePtrDown=false;   // R58: spline first-point race guard
+// R71: this guarded INPUT only, so a space typed into the shader TEXTAREA
+// (or any contenteditable) armed space-drag panning. Matched to the sibling
+// guard in the main keydown handler, which had the full test all along.
+function typingTarget(){
+  const t=document.activeElement; if(!t)return false;
+  const tag=t.tagName;
+  return tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA'||t.isContentEditable;
+}
+window.addEventListener('keydown',e=>{ if(e.code==='Space'&&!e.repeat&&!typingTarget()){spaceHeld=true;} });
 window.addEventListener('keyup',e=>{ if(e.code==='Space')spaceHeld=false; });
+
+/* ---------- R59: touch navigation (pinch zoom + two-finger pan) ----------
+   R58 gave every drag surface touch-action:none, which correctly stops the
+   browser stealing a stroke to scroll the page -- and left a tablet with no
+   way to zoom at all, because the browser's own pinch was the only one there
+   was. So the canvas grows its own, the way every drawing app on a tablet
+   works: two fingers scale about their midpoint and pan by its travel, and a
+   second finger arriving mid-stroke CANCELS that stroke rather than leaving
+   a hook across the picture -- you meant to navigate, not to paint.
+
+   The listeners are on the PANE in the capture phase, so the second finger is
+   intercepted before the canvas's own pointerdown can start a second stroke
+   over the first. Mouse and pen pointers are ignored entirely: a pen's
+   palm-rejected second contact must not turn a stroke into a zoom. */
+const TPTR=new Map();            // live touch pointers over the canvas pane
+let pinch=null;
+const _pinchPts=()=>[...TPTR.values()];
+function _pinchSpan(){ const p=_pinchPts(); return Math.hypot(p[0].x-p[1].x,p[0].y-p[1].y); }
+function _pinchMid(){ const p=_pinchPts(); return [(p[0].x+p[1].x)/2,(p[0].y+p[1].y)/2]; }
+function cancelCanvasStroke(){
+  // Discard the stroke in progress WITHOUT committing it. In live mode part
+  // of it may already be on the server, so that case is undone for real --
+  // a cancelled gesture must not leave half a mark behind.
+  const wasSent=sent>0;
+  if(flushTimer){clearInterval(flushTimer);flushTimer=null;}
+  stroke=null; sent=0; smoothPt=null; marquee=null; dragSp=null;
+  ptDrag=null; ptDragTo=null; strokeVP=null;
+  endStrokeMask();
+  if(wasSent){ api('/api/undo',{method:'POST'}).then(()=>{drawComposite();refresh();}); }
+  else repaintCanvas();
+}
+function _applyPinch(){
+  // Scale about the gesture's ORIGINAL midpoint and translate by its travel,
+  // both computed from the gesture's start state rather than accumulated per
+  // event -- an incremental version drifts, and on a slow frame the picture
+  // walks away from the fingers holding it.
+  const pane=$('canvasPane'), r=pane.getBoundingClientRect();
+  const span=_pinchSpan(), mid=_pinchMid();
+  const nz=Math.max(0.15,Math.min(12,pinch.z*(span/(pinch.span||1))));
+  // the fit scale, taken from the live transform (zoom === base*userZoom)
+  // rather than recomputed -- a second copy of fitPane's padding rule would
+  // drift the moment fitPane changed
+  const base=pinch.base, s0=base*pinch.z, s1=base*nz;
+  const m0x=pinch.mid[0]-r.left, m0y=pinch.mid[1]-r.top;
+  const m1x=mid[0]-r.left,       m1y=mid[1]-r.top;
+  // the document point under the fingers when the gesture began
+  const dx=(m0x-(pane.clientWidth -state.width *s0)/2-pinch.px)/s0;
+  const dy=(m0y-(pane.clientHeight-state.height*s0)/2-pinch.py)/s0;
+  userZoom=nz;
+  panX=m1x-(pane.clientWidth -state.width *s1)/2-dx*s1;
+  panY=m1y-(pane.clientHeight-state.height*s1)/2-dy*s1;
+  fitCanvas(); repaintCanvas();
+  setStatus('zoom '+Math.round(userZoom*100)+'%  ·  two fingers pan, pinch to zoom');
+}
+(function touchNav(){
+  const pane=$('canvasPane');
+  pane.addEventListener('pointerdown',e=>{
+    if(e.pointerType!=='touch')return;
+    TPTR.set(e.pointerId,{x:e.clientX,y:e.clientY});
+    if(TPTR.size===2){
+      cancelCanvasStroke(); hideBrushRing(); panDrag=null;
+      pinch={span:_pinchSpan(),mid:_pinchMid(),z:userZoom,px:panX,py:panY,
+             base:(userZoom?zoom/userZoom:zoom)};
+      e.stopPropagation(); e.preventDefault();
+    }
+  },true);
+  pane.addEventListener('pointermove',e=>{
+    if(e.pointerType!=='touch'||!TPTR.has(e.pointerId))return;
+    TPTR.set(e.pointerId,{x:e.clientX,y:e.clientY});
+    if(pinch&&TPTR.size>=2){ _applyPinch(); e.stopPropagation(); e.preventDefault(); }
+  },true);
+  const lift=e=>{
+    if(e.pointerType!=='touch')return;
+    TPTR.delete(e.pointerId);
+    if(pinch&&TPTR.size<2){
+      pinch=null; setStatus();
+      // The finger still down must NOT become a stroke: it is the tail of a
+      // navigation gesture, and starting to paint from it is exactly the
+      // "why is there a line across my picture" complaint.
+      if(TPTR.size===1){ e.stopPropagation(); e.preventDefault(); }
+    }
+  };
+  pane.addEventListener('pointerup',lift,true);
+  pane.addEventListener('pointercancel',lift,true);
+})();
 vc.addEventListener('pointerdown',e=>{
   if(e.button===1||spaceHeld)return;              // pan handled by the pane
+  if(needsPixels(tool)){ e.preventDefault(); return; }   // R59: canvas not ready yet
   // R5 #19: Ctrl/Cmd-click near a field marker re-selects the field. The
   // modifier keeps ordinary clicks with whatever tool is active (Ctrl is
   // otherwise unused on the canvas; Ctrl+click-a-THUMBNAIL is the alpha
@@ -4911,15 +5586,25 @@ vc.addEventListener('pointerdown',e=>{
       pushSpline(true); vc.setPointerCapture(e.pointerId); repaintCanvas(); return;
     }
     vc.setPointerCapture(e.pointerId);
+    splinePtrDown=true;                               // R58: see below
     api('/api/spline',{...J,body:JSON.stringify({action:'add',points:[{x,y,hx:0,hy:0}]})})
       .then(async r=>{activeSpline=r.spline.id;
         const st=await api('/api/state'); state.splines=st.splines;
-        dragSp={kind:'handle',idx:0};                  // keep dragging = shape the first tangent
+        // R58: only keep dragging if the pointer is STILL down. A quick tap
+        // (or any touch) released before this response arrived, and the
+        // stale dragSp then turned the person's next press into a handle
+        // drag of a point they never meant to touch.
+        if(splinePtrDown) dragSp={kind:'handle',idx:0};   // keep dragging = shape the first tangent
         drawSplinesPanel(); repaintCanvas();});
     return;
   }
   if(tool==='transform'){
-    if(!TR)return;
+    // R59: with nothing to transform this was a dead canvas -- drag, drag,
+    // nothing, no word of explanation. Say what to pick, and put the
+    // person in front of the control that picks it.
+    if(!TR){ toast('Transform needs a target — choose a layer or selection '
+                   +'in the Transform panel, then drag','info');
+             sideTab('tool'); return; }
     const [x,y]=canvasXY(e);
     const hit=trHit(x,y);
     if(hit){ TR.drag={...hit,x0:x,y0:y,sx0:TR.sx,sy0:TR.sy,deg0:TR.deg,dx0:TR.dx,dy0:TR.dy,quad0:TR.quad?TR.quad.map(p=>[p[0],p[1]]):null};
@@ -4931,9 +5616,20 @@ vc.addEventListener('pointerdown',e=>{
     doFill(x,y);
     return;
   }
-  if(tool==='scribble'){ const [x,y]=canvasXY(e); doScribble(x,y); return; }
-  if(tool==='hatch'){ const [x,y]=canvasXY(e); doHatch(x,y); return; }
-  if(tool==='textile'){ const [x,y]=canvasXY(e); doTextile(x,y); return; }
+  if(GENTOOLS[tool]){
+    // R69: the generator brushes are BRUSHES. They used to fire on
+    // pointerdown and return, so the only gesture they understood was a
+    // click -- a drag painted one stamp at the press point and then
+    // nothing, which is exactly what a stamp tool does. Now the press
+    // opens a path, pointermove extends it, and the release posts the
+    // whole swept path in one request. A click still works: a path of
+    // one point falls back to the old radius-around-the-point fill.
+    const [x,y]=canvasXY(e);
+    vc.setPointerCapture(e.pointerId);
+    genStroke=[[x,y]];
+    rememberColor($('bColor').value);
+    return;
+  }
   if(tool==='text'){
     const [x,y]=canvasXY(e);
     doText(x,y);
@@ -4945,7 +5641,14 @@ vc.addEventListener('pointerdown',e=>{
     else runSelect(tool,{x:Math.round(x),y:Math.round(y)});
     return;
   }
-  if(tool==='stamp'){ const [px_,py_]=canvasXY(e); placeStampAt(px_,py_); e.preventDefault(); return; }
+  if(tool==='stamp'){
+    // R71: a sticker DRAG lays one dab per bSize*2 px of travel, and each
+    // dab used to take its own undo entry -- a single swipe could cost
+    // twenty Ctrl+Z. The gesture opens on the press and closes on the
+    // release, so the whole swipe is one step, like a brush stroke.
+    const [px_,py_]=canvasXY(e);
+    stampDrag=true; gestureBegin(); vc.setPointerCapture(e.pointerId);
+    placeStampAt(px_,py_); e.preventDefault(); return; }
   if(tool==='clone'&&e.altKey){ cloneSrc=canvasXY(e); cloneOffset=null; drawSrcMarker(); return; }
   if(tool==='clone'&&!cloneSrc){ setStatus('⚠ Alt-click to set the clone source first'); return; }
   vc.setPointerCapture(e.pointerId); strokeVP=null; inferSnapPt=null;
@@ -5028,6 +5731,14 @@ vc.addEventListener('pointermove',e=>{
       x=marquee.x0+Math.sign(dx||1)*m; y=marquee.y0+Math.sign(dy||1)*m;
     }
     marquee.x1=x; marquee.y1=y; repaintCanvas(); drawMarquee(); return;
+  }
+  if(genStroke){
+    const [gx,gy]=canvasXY(e), gl=genStroke[genStroke.length-1];
+    // Thin the path to the generator's own resolution: a generator reads
+    // the path as a swept region, so sub-pixel pointer jitter buys nothing
+    // and costs points on the wire.
+    if(Math.hypot(gx-gl[0],gy-gl[1])>=2){ genStroke.push([gx,gy]); drawGenStroke(); }
+    return;
   }
   if(!stroke)return;
   let p=canvasXY(e); p=[p[0],p[1],penPressure(e)];
@@ -5128,7 +5839,19 @@ function drawMarquee(){
   else{vctx.beginPath();vctx.ellipse(x+w2/2,y+h2/2,w2/2,h2/2,0,0,7);vctx.stroke();}
   vctx.restore();
 }
-vc.addEventListener('pointerup',async ()=>{
+// R58: pointerCANCEL is a release too. The browser cancels a pointer when it
+// claims the gesture (a scroll/zoom on touch or pen hardware, a palm
+// rejection, the OS stealing focus mid-stroke). Before this, a cancel left
+// `stroke` pending with the live flush timer running: the next touch was
+// treated as the continuation of a stroke that had already ended, and what
+// the person had drawn before the cancel was never committed. Now a cancel
+// commits what was drawn, exactly like lifting the pen.
+vc.addEventListener('pointercancel',()=>endCanvasPointer());
+$('canvasPane').addEventListener('pointercancel',()=>{panDrag=null;});
+vc.addEventListener('pointerup',()=>endCanvasPointer());
+async function endCanvasPointer(){
+  splinePtrDown=false;
+  if(stampDrag){ stampDrag=false; gestureEnd(); }
   if(ptDrag){
     const to=ptDragTo; const d=ptDrag; ptDrag=null; ptDragTo=null;
     if(to&&(Math.abs(to[0]-d.x)>0.01||Math.abs(to[1]-d.y)>0.01))
@@ -5145,6 +5868,17 @@ vc.addEventListener('pointerup',async ()=>{
     if(Math.abs(m.x1-m.x0)>2&&Math.abs(m.y1-m.y0)>2)
       await runSelect(tool,{x0:Math.round(m.x0),y0:Math.round(m.y0),x1:Math.round(m.x1),y1:Math.round(m.y1)});
     else deselect();                       // a plain click clears the selection
+    return;
+  }
+  if(genStroke){
+    const g=genStroke; genStroke=null;
+    const mid=g[Math.floor(g.length/2)];
+    const path=g.length>1?g.map(q=>[Math.round(q[0]),Math.round(q[1])]):null;
+    repaintCanvas();
+    setStatus(path?'generating along '+path.length+' points…':'generating…');
+    if(tool==='scribble')     await doScribble(mid[0],mid[1],path);
+    else if(tool==='hatch')   await doHatch(mid[0],mid[1],path);
+    else if(tool==='textile') await doTextile(mid[0],mid[1],path);
     return;
   }
   smoothPt=null;
@@ -5222,8 +5956,22 @@ vc.addEventListener('pointerup',async ()=>{
   await applyPatchOrFull(lastPaintResp);  // the dirty window when the server
   endStrokeMask();             // sent one, the full frame otherwise -- either
   repaintCanvas();             // way BEFORE the preview drops: no blink
+  // R59: they have painted -- the "just paint" tip has done its job and is
+  // now only covering the picture it was talking about
+  if($('firstRun')&&$('firstRun').style.display==='flex')dismissFirstRun();
   refresh(); refreshNodePreviews();
-});
+}
+// Belt and braces for the touch-action rule above: any element that takes
+// pointer capture is a drag surface, so make sure the browser never claims
+// its NEXT gesture either (the CSS covers the known widgets by id; this
+// covers ones added later without thinking about tablets).
+(function(){
+  const spc=Element.prototype.setPointerCapture;
+  Element.prototype.setPointerCapture=function(id){
+    if(this.style&&!this.style.touchAction)this.style.touchAction='none';
+    try{ return spc.call(this,id); }catch(_){ /* pointer already gone */ }
+  };
+})();
 /* ---------- accurate stroke preview ----------
    The server resolves a stroke as ONE coverage mask: every dab combined with
    max() (not alpha-over), a linear falloff from radius*hardness out to radius,
@@ -5684,6 +6432,42 @@ function dismissFirstRun(){
   try{ localStorage.setItem('le_seen_intro','1'); }catch(e){}
   api('/api/prefs',{...J,body:JSON.stringify({seen_intro:true})});
 }
+/* ---------- R59: the side panel split, and its scroll affordance -------- */
+(function sideSplitter(){
+  const sp=$('sideSplit'), side=$('side'), a=$('groupA');
+  if(!sp)return;
+  const apply=h=>{ side.classList.add('split');
+    a.style.flex='0 0 '+Math.round(h)+'px';
+    try{ localStorage.setItem('le_side_split',Math.round(h)); }catch(e){}
+    markMore(); };
+  try{ const v=+localStorage.getItem('le_side_split');
+       if(v>80)apply(v); }catch(e){}
+  let d=null;
+  sp.addEventListener('pointerdown',e=>{
+    d={y:e.clientY,h:a.getBoundingClientRect().height};
+    sp.setPointerCapture(e.pointerId); e.preventDefault();
+  });
+  sp.addEventListener('pointermove',e=>{
+    if(!d)return;
+    const room=side.clientHeight-sp.offsetHeight;
+    apply(Math.max(90,Math.min(room-90,d.h+e.clientY-d.y)));
+  });
+  const end=()=>{ d=null; };
+  sp.addEventListener('pointerup',end); sp.addEventListener('pointercancel',end);
+  sp.addEventListener('dblclick',()=>{ side.classList.remove('split');
+    a.style.flex=''; try{ localStorage.removeItem('le_side_split'); }catch(e){}
+    markMore(); });
+})();
+function markMore(){
+  // a body with more content than room says so at its bottom edge
+  document.querySelectorAll('#side .sidebody').forEach(b=>{
+    b.classList.toggle('more', b.scrollHeight-b.clientHeight>8
+                               && b.scrollTop+b.clientHeight < b.scrollHeight-4);
+  });
+}
+document.querySelectorAll('#side .sidebody').forEach(b=>b.addEventListener('scroll',markMore));
+window.addEventListener('resize',markMore);
+setInterval(markMore,1200);     // panels grow and shrink as tools change
 function syncSelBadge(){
   // A selection silently gates every brush stroke, and the only sign it existed
   // was the marching ants -- easy to miss, and the way out was a button called
@@ -5715,8 +6499,14 @@ function drawStrokeSelOverlay(){
   });
   vctx.restore();
 }
-function pickColorAt([x,y]){
-  if(!lastComp){toast('nothing to pick from yet');return;}
+async function pickColorAt([x,y]){
+  if(!lastComp){
+    // R58: the page is still loading its first composite (a slow machine,
+    // a big document). Wait for it instead of refusing -- "nothing to pick
+    // from" on a canvas full of paint read as a broken tool.
+    try{ await drawCompositeOnce(); }catch(_){}
+    if(!lastComp){toast('the canvas is still loading — try again in a moment','warn');return;}
+  }
   const c=document.createElement('canvas'); c.width=vc.width; c.height=vc.height;
   const cx=c.getContext('2d'); cx.drawImage(lastComp,0,0);   // read the COMPOSITE,
   const px=cx.getImageData(Math.max(0,Math.min(c.width-1,Math.round(x))),   // never
@@ -5762,7 +6552,7 @@ document.addEventListener('keydown',e=>{
 });
 $('ssUngroup').onclick=ungroupSelectedStrokes;
 const TOOLBTN={fx:'tFxBrush',nodepaint:'tNodePaint',strokesel:'tStrokeSel',nudge:'tNudge',pick:'tPick',brush:'tBrush',erase:'tErase',knife:'tKnife',blend:'tBlend',smudge:'tSmudge',clone:'tClone',heal:'tHeal',stamp:'tStamp',rect:'tRect',ellipse:'tEllipse',wand:'tWand',lum:'tLum',obj:'tObj',spline:'tSpline',transform:'tTransform',fill:'tFill',text:'tText',scribble:'tScribble',hatch:'tHatch',textile:'tTextile'};
-const TOOLTIPS={fx:'FX brush — F · the stroke grows an effect instead of pigment · pick a preset in the Tool tab · retune in the node graph',nodepaint:'Node paint — J · strokes reveal the Paint out node\'s image · pick the source node in the Tool tab',strokesel:'Select strokes — K · click a stroke, then grow the set forward/back through paint order',nudge:'Nudge — N · drags the stroke PATHS, not the pixels: refine sketch lines without smudge swirl',pick:'Eyedropper — I · click to pick a colour · Alt-click while brushing does the same',brush:'Brush — B',erase:'Eraser — E',smudge:'Smudge — S',clone:'Clone — C · Alt-click sets source',heal:'Heal — H · paint over a blemish; it repairs from the surroundings',stamp:'Stamp — U · press the selected sticker on · capture new ones from a layer or selection in the Tool tab',
+const TOOLTIPS={knife:'Palette knife — Q · shapes the paint BODY already on the canvas (needs an oil/acrylic/water medium) · right-click the tool to cycle smooth / push / scrape / spread',blend:'Blender — Y · a clean brush that works the WET paint already there: softens two colours together, knocks ridges down',fx:'FX brush — F · the stroke grows an effect instead of pigment · pick a preset in the Tool tab · retune in the node graph',nodepaint:'Node paint — J · strokes reveal the Paint out node\'s image · pick the source node in the Tool tab',strokesel:'Select strokes — K · click a stroke, then grow the set forward/back through paint order',nudge:'Nudge — N · drags the stroke PATHS, not the pixels: refine sketch lines without smudge swirl',pick:'Eyedropper — I · click to pick a colour · Alt-click while brushing does the same',brush:'Brush — B',erase:'Eraser — E',smudge:'Smudge — S',clone:'Clone — C · Alt-click sets source',heal:'Heal — H · paint over a blemish; it repairs from the surroundings',stamp:'Stamp — U · press the selected sticker on · capture new ones from a layer or selection in the Tool tab',
   rect:'Rectangle select · Shift = square',ellipse:'Ellipse select · Shift = circle',wand:'Select by color',
   lum:'Select by brightness',obj:'Select object',spline:'Spline — P · click adds points · Esc finishes',
   transform:'Transform — drag moves · corners scale · top handle rotates · Enter applies · Esc resets',
@@ -6083,6 +6873,27 @@ async function openEditorsPop(){
     }
     list.appendChild(row);
   });
+  // R64: everyone else who is HERE but has no browser tab -- a script, a
+  // swarm painter, a connected agent. /api/editors counts tabs (it is what
+  // elects the host and authorises a kick, so it must), and a whole
+  // session of two scripted painters and an agent showed an empty popup
+  // because of it. They arrive through state.peers instead; both belong in
+  // the one place a person looks to see who is in the room.
+  const otherPresent=((state&&state.peers)||[]).filter(p=>
+    !p.me && !(r.editors||[]).some(e=>e.id===p.id));
+  otherPresent.forEach(p=>{
+    const row=document.createElement('div');
+    row.style.cssText='display:flex;align-items:center;gap:7px;font-size:12px;opacity:.85';
+    const lab=document.createElement('span'); lab.style.flex='1';
+    lab.textContent=(p.agent?'🤖 ':'⌨ ')+(p.name||p.id)
+      +(p.activity&&p.activity.tool?(' · '+p.activity.tool):'')
+      +(p.doc&&state.active_doc&&p.doc!==state.active_doc?' · on another document':'');
+    lab.title=p.agent
+      ? 'A connected agent. It works on its own layers and never touches yours.'
+      : 'Connected without a browser tab — a script or another tool. It cannot be removed from here.';
+    row.appendChild(lab);
+    list.appendChild(row);
+  });
   // your display name, shown to everyone instead of "editor a1b2"
   const nameRow=document.createElement('div');
   nameRow.style.cssText='display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px';
@@ -6105,6 +6916,19 @@ async function openEditorsPop(){
   pop.classList.add('open');
   placePopup(pop, $('presenceChip').getBoundingClientRect());
 }
+function syncPresenceChip(d){
+  const chip=$('presenceChip'); if(!chip)return;
+  const tabs=(d&&d.editors)||1;
+  const others=((state&&state.peers)||[]).filter(p=>!p.me);
+  const bots=others.filter(p=>p.agent).length;
+  const n=Math.max(tabs, others.length+1);
+  chip.style.display=(n>1)?'inline':'none';
+  const names=(d&&d.names&&d.names.length)?d.names
+    :others.map(p=>(p.agent?'🤖 ':'')+(p.name||p.id));
+  chip.textContent='👥 '+n+(bots?(' · '+bots+' agent'+(bots>1?'s':'')):'')
+    +(names.length?' · '+names.slice(0,3).join(', '):'');
+  chip.title='Who is here — people, scripts and agents. Click for the list.';
+}
 (function editorsPopWiring(){
   const chip=$('presenceChip'); if(!chip)return;
   chip.onclick=()=>{
@@ -6119,6 +6943,469 @@ async function openEditorsPop(){
       pop.classList.remove('open');
   });
 })();
+
+/* ==============================================================================
+   R63 -- LIVE COLLABORATION: whose layer is whose, asking for access, and the
+   agent working beside you.
+
+   Every RULE lives on the server (CONTRACT.md, one permission table in
+   _layer_permission); nothing below re-implements or second-guesses one. This
+   code's whole job is to make those rules VISIBLE and answerable:
+     * a badge saying who holds a layer, shown only once a document is shared
+     * the CONTRACT's 403 turned into a sentence with a button, not a dead end
+     * an inbox, so an answer to "may I?" actually reaches the person asked
+     * a text box for telling a connected agent what you want it doing
+   ============================================================================== */
+
+// Who I am for OWNERSHIP purposes. The server keys locks off X-User only
+// (_owner_uid), never the per-tab client id -- so this is USER_ID, and a
+// reload or a second tab is still me, still holding my layers.
+function peerName(uid){
+  if(!uid)return '';
+  const p=((state&&state.peers)||[]).find(x=>x.id===uid);
+  return (p&&p.name)||(String(uid).startsWith('agent:')?String(uid).slice(6):String(uid).slice(0,6));
+}
+function isAgentUid(u){ return String(u||'').startsWith('agent:'); }
+
+// Badges are hidden in a SOLO session on purpose. "You own this layer" on
+// every row of a picture nobody else can see teaches nothing and eats the
+// width the layer's name needs. They appear the moment the document is
+// genuinely shared -- another editor present, a layer held by someone (or
+// something) else, or a request in flight either way.
+function collabLive(){
+  const ls=(state&&state.layers)||[], peers=(state&&state.peers)||[];
+  return peers.length>1 || ls.some(l=>l.owner&&l.owner!==USER_ID)
+      || ACCESS_IN.length>0 || ACCESS_OUT.length>0;
+}
+function ownerBadge(l){
+  // an agent's layer is marked even alone: it is the one row in the list the
+  // user did not make, and "where did that come from" deserves an answer
+  if(l.agent) return {txt:'agent', cls:'bot',
+    title:(peerName(l.owner)||'The agent')+' painted this. It is YOURS — keep it, '
+      +'hide it, merge it down or throw it away. An agent never touches a layer you hold.'};
+  if(!collabLive()) return null;
+  if(!l.owner) return {txt:'free', cls:'',
+    title:'Nobody holds this layer — whoever paints on it next takes it.'};
+  if(l.owner===USER_ID){
+    const n=(l.shared||[]).length;
+    return {txt:'yours', cls:'mine',
+      title:'You hold this layer'+(n?', shared with '+n+' other'+(n>1?'s':''):'')
+        +'. Nobody else can paint on it until you share it. 🔑 in the row’s tool bar.'};
+  }
+  if(l.mine) return {txt:'shared', cls:'mine',
+    title:peerName(l.owner)+' holds this layer and has given you edit access.'};
+  return {txt:'🔒 '+peerName(l.owner), cls:'theirs', ask:true,
+    title:peerName(l.owner)+' is working on this layer, so your edits here would be '
+      +'refused — though you can still hide it, which changes nothing. '
+      +'Click to ask for access.'};
+}
+
+// ------------------------------------------------------------------ refusal
+// A drag can be refused forty times in two seconds; the person needs to be
+// told once, per layer, with the way forward attached.
+const _refuseSeen={};
+function refusedForOwnership(j){
+  const now=Date.now();
+  if(_refuseSeen[j.layer]&&now-_refuseSeen[j.layer]<8000)return;
+  _refuseSeen[j.layer]=now;
+  const nm=j.owner_name||peerName(j.owner)||'someone else';
+  const lay=((state&&state.layers)||[]).find(l=>l.id===j.layer);
+  const b=document.createElement('div'); b.className='accessBanner';
+  const msg=document.createElement('span');
+  msg.innerHTML='<b>'+escHtml((lay&&lay.name)||j.layer)+'</b> is '+escHtml(nm)
+    +'’s layer — that edit was not applied.';
+  b.appendChild(msg);
+  const ask=document.createElement('button');
+  ask.textContent='Ask '+nm+' for access';
+  ask.title='Sends '+nm+' a request. You will be told here as soon as they answer.';
+  ask.onclick=async()=>{ b.remove(); await askForAccess(j.layer); };
+  const own=document.createElement('button');
+  own.textContent='Paint on my own layer';
+  own.title='Adds a new layer that belongs to you and selects it, so you can keep working.';
+  own.onclick=async()=>{ b.remove(); const r=await api('/api/layer',{...J,
+      body:JSON.stringify({action:'add',name:'Layer'})});
+    if(r&&r.id)sel=r.id;                       // /api/layer add answers {ok,id}
+    await refresh();
+    toast('new layer — this one is yours','info'); };
+  const no=document.createElement('button'); no.textContent='Dismiss';
+  no.onclick=()=>b.remove();
+  b.appendChild(ask); b.appendChild(own); b.appendChild(no);
+  $('bannerStack').appendChild(b);
+  setTimeout(()=>{ if(b.parentNode)b.remove(); },16000);
+}
+function escHtml(t){ const d=document.createElement('div'); d.textContent=String(t); return d.innerHTML; }
+
+// ------------------------------------------------------------- the requests
+let ACCESS_IN=[], ACCESS_OUT=[];
+const _accSaid=new Set();      // announce each request, and each answer, once
+let _accTimer=null;
+async function askForAccess(lid){
+  const r=await api('/api/access',{...J,quiet:true,
+    body:JSON.stringify({action:'request',layer:lid})});
+  if(!r||r.error){ toast((r&&r.error)||'could not ask just now'); return; }
+  toast('asked — you will be told here the moment they answer','info');
+  pollAccess();
+}
+async function pollAccess(){
+  // R64: a plain GET, because reading your own requests should not need a
+  // verb -- and because /api/state now carries the COUNT, this call is only
+  // for the detail behind a chip that is already lit.
+  const r=await api('/api/access',{method:'GET',quiet:true});
+  if(!r||r.error)return;
+  ACCESS_IN=r.incoming||[]; ACCESS_OUT=r.outgoing||[];
+  ACCESS_IN.forEach(x=>{
+    if(x.state!=='pending'||_accSaid.has(x.id))return;
+    _accSaid.add(x.id);
+    toast((x.from_name||peerName(x.from))+' would like to paint on “'
+      +(x.layer_name||x.layer)+'” — answer with 🔑 in the top bar','info');
+  });
+  ACCESS_OUT.forEach(x=>{
+    const k=x.id+':'+x.state;
+    if(x.state==='pending'||_accSaid.has(k))return;
+    _accSaid.add(k);
+    if(x.state==='granted'){
+      toast('“'+(x.layer_name||x.layer)+'” is open to you now','info'); refresh();
+    }else{
+      toast('that request for “'+(x.layer_name||x.layer)+'” was declined'
+        +(x.reason?' — '+x.reason:''),'warn');
+    }
+  });
+  syncAccessChip();
+  if($('accessPop').classList.contains('open'))drawAccessPop();
+  if($('sharePop').classList.contains('open')&&$('sharePop').dataset.lid)
+    drawSharePop($('sharePop').dataset.lid);
+}
+function syncAccessChip(){
+  const chip=$('accessChip'); if(!chip)return;
+  // R64: trust whichever is HIGHER -- /api/state's count arrives with every
+  // refresh, so the chip lights the moment someone asks instead of waiting
+  // out the access poll's own interval.
+  const said=(state&&state.access_pending)||0;
+  const inn=Math.max(said, ACCESS_IN.filter(x=>x.state==='pending').length);
+  const out=ACCESS_OUT.filter(x=>x.state==='pending').length;
+  chip.style.display=(inn||out||collabLive())?'':'none';
+  chip.textContent=inn?('🔑 '+inn):'🔑';
+  chip.classList.toggle('hot',!!inn);
+  chip.title=inn?(inn+(inn===1?' person is':' people are')
+                  +' waiting for access to your layers — click to answer')
+    :out?(out+' request'+(out>1?'s':'')+' of yours is waiting for an answer')
+    :'Layer access — who may paint on whose layers';
+}
+function accRow(text,title){
+  const r=document.createElement('div'); r.className='arow';
+  const n=document.createElement('span'); n.className='an';
+  n.textContent=text; if(title)n.title=title; r.appendChild(n); return r;
+}
+function drawAccessPop(){
+  const list=$('accessList'); list.innerHTML='';
+  const pend=ACCESS_IN.filter(x=>x.state==='pending');
+  const head=(t)=>{ const h=document.createElement('div');
+    h.style.cssText='font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-dim);margin-top:4px';
+    h.textContent=t; list.appendChild(h); };
+  head('Asking you');
+  if(!pend.length) list.appendChild(accRow('nobody is waiting on you'));
+  pend.forEach(x=>{
+    const r=accRow((x.from_name||peerName(x.from))+' → “'+(x.layer_name||x.layer)+'”',
+                   x.note||'no message');
+    const y=document.createElement('button'); y.textContent='Grant';
+    y.className='primary';
+    y.title='Let them edit this layer. You keep it — sharing is not handing it over.';
+    y.onclick=async()=>{ const rr=await api('/api/access',{...J,
+        body:JSON.stringify({action:'grant',id:x.id})});
+      if(rr&&rr.error)return; toast('shared','info'); await pollAccess(); refresh(); };
+    const n=document.createElement('button'); n.textContent='Not now';
+    n.title='Decline. They are told, and can ask again later.';
+    n.onclick=async()=>{ const rr=await api('/api/access',{...J,
+        body:JSON.stringify({action:'deny',id:x.id})});
+      if(rr&&rr.error)return; await pollAccess(); };
+    r.appendChild(y); r.appendChild(n); list.appendChild(r);
+  });
+  head('You asked for');
+  if(!ACCESS_OUT.length) list.appendChild(accRow('you have not asked for anything'));
+  ACCESS_OUT.slice(-8).reverse().forEach(x=>{
+    list.appendChild(accRow('“'+(x.layer_name||x.layer)+'” — '
+      +(x.state==='pending'?'waiting':x.state),
+      x.state==='denied'&&x.reason?x.reason:''));
+  });
+}
+(function accessChipWiring(){
+  const chip=$('accessChip'); if(!chip)return;
+  chip.onclick=()=>{
+    const pop=$('accessPop');
+    if(pop.classList.contains('open')){ pop.classList.remove('open'); return; }
+    drawAccessPop(); pop.classList.add('open');
+    placePopup(pop, chip.getBoundingClientRect());
+    pollAccess();
+  };
+  document.addEventListener('pointerdown',e=>{
+    const pop=$('accessPop');
+    if(pop&&pop.classList.contains('open')
+       &&!(e.target instanceof Element&&(pop.contains(e.target)||e.target.id==='accessChip')))
+      pop.classList.remove('open');
+  });
+})();
+
+// ---------------------------------------------------------------- sharing
+function openSharePop(lid, anchor){
+  const pop=$('sharePop');
+  if(pop.classList.contains('open')&&pop.dataset.lid===lid){
+    pop.classList.remove('open'); return; }
+  pop.dataset.lid=lid; drawSharePop(lid);
+  pop.classList.add('open'); placePopup(pop, anchor||$('side').getBoundingClientRect());
+}
+function drawSharePop(lid){
+  const l=((state&&state.layers)||[]).find(x=>x.id===lid);
+  const body=$('shareBody'); body.innerHTML='';
+  if(!l){ $('sharePop').classList.remove('open'); return; }
+  $('shareHead').textContent='Who may paint on “'+l.name+'”';
+  const owner=l.owner||'';
+  const line=document.createElement('div');
+  line.className='mu'; line.style.fontSize='11px'; line.style.lineHeight='1.45';
+  line.textContent=!owner ? 'Nobody holds this layer. The next person to paint on it takes it — that is the lock, and it happens by itself.'
+    : owner===USER_ID ? 'You hold this layer. Nobody else can paint on it until you share it below.'
+    : isAgentUid(owner) ? (peerName(owner)+' (an agent) made this layer. You can paint on it freely — an agent never locks you out.')
+    : (peerName(owner)+' holds this layer'+(l.mine?', and has shared it with you.':'. Your edits here are refused until they share it.'));
+  body.appendChild(line);
+
+  if(owner===USER_ID){
+    const r=accRow('');
+    r.querySelector('.an').textContent='your lock';
+    const rel=document.createElement('button'); rel.textContent='Let it go';
+    rel.title='Give up your hold. Anyone can then paint on it — and whoever does takes the lock.';
+    rel.onclick=async()=>{ const rr=await api('/api/layer',{...J,
+        body:JSON.stringify({action:'release',id:lid})});
+      if(rr&&rr.error)return; await refresh(); drawSharePop(lid); };
+    r.appendChild(rel); body.appendChild(r);
+
+    const sh=(l.shared||[]);
+    const h=document.createElement('div');
+    h.style.cssText='font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-dim);margin-top:4px';
+    h.textContent='Shared with'; body.appendChild(h);
+    if(!sh.length) body.appendChild(accRow('nobody yet'));
+    sh.forEach(u=>{
+      const r2=accRow(peerName(u));
+      const rv=document.createElement('button'); rv.textContent='Revoke';
+      rv.title='Take back edit access. Their work already on the layer stays.';
+      rv.onclick=async()=>{ const rr=await api('/api/layer',{...J,
+          body:JSON.stringify({action:'revoke',id:lid,to:u})});
+        if(rr&&rr.error)return; await refresh(); drawSharePop(lid); };
+      r2.appendChild(rv); body.appendChild(r2);
+    });
+    const others=((state&&state.peers)||[]).filter(p=>p.id!==USER_ID&&!sh.includes(p.id));
+    if(others.length){
+      const h2=document.createElement('div');
+      h2.style.cssText='font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-dim);margin-top:4px';
+      h2.textContent='Here now'; body.appendChild(h2);
+      others.forEach(p=>{
+        const r3=accRow((isAgentUid(p.id)?'🤖 ':'')+(p.name||peerName(p.id)));
+        const g=document.createElement('button'); g.textContent='Share'; g.className='primary';
+        g.title='Let them edit this layer too. You keep the lock.';
+        g.onclick=async()=>{ const rr=await api('/api/layer',{...J,
+            body:JSON.stringify({action:'grant',id:lid,to:p.id})});
+          if(rr&&rr.error)return; toast('shared with '+(p.name||peerName(p.id)),'info');
+          await refresh(); drawSharePop(lid); };
+        r3.appendChild(g); body.appendChild(r3);
+      });
+    }
+    const mine=ACCESS_IN.filter(x=>x.state==='pending'&&x.layer===lid);
+    mine.forEach(x=>{
+      const r4=accRow((x.from_name||peerName(x.from))+' is asking', x.note||'');
+      const y=document.createElement('button'); y.textContent='Grant'; y.className='primary';
+      y.onclick=async()=>{ await api('/api/access',{...J,
+          body:JSON.stringify({action:'grant',id:x.id})});
+        await pollAccess(); await refresh(); drawSharePop(lid); };
+      r4.appendChild(y); body.appendChild(r4);
+    });
+  }else if(owner&&owner!==USER_ID&&!l.mine&&!isAgentUid(owner)){
+    const r=accRow('');
+    r.querySelector('.an').textContent='you cannot edit this layer';
+    const ask=document.createElement('button'); ask.textContent='Ask for access';
+    ask.className='primary';
+    const already=ACCESS_OUT.some(x=>x.layer===lid&&x.state==='pending');
+    if(already){ ask.textContent='asked — waiting'; ask.disabled=true; }
+    ask.onclick=async()=>{ await askForAccess(lid); drawSharePop(lid); };
+    r.appendChild(ask); body.appendChild(r);
+  }else if(!owner){
+    const r=accRow('');
+    r.querySelector('.an').textContent='claim it now?';
+    const c=document.createElement('button'); c.textContent='Hold this layer';
+    c.className='primary';
+    c.title='Take the lock without painting first — useful before you step away.';
+    c.onclick=async()=>{ const rr=await api('/api/layer',{...J,
+        body:JSON.stringify({action:'claim',id:lid})});
+      if(rr&&rr.error)return; await refresh(); drawSharePop(lid); };
+    r.appendChild(c); body.appendChild(r);
+  }
+}
+document.addEventListener('pointerdown',e=>{
+  const pop=$('sharePop');
+  if(pop&&pop.classList.contains('open')&&e.target instanceof Element
+     &&!pop.contains(e.target)&&!e.target.closest('.shareb'))
+    pop.classList.remove('open');
+});
+
+// ------------------------------------------------------------- the agent
+// The DOCUMENT PROMPT. The server holds the default brief and hands it back
+// on every GET, so the panel can show what an agent is ACTUALLY following
+// when nobody has written anything -- an empty box with no explanation reads
+// as "nothing is happening", which is the opposite of the truth.
+let AGENT_BRIEF=null;
+async function loadAgentBrief(){
+  const r=await api('/api/agent/brief',{method:'GET'});
+  if(!r||r.error)return;
+  AGENT_BRIEF=r;
+  const ta=$('agentBrief');
+  if(document.activeElement!==ta) ta.value=r.brief||'';
+  ta.placeholder=(r.default_brief||'').slice(0,120)+'…';
+  syncAgentPanel();
+  loadAgentAssists();
+}
+async function saveAgentBrief(txt){
+  const r=await api('/api/agent/brief',{...J,body:JSON.stringify({brief:txt})});
+  if(r&&r.error)return;
+  toast(txt.trim()?'saved — a connected agent picks this up on its next check'
+                  :'back to the default: it will quietly support what you paint','info');
+  loadAgentBrief();
+}
+function agoWords(ts){
+  const s=Math.max(0,Date.now()/1000-ts);
+  if(s<90)return 'just now';
+  const m=Math.round(s/60);
+  return m<60?(m+' minute'+(m===1?'':'s')+' ago')
+    :m<90?'about an hour ago'
+    :m<24*60?('about '+Math.round(m/60)+' hours ago')
+    :m<36*60?'yesterday':(Math.round(m/(24*60))+' days ago');
+}
+function syncAgentPanel(){
+  if(!$('agentSect'))return;
+  syncAgentPause();
+  const eff=((AGENT_BRIEF&&AGENT_BRIEF.brief)||'').trim();
+  const dflt=(AGENT_BRIEF&&AGENT_BRIEF.default_brief)||'';
+  const ee=$('agentEffective');
+  if(ee){ ee.textContent=eff||dflt;
+    ee.title=eff?'Your document prompt — this is what an agent here is following.'
+      :'No prompt written, so an agent here follows this default.'; }
+  const who=$('agentBriefWho');
+  if(who) who.textContent = eff
+    ? ('your prompt'+(AGENT_BRIEF&&AGENT_BRIEF.updated_at
+        ? ' — set by '+(peerName(AGENT_BRIEF.updated_by)||'someone')
+          +' '+agoWords(AGENT_BRIEF.updated_at) : ''))
+    : 'no prompt written — the default below is what applies';
+  // R64: what the agent says it understood. A prompt whose effect is
+  // invisible is indistinguishable from a prompt that was ignored, so the
+  // panel shows the reading back and names the parts it could not use.
+  const rd=$('agentReading');
+  if(rd){
+    const rs=(AGENT_BRIEF&&AGENT_BRIEF.readings)||[];
+    if(!rs.length){ rd.textContent=(AGENT_BRIEF&&(AGENT_BRIEF.brief||'').trim())
+        ? 'no agent has read this prompt yet — connect one and it will report back here'
+        : 'nothing connected yet'; rd.title=''; }
+    else{
+      rd.innerHTML='';
+      rs.forEach(r=>{
+        const d=document.createElement('div');
+        const t=String(r.reading||'');
+        d.innerHTML='<b>'+escHtml(r.name||r.uid)+'</b> '+
+          escHtml(t).replace(/(could NOT use[^·]*)/,'<span class="warnr">$1</span>');
+        d.title='Reported by the agent itself. If this is not what you meant, rewrite the prompt above.';
+        rd.appendChild(d);
+      });
+    }
+  }
+  const agents=((state&&state.peers)||[]).filter(p=>isAgentUid(p.id));
+  const aw=$('agentWho');
+  if(aw){ aw.innerHTML='';
+    if(!agents.length) aw.appendChild(accRow('none connected',
+      'Start one with tools/paint_agent.py, or connect anything that sends an X-User of agent:<name>.'));
+    agents.forEach(p=>aw.appendChild(accRow('🤖 '+(p.name||peerName(p.id))
+      +(p.activity?' · '+p.activity:''))));
+  }
+  const al=$('agentLayers');
+  if(al){ al.innerHTML='';
+    const own=((state&&state.layers)||[]).filter(l=>l.agent);
+    if(!own.length) al.appendChild(accRow('it has not made anything yet'));
+    own.slice().reverse().forEach(l=>{
+      const r=accRow(l.name, 'Made by '+peerName(l.owner)+'. Yours to do anything with.');
+      const eye=document.createElement('button'); eye.textContent=l.visible?'👁':'🚫';
+      eye.title=l.visible?'Hide it':'Show it';
+      eye.onclick=async()=>{ await api('/api/layer',{...J,
+        body:JSON.stringify({action:'edit',id:l.id,visible:!l.visible})}); refresh(); };
+      const md=document.createElement('button'); md.textContent='⤵';
+      md.title='Merge it down into the layer below — keep the work, lose the extra layer';
+      md.onclick=async()=>{ await api('/api/layer',{...J,
+        body:JSON.stringify({action:'merge_down',id:l.id})}).then(r=>followLayerOp(r,'merged down')); refresh(); };
+      const del=document.createElement('button'); del.textContent='🗑';
+      del.title='Throw it away';
+      del.onclick=async()=>{ await api('/api/layer',{...J,
+        body:JSON.stringify({action:'delete',id:l.id})}); refresh(); };
+      r.appendChild(eye); r.appendChild(md); r.appendChild(del); al.appendChild(r);
+    });
+  }
+}
+// R65: what the agent did, one line each, each with its own undo. The
+// layer list already lets you hide or delete the agent's whole layer; this
+// is the finer grain a painter actually wants -- "that one, no".
+let AGENT_ASSISTS=[];
+async function loadAgentAssists(){
+  const r=await api('/api/agent/assists',{method:'GET',quiet:true});
+  if(!r||r.error)return;
+  AGENT_ASSISTS=r.assists||[];
+  const box=$('agentAssists'); if(!box)return;
+  box.innerHTML='';
+  if(!AGENT_ASSISTS.length){ box.appendChild(accRow('nothing yet')); return; }
+  AGENT_ASSISTS.slice(0,12).forEach(a=>{
+    const r2=accRow((a.by_name||a.by)+': '+(a.note||('painted on '+(a.layer_names||[]).join(', ')))
+      +' · '+agoWords(a.at), (a.layer_names||[]).join(', '));
+    if(a.undone){ r2.style.opacity='.45'; r2.querySelector('.an').textContent+=' (taken back)'; }
+    else{
+      const u=document.createElement('button'); u.textContent='undo';
+      u.title='Take back exactly this — the rest of the agent’s work stays';
+      u.onclick=async()=>{ const rr=await api('/api/agent/assists',{...J,
+          body:JSON.stringify({action:'undo',id:a.id})});
+        if(rr&&rr.error)return; toast('taken back','info'); await refresh(); loadAgentAssists(); };
+      r2.appendChild(u);
+    }
+    box.appendChild(r2);
+  });
+}
+function syncAgentPause(){
+  const b=$('agentPause'); if(!b||!AGENT_BRIEF)return;
+  const p=!!AGENT_BRIEF.paused;
+  b.textContent=p?'▶ Resume the agent':'⏸ Pause the agent';
+  b.classList.toggle('primary',p);
+  b.title=p?'The agent is paused: it is watching but paints nothing. Click to let it work again.'
+           :'Not right now. A paused agent keeps watching but paints nothing until you resume — no need to disconnect it or rewrite the prompt.';
+}
+(function agentPanelWiring(){
+  const pb=$('agentPause');
+  if(pb) pb.onclick=async()=>{
+    const want=!(AGENT_BRIEF&&AGENT_BRIEF.paused);
+    const r=await api('/api/agent/brief',{...J,body:JSON.stringify({paused:want})});
+    if(r&&r.error)return;
+    toast(want?'agent paused — it will not paint until you resume':'agent resumed','info');
+    loadAgentBrief();
+  };
+  const b=$('sidetabsB')&&$('sidetabsB').querySelector('[data-st="agent"]');
+  if(b) b.onclick=()=>{ sideTab('agent'); loadAgentBrief(); };
+  const sv=$('agentBriefSave');
+  if(sv) sv.onclick=()=>saveAgentBrief($('agentBrief').value);
+  const cl=$('agentBriefClear');
+  if(cl) cl.onclick=()=>{ $('agentBrief').value=''; saveAgentBrief(''); };
+})();
+
+// One clock for both halves: the inbox has to arrive without being asked
+// for, and the brief has to notice when a peer rewrites it. Slow while you
+// are painting alone, brisk once the document is actually shared.
+function r63Tick(){
+  clearTimeout(_accTimer);
+  const shared=collabLive();
+  _accTimer=setTimeout(()=>{
+    const jobs=[pollAccess()];
+    if(shared||$('agentSect').classList.contains('on')) jobs.push(loadAgentBrief());
+    Promise.all(jobs).catch(()=>{}).then(r63Tick);
+  }, shared?5000:20000);
+}
+
 function closeToolGroups(except){
   document.querySelectorAll('#toolbar .tgrp.open').forEach(g=>{ if(g!==except) g.classList.remove('open'); });
 }
@@ -6400,29 +7687,70 @@ function pingActivity(){
       {tool:ACT_VERB[tool]||tool,layer:l?l.name:''})});
   },2000);
 }
-async function doScribble(x,y){
+// R69: the generator brushes take a DRAGGED PATH, and their nib is the
+// brush size. They sit in the brush row, take the brush cursor and are
+// called brushes -- but each one only ever stamped one disc under the
+// pointer-down and ignored most of the brush panel, which is not
+// something a person can be expected to guess. `genPath` is the path the
+// pointer swept; null means a plain click, and the server then behaves
+// exactly as it always did.
+function genRadius(fallbackId){
+  // the BRUSH SIZE is the nib. Each tool keeps its own radius control as
+  // an override for people who had one set, but size leads.
+  const bs=+$('bSize').value;
+  return (bs>0)?bs:(+$(fallbackId).value||40);
+}
+function genCommon(){
+  return {color:hex2rgb($('bColor').value),
+          opacity:+$('bOp').value/100,
+          hardness:+$('bHard').value/100,
+          selection:$('bSel').value||undefined,
+          sel_invert:$('bSelInv').checked,
+          sample:sampleMode()};
+}
+// R70: which layers a tool may READ. Devin, after a multi-layer session:
+// "paint related things should not be aware of other layers by default.
+// Each layer is separate." One control, in the brush panel, read by every
+// tool that looks at pixels to decide what to do -- and it starts on the
+// layer you are painting.
+const SAMPLE_CYCLE=[['layer','reads: layer'],
+                    ['below','reads: below'],
+                    ['composite','reads: all']];
+function sampleMode(){
+  const el=$('bSample');
+  return (el&&el.dataset.value)||'layer';
+}
+(function wireSample(){
+  const el=$('bSample'); if(!el)return;
+  el.onclick=()=>{
+    const i=SAMPLE_CYCLE.findIndex(p=>p[0]===el.dataset.value);
+    const [v,t]=SAMPLE_CYCLE[(i+1)%SAMPLE_CYCLE.length];
+    el.dataset.value=v; el.textContent=t;
+    setStatus();                       // the status bar carries the warning
+    if(tool==='textile')txtPrevUpdate();
+  };
+})();
+async function doScribble(x,y,path){
   if(!sel)return toast('Pick a layer first');
-  const c=hex2rgb($('bColor').value);
   const r=await api('/api/scribble',{...J,body:JSON.stringify({layer:sel,
-    x:Math.round(x),y:Math.round(y),radius:+$('scRadius').value,
+    x:Math.round(x),y:Math.round(y),radius:genRadius('scRadius'),
     curl:+$('scCurl').value/100,thickness:+$('scThick').value,
-    density:+$('scDens').value/100,color:c,opacity:+$('bOp').value/100,
-    selection:$('bSel').value||undefined,sel_invert:$('bSelInv').checked})});
+    density:+$('scDens').value/100,path:path||undefined,...genCommon()})});
   if(r.error)return toast(r.error);
+  setStatus('scribbled '+(r.strokes||0)+' strands');
   refresh();
 }
-async function doHatch(x,y){
+async function doHatch(x,y,path){
   if(!sel)return toast('Pick a layer first');
-  const c=hex2rgb($('bColor').value);
-  const wholeSel=$('haArea').checked&&$('bSel').value;
+  const wholeSel=$('haArea').checked&&$('bSel').value&&!path;
   const r=await api('/api/hatchfill',{...J,body:JSON.stringify({layer:sel,
-    x:Math.round(x),y:Math.round(y),radius:+$('haRadius').value,
+    x:Math.round(x),y:Math.round(y),radius:genRadius('haRadius'),
     mode:$('haMode').value,angle:+$('haAngle').value,
     spacing:+$('haSpace').value,thickness:+$('haThick').value,
-    color:c,opacity:+$('bOp').value/100,weave:$('haWeave').value,
-    area:wholeSel?'selection':'brush',
-    selection:$('bSel').value||undefined,sel_invert:$('bSelInv').checked})});
+    weave:$('haWeave').value,path:path||undefined,
+    area:wholeSel?'selection':'brush',...genCommon()})});
   if(r.error)return toast(r.error);
+  setStatus('hatched '+(r.strokes||0)+' lines');
   refresh();
 }
 document.addEventListener('change',e=>{ if(e.target&&e.target.id==='haMode'){ const el=$('haWeave'); if(el)el.style.display=(e.target.value==='weave')?'':'none'; } });
@@ -6432,7 +7760,7 @@ function txtParams(){
   return {mode, weave:(mode==='weave')?pv:'twill',
     angle:+$('txtAngle').value, spacing:+$('txtSpace').value,
     thickness:+$('txtThick').value, depth:+$('txtDepth').value/100,
-    color:hex2rgb($('txtColor').value)};
+    color:hex2rgb($('bColor').value)};   // R69: the BRUSH colour is the thread
 }
 let _txtPrevT=null;
 function txtPrevUpdate(){
@@ -6441,31 +7769,48 @@ function txtPrevUpdate(){
     const p=txtParams();
     $('txtPrev').src='/api/textile/preview.png?mode='+p.mode+'&weave='+p.weave
       +'&angle='+p.angle+'&spacing='+p.spacing+'&thickness='+p.thickness
-      +'&depth='+p.depth+'&color='+$('txtColor').value.slice(1)+'&t='+Date.now();
+      +'&depth='+p.depth+'&color='+$('bColor').value.slice(1)+'&t='+Date.now();
   },450);
 }
 document.addEventListener('input',e=>{ if(e.target&&e.target.closest&&e.target.closest('#textileHud'))txtPrevUpdate(); });
-document.addEventListener('change',e=>{ if(e.target&&e.target.closest&&e.target.closest('#textileHud')){ txtPrevUpdate(); $('txtRadRow').style.display=$('txtRegion').checked?'none':''; } });
-async function doTextile(x,y){
+document.addEventListener('change',e=>{ if(e.target&&e.target.closest&&e.target.closest('#textileHud')){ txtPrevUpdate(); txtRegionRows(); } });
+function txtRegionRows(){
+  // The radius only matters for a patch; the tolerance only matters for a
+  // region fill. Show whichever one is actually steering the tool.
+  const reg=$('txtRegion').checked;
+  $('txtRadRow').style.display=reg?'none':'';
+  $('txtTolRow').style.display=reg?'':'none';
+}
+async function doTextile(x,y,path){
   if(!sel)return toast('Pick a layer first');
-  const p=txtParams();
+  const p=txtParams(), g=genCommon();
   let r;
-  if($('txtRegion').checked){
-    r=await api('/api/fill',{...J,body:JSON.stringify({layer:sel,
-      x:Math.round(x),y:Math.round(y),tolerance:+$('fiTol').value/100,contiguous:true,
+  // A DRAG always paints the swept band; the flood-fill-a-region branch
+  // is for a plain click. That branch also used to read `fiTol` out of
+  // the FILL panel -- which setTool hides while textile is active, so the
+  // tolerance steering the fill was on a control nobody could see.
+  if(!path&&$('txtRegion').checked){
+    r=await api('/api/fill',{...J,busy:'stitching the region',
+      body:JSON.stringify({layer:sel,
+      x:Math.round(x),y:Math.round(y),tolerance:+$('txtTol').value/100,contiguous:true,
       source:{type:'generated',style:p.mode==='weave'?'weave':p.mode,weave:p.weave,
         angle:p.angle,spacing:p.spacing,thickness:p.thickness,depth:p.depth,
-        color:p.color,opacity:0.95,sample:'composite'},
+        color:g.color,opacity:g.opacity,hardness:g.hardness,sample:sampleMode()},
       selection:activeSel||undefined})});
   }else{
-    r=await api('/api/hatchfill',{...J,body:JSON.stringify({layer:sel,
-      x:Math.round(x),y:Math.round(y),radius:+$('txtRadius').value,
+    r=await api('/api/hatchfill',{...J,busy:'stitching',
+      body:JSON.stringify({layer:sel,
+      x:Math.round(x),y:Math.round(y),radius:genRadius('txtRadius'),
       mode:p.mode,weave:p.weave,angle:p.angle,spacing:p.spacing,
-      thickness:p.thickness,depth:p.depth,color:p.color,opacity:0.95,
-      selection:$('bSel').value||undefined,sel_invert:$('bSelInv').checked})});
+      thickness:p.thickness,depth:p.depth,path:path||undefined,...g})});
   }
   if(r.error)return toast(r.error);
-  if(p.depth>0){ await api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:sel,relief:0.5+p.depth})}); }
+  paintWarn(r);                     // R59: an empty region says so
+  // R71: the relief that thread depth implies is set by the fill itself
+  // now, inside its own undo record. It used to be a SECOND request from
+  // here, which took a second undo entry -- so the first Ctrl+Z after
+  // stitching reverted an invisible property and the stitching stayed
+  // put. "Undo doesn't seem to work" is what that looks like.
   setStatus('stitched '+(r.strokes||0)+' strokes');
   refresh();
 }
@@ -6478,7 +7823,7 @@ function setTool(t){
   tool=t;Object.values(TOOLBTN).forEach(id=>$(id).classList.remove('active'));
   $(TOOLBTN[t]).classList.add('active');
   syncToolRail(t);
-  vc.style.cursor=({brush:'crosshair',erase:'crosshair',smudge:'crosshair',clone:'crosshair',heal:'crosshair',stamp:'copy',
+  vc.style.cursor=({brush:'crosshair',erase:'crosshair',smudge:'crosshair',knife:'crosshair',blend:'crosshair',clone:'crosshair',heal:'crosshair',stamp:'copy',
     rect:'crosshair',ellipse:'crosshair',wand:'copy',lum:'copy',obj:'copy',spline:'crosshair',transform:'move',fill:'crosshair',text:'text',
     pick:'copy',nudge:'grab',strokesel:'pointer',nodepaint:'crosshair',fx:'crosshair',scribble:'crosshair',hatch:'crosshair',textile:'crosshair'})[t]||'default';
   const brushFam=['brush','erase','smudge','clone','heal','pick'].includes(t);
@@ -6496,7 +7841,7 @@ function setTool(t){
   else TR=null;
   if(t==='fill'&&$('fiSrc').value==='node')fillNodeOptions();
   if(t==='stamp')loadStampShelf();
-  if(t==='textile'){ txtPrevUpdate(); $('txtRadRow').style.display=$('txtRegion').checked?'none':''; }
+  if(t==='textile'){ txtPrevUpdate(); txtRegionRows(); }
   pingActivity();                               // R5 #31: tool changed
   setStatus();
   repaintCanvas();}
@@ -6509,6 +7854,12 @@ function paintContext(){
   const gate=$('bSel')&&$('bSel').value;
   if(gate)bits.push('brush limited to selection'+($('bSelInv').checked?' (inverted)':''));
   else if(activeSel)bits.push('selection active');
+  // R70: a tool reading past its own layer is never silent. The default
+  // says nothing (it is the expected behaviour); anything wider is on the
+  // status bar for as long as it is set.
+  const sm=sampleMode();
+  if(sm==='below')bits.push('⚠ reading this layer + below');
+  else if(sm==='composite')bits.push('⚠ reading ALL layers');
   return bits.join('   ·   ');
 }
 function setStatus(msg){
@@ -6523,13 +7874,50 @@ Object.entries(TOOLBTN).forEach(([t,id])=>{
   const b=document.getElementById(id);
   if(b) b.onclick=()=>setTool(t);
 });
+// The keys that ACTIVATE a control, named once. A browser gives a real
+// <button> Enter and Space for free; anything we make focusable ourselves
+// has to answer both by hand, and spelling the test out at each site both
+// invites drift and reads to the shortcut-hygiene audit as another
+// document-level Enter binding competing with the transform tool's.
+const isActivateKey=e=>e.key==='Enter'||e.key===' '||e.key==='Spacebar';
 (function toolGroups(){
   const rail=document.getElementById('toolbar'); if(!rail)return;
   rail.querySelectorAll('.tgrp').forEach(g=>{
     if(g.querySelectorAll('button').length<2) g.classList.add('solo');
     const caret=g.querySelector('.tgc');
-    if(caret) caret.addEventListener('pointerdown',e=>{
-      e.preventDefault(); e.stopPropagation(); openToolGroup(g); });
+    if(caret){
+      caret.addEventListener('pointerdown',e=>{
+        e.preventDefault(); e.stopPropagation(); openToolGroup(g); });
+      // R60: KEYBOARD REACH. The rail shows one button per group and hides
+      // the rest, and the expander was a bare <span> -- so 13 of the 25
+      // tools could not be reached by Tab at all. Measured: 12 reachable,
+      // 13 not. The caret is a real control now (Enter or Space opens the
+      // group and lands on its first tool; Escape closes it and comes
+      // back), which is what makes every tool reachable without a mouse.
+      // The letter shortcuts were always there and still are -- but a
+      // toolbar that shows a control Tab can never reach is lying.
+      if(!g.classList.contains('solo')){
+        caret.tabIndex=0; caret.setAttribute('role','button');
+        const names=[...g.querySelectorAll('button')].map(b=>(b.title||'').split(/[—(]/)[0].trim())
+                     .filter(Boolean).join(', ');
+        caret.setAttribute('aria-label','More tools: '+names);
+        caret.title='More tools — '+names;
+        caret.addEventListener('keydown',e=>{
+          if(!isActivateKey(e))return;
+          e.preventDefault(); openToolGroup(g);
+          const first=[...g.querySelectorAll('button')].find(b=>b.offsetParent!==null);
+          if(first)first.focus();
+        });
+      }
+    }
+    // Escape inside an open group closes it and hands focus back to the
+    // caret, so a keyboard user is never left standing in a closed menu
+    g.addEventListener('keydown',e=>{
+      if(e.key==='Escape'&&g.classList.contains('open')){
+        e.stopPropagation(); closeToolGroups();
+        const c=g.querySelector('.tgc'); if(c)c.focus();
+      }
+    });
     g.addEventListener('contextmenu',e=>{ e.preventDefault(); openToolGroup(g); });
     let timer=null, viaHold=false;
     g.addEventListener('pointerdown',()=>{
@@ -6785,20 +8173,20 @@ function fillSource(){   // hex2rgb already defined above
   if(v==='scribble')return{type:'generated',style:'scribble',curl:+$('fiCurl').value/100,
     thickness:+$('scThick').value,density:+$('scDens').value/100,
     color:hex2rgb($('bColor').value),opacity:+$('bOp').value/100,
-    sample:$('fiComp').checked?'composite':'layer'};
+    sample:sampleMode()};
   if(v==='scatter'){
     const src={type:'generated',style:'scatter',element:$('fiScEl').value,
       perspective:+$('fiScPersp').value/100,density:+$('fiScDens').value/100,
       size:+$('fiScSize').value/100,color:hex2rgb($('bColor').value),
       color2:hex2rgb($('fiScC2').value),opacity:+$('bOp').value/100,
-      sample:$('fiComp').checked?'composite':'layer'};
+      sample:sampleMode()};
     if(+$('fiScHz').value>=0)src.horizon=+$('fiScHz').value;
     return src;
   }
   if(v==='hatch')return{type:'generated',style:$('fiHMode').value,weave:$('haWeave').value,
     angle:+$('haAngle').value,spacing:+$('haSpace').value,thickness:+$('haThick').value,
     color:hex2rgb($('bColor').value),opacity:+$('bOp').value/100,
-    sample:$('fiComp').checked?'composite':'layer'};
+    sample:sampleMode()};
   return{type:'node',node:$('fiNode').value};
 }
 let FONTS=null;
@@ -6819,7 +8207,9 @@ $('txShadow').onchange=()=>$('txShadowRow').style.display=$('txShadow').checked?
 async function doText(x,y){
   if(!sel)return setStatus('⚠ pick a layer first');
   const t=$('txContent').value;
-  if(!t)return setStatus('⚠ type some text in the panel first');
+  if(!t){ setStatus('⚠ type some text in the panel first');
+    toast('Type your text in the Text panel first, then click the canvas to place it','info');
+    sideTab('tool'); const tc=$('txContent'); if(tc)tc.focus(); return; }
   const body={layer:sel,text:t,x:Math.round(x),y:Math.round(y),
     size:+$('txSize').value,font:$('txFont').value,color:hex2rgb($('txColor').value),
     spline:$('txSpline').value||undefined};
@@ -6832,6 +8222,38 @@ async function doText(x,y){
   refresh(); refreshNodePreviews();
 }
 const SHORTCUTS=[['Shift+P','perspective guides on/off'],['S','Accept a shape-assist offer (tidy the stroke)'],['Shift+Space','Play / pause the timeline'],[', / .','Step one frame back / forward'],['Home / End','Jump to the first / last frame'],["B / E", "Brush / Eraser"], ["S / C", "Smudge / Clone"], ["M / W", "Marquee / Magic wand"], ["N", "Nudge — move strokes, not pixels"], ["K", "Select strokes (Shift-click adds)"], ["I", "Eyedropper (Alt-click while brushing)"], ["Swatch strip", "Click a recent colour to reuse · Alt-click to remove"], ["Del / Backspace", "Clear the selection (whole layer if none)"], ["Ctrl+click thumb", "Load layer alpha as selection"], ["Alt+click eye", "Solo a layer (again restores)"], ["Drag a layer row", "Reorder layers"], ["M (nodes)", "Bypass / re-enable a node"], ["Shift-drag (nodes)", "Box-select nodes"], ["Ctrl+C / V (nodes)", "Copy / paste nodes with their links"], ["Drop a wire on empty space", "Search for a node and auto-connect it"], ["Drop a node on a wire", "Insert it into that link"], ["Ctrl-drag (nodes)", "Slice through wires to cut them"], ["Ctrl+drag (nodes)", "Slash across wires to cut them"], ["Ctrl+Shift+N", "New layer"], ["Ctrl+1", "Zoom 100%"], ["V", "Transform tool"], ["G", "Fill (bucket)"], ["T", "Text tool"], ["P", "Spline pen"], ["Ctrl+C / X / V", "Copy / Cut / Paste selection"], ["Ctrl+J", "Duplicate layer"], ["Ctrl+D", "Deselect · duplicate node (in Nodes)"], ["Ctrl+Z / Shift+Z / Y", "Undo / Redo"], ["Ctrl+S", "Save workspace"], ["Ctrl+O", "Open image"], ["Ctrl+Shift+E", "Merge visible"], ["Esc", "Reset transform → finish spline → deselect"], ["Enter", "Apply transform"], ["[ / ]", "Brush smaller / larger"], ["+ / − / 0", "Zoom in / out / fit"], ["Ctrl+0", "Fit on screen"], ["Stroke panel", "width slider: swells selected joints, or tapers the whole stroke"], ["Strokes selected", "V transform · Ctrl+C/X/V copy/cut/paste · Del delete · panel: duplicate, to layer, smooth"], ["File ▸ Export at size…", "Render at any resolution, not just canvas size"], ["File ▸ Export frame sequence…", "The animation as numbered PNGs — media simulated on the same timeline playback uses, plus an ffmpeg line"], ["F", "Frame nodes (in Nodes)"], ["Del", "Delete node (in Nodes)"], ["?", "This overlay"], ["Drag & drop", "Images → layers · .lews → workspace · .obj/.glb → 3D models"], ["F", "FX brush — strokes grow effects (grass, drips, embers)"], ["Brush ▸ Media", "Impasto media build real thickness (gravity runs heavy loads) — or pick a MATERIAL (gold, chrome, chalk…): per-pixel stuff lit by the canvas, gleaming in your brush colour"], ["Q", "Palette knife \u2014 shapes the paint already there, across every layer the body spans · click the tool again (or right-click) to cycle the blade: smooth / push / scrape / spread"], ["Y", "Blender \u2014 a clean brush that works the WET paint already on the canvas; unlike Smudge it records as a stroke, so nothing loses its stroke editing"], ["Colour ▸ palette", "Squeeze your swatch colours out as real mounds of paint \u2014 dip a brush in one, drag it through another to mix"], ["Brush ▸ \ud83d\udd8c", "Real brush \u2014 the brush holds a finite amount of paint; drag a dry one through a thick pile to reload, or click the charge meter to dip in the palette"], ["Brush ▸ \u2261", "Build past a layer\u2019s limit \u2014 the excess starts a new layer instead of flattening to a plateau"], ["Brush ▸ Mix", "Wet-on-wet \u2014 the brush picks up paint it crosses and carries it forward"], ["Layer ▸ Paper", "The stock everything sits on: rough and cold-press granulate a wash and break dry-brush up hard; hot-press and smooth stay even"], ["Layer ▸ Grav", "Which way is down for this surface\u2019s wet paint \u2014 easel, flat on a table (paint levels instead of running), or a wall"], ["Brush ▸ ⇋", "Symmetry — strokes paint a mirrored twin (its own editable stroke)"], ["Layer row 🔒 / ◒", "Alpha lock · clipping mask (clips to the layer below)"], ["Editors chip", "Who's here — tabs count as one person; the host can kick"]];
+// R71: EVERY overlay, listed once. The old Escape handler knew about three
+// ids, one of which (`newDocBack`) does not exist anywhere in this document,
+// and missed the Invite, Stream, GPU-preview, Document-settings and leCore
+// panels entirely. Topmost-first, so Escape peels one layer at a time the
+// way a person expects.
+const OVERLAYS=['lcDlg','glModalBack','obsModalBack','inviteModalBack',
+                'shortcutsBack','modalBack2','modalBack','layerDlgBack'];
+function overlayOpen(el){
+  // NOT offsetParent: these are position:fixed, and a fixed element's
+  // offsetParent is null even when it fills the screen. Measure the box.
+  if(!el || el.style.display === 'none')return false;
+  if(getComputedStyle(el).display === 'none')return false;
+  const r=el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+}
+function closeTopOverlay(){
+  // a miniForm is built on the fly and sits above everything; the layer
+  // dialog shares its class but is a permanent, id'd member of the list below
+  const mf=[...document.querySelectorAll('.miniback')]
+    .filter(el=>!el.id && overlayOpen(el)).pop();
+  if(mf){ const c=mf.querySelector('[data-cancel],button.cancel,.dlgCancel');
+          if(c)c.click(); else mf.remove(); return true; }
+  for(const id of OVERLAYS){
+    const el=$(id);
+    if(!overlayOpen(el))continue;
+    if(id==='shortcutsBack'){ toggleShortcuts(); return true; }
+    const cancel=el.querySelector('[data-cancel],button.cancel,.dlgCancel');
+    if(cancel)cancel.click(); else el.style.display='none';
+    return true;
+  }
+  return false;
+}
 function toggleShortcuts(){
   const b=$('shortcutsBack');
   if(b.style.display==='none'){
@@ -6852,6 +8274,9 @@ function toggleShortcuts(){
       ["Layers ▸ Histogram","Live tone distribution with clipping warnings"],
       ["Colour swatches","Recent colours — click to reuse, Alt-click to remove"],
       ["Advanced panel","Masks and splines, tucked away until you want them"],
+      ["Layers ▸ 🔑 (row tools)","Every layer you paint on becomes yours automatically, so nobody can paint over your work. 🔑 lets it go, or shares it with someone here"],
+      ["🔑 (top bar)","Answer people asking to paint on your layers, and see what you have asked for"],
+      ["Agent ▸ Document prompt","Tell an agent connected to this document what you want it doing. Leave it empty and it quietly supports whatever you paint — always on its own layers, never yours"],
     ];
     $('shortcutsBody').innerHTML=
       '<div style="grid-column:1/-1;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-dim);margin:2px 0 4px">Keys</div>'
@@ -6954,15 +8379,21 @@ setInterval(()=>{ if(DIRTY) api('/api/autosave',{method:'POST'}).catch(()=>{}); 
     const a=await api('/api/autosave');
     if(!a.exists||a.age_s>7*24*3600) return;
     const b=document.createElement('div'); b.id='restoreBanner';
+    // R59: "from 95 min ago" is how a clock talks, not a person. Past an
+    // hour say hours, past a day say days -- and yesterday is 'yesterday'.
     const mins=Math.max(1,Math.round(a.age_s/60));
-    const when=(mins<120?mins+' min':Math.round(mins/60)+' h')+' ago';
+    const when=mins<60?(mins+' minute'+(mins===1?'':'s')+' ago')
+      :mins<90?'about an hour ago'
+      :mins<24*60?('about '+Math.round(mins/60)+' hours ago')
+      :mins<36*60?'yesterday'
+      :(Math.round(mins/(24*60))+' days ago');
     // Offering a recovery that then fails is worse than offering none -- this
     // appears right after a crash, when the user most wants to believe it.
     if(a.usable===false){
       b.innerHTML='<span>⚠ The autosave from '+when+' is damaged and cannot be restored.</span>';
       const ok=document.createElement('button'); ok.textContent='OK';
       ok.onclick=()=>b.remove();
-      b.appendChild(ok); document.body.appendChild(b);
+      b.appendChild(ok); $('bannerStack').appendChild(b);
       setTimeout(()=>{ if(b.parentNode) b.remove(); }, 30000);
       return;
     }
@@ -6972,7 +8403,7 @@ setInterval(()=>{ if(DIRTY) api('/api/autosave',{method:'POST'}).catch(()=>{}); 
       if(r.error){toast(r.error);} else location.reload(); };
     const no=document.createElement('button'); no.textContent='Dismiss';
     no.onclick=()=>b.remove();
-    b.appendChild(yes); b.appendChild(no); document.body.appendChild(b);
+    b.appendChild(yes); b.appendChild(no); $('bannerStack').appendChild(b);
     setTimeout(()=>{ if(b.parentNode) b.remove(); }, 30000);   // don't nag forever
   }catch(e){}
 })();
@@ -7002,16 +8433,21 @@ window.addEventListener('drop',async e=>{
       // vanished from view while the toast claimed a layer was added.)
       const b64=await new Promise(res=>{const fr=new FileReader();
         fr.onload=()=>res(fr.result); fr.readAsDataURL(f);});
-      const r=await api('/api/paste',{...J,body:JSON.stringify({png:b64})});
+      // R71: bringing the image in and putting it where it was dropped is
+      // one act -- one Ctrl+Z used to leave the image sitting at 0,0.
+      const r=await gesture(async()=>{
+        const rr=await api('/api/paste',{...J,body:JSON.stringify({png:b64})});
+        if(rr&&rr.ok){
+          const pr=$('canvasPane').getBoundingClientRect();
+          if(e.clientX>=pr.left&&e.clientX<=pr.right&&e.clientY>=pr.top&&e.clientY<=pr.bottom){
+            const [dx2,dy2]=paneToDoc(e.clientX-pr.left,e.clientY-pr.top);
+            await api('/api/place',{...J,body:JSON.stringify({id:rr.id,x:dx2+dropN*24,y:dy2+dropN*24})});
+          }
+        }
+        return rr;
+      });
       if(r&&r.ok){
         sel=r.id;
-        // land it where it was dropped (when the drop was over the
-        // canvas); successive files fan out so they don't stack
-        const pr=$('canvasPane').getBoundingClientRect();
-        if(e.clientX>=pr.left&&e.clientX<=pr.right&&e.clientY>=pr.top&&e.clientY<=pr.bottom){
-          const [dx2,dy2]=paneToDoc(e.clientX-pr.left,e.clientY-pr.top);
-          await api('/api/place',{...J,body:JSON.stringify({id:r.id,x:dx2+dropN*24,y:dy2+dropN*24})});
-        }
         dropN++;
         toast(r.oversize
           ? '"'+f.name+'" placed at full size ('+r.w+'×'+r.h+') — larger than the canvas, nothing trimmed: the Placement row moves/scales it'
@@ -7150,6 +8586,7 @@ async function doFill(x,y){
     tolerance:+$('fiTol').value/100,contiguous:$('fiCont').checked,source:src,
     selection:activeSel||undefined})});
   if(r.error)return toast(r.error);
+  paintWarn(r);                     // R59: "nothing to fill here", and why
   setStatus(r.strokes!==undefined?('filled with '+r.strokes+' strokes'):('filled '+r.filled+' px'));
   refresh(); refreshNodePreviews();
 }
@@ -7177,7 +8614,24 @@ $('addLayer').onclick=async e=>{const body={action:'add'};
   if(r&&r.id)sel=r.id;
   if(body.below)toast('layer added BELOW the selected one','info');
   refresh();};
-$('delLayer').onclick=async()=>{await api('/api/layer',{...J,body:JSON.stringify({action:'remove',id:sel})});sel=null;refresh();};
+$('delLayer').onclick=async()=>{
+  // R71: land on the NEIGHBOUR, not the top of the stack. Deleting layer 2
+  // of 4 used to clear `sel` and let refresh() fall back to the topmost
+  // layer -- so the next stroke went somewhere the person never chose, with
+  // nothing saying so. Also: `sel=null` was set synchronously and the
+  // refresh that fixed it was async, so a stroke started in that window
+  // sent layer:null and got a 500.
+  const gone=sel;
+  const ls=(state.layers||[]).map(l=>l.id);
+  const at=ls.indexOf(gone);
+  const next=ls[at-1]||ls[at+1]||null;      // below first, then above
+  const r=await api('/api/layer',{...J,body:JSON.stringify({action:'remove',id:gone})});
+  if(r&&r.error)return;
+  if(next)sel=next;
+  await refresh();
+  const nl=(state.layers||[]).find(l=>l.id===sel);
+  if(nl)setStatus('layer deleted — now painting on "'+nl.name+'"');
+};
 $('lBlend').onchange=e=>api('/api/layer',{...J,body:JSON.stringify({action:'edit',id:sel,blend:e.target.value})}).then(refresh);
 $('dPaper').onchange=async e=>{
   const r=await api('/api/paper',{...J,body:JSON.stringify({paper:e.target.value})});
@@ -7210,12 +8664,23 @@ function deselect(){
 $('selClear').onclick=deselect;
 async function selMod(op){
   if(!activeSel)return toast('pick a selection first');
-  await api('/api/selection',{...J,body:JSON.stringify({action:'modify',id:activeSel,op,amount:+$('selAmt').value})});
+  const r=await api('/api/selection',{...J,body:JSON.stringify({action:'modify',id:activeSel,op,amount:+$('selAmt').value})});
+  if(r&&r.error)return;
   await refresh(); loadAnts();
+  // R71: these reported nothing at all, and refresh() overwrote the
+  // coverage line the selection had put on the status bar -- so with a
+  // small amount or a feather, where the ants barely move, there was no way
+  // to tell the click had done anything.
+  const pct=(r&&typeof r.coverage==='number')
+    ? ' — now '+(r.coverage*100).toFixed(r.coverage<0.01?2:0)+'% of the canvas' : '';
+  setStatus(({expand:'selection expanded by ',contract:'selection contracted by ',
+              feather:'selection feathered by '}[op]||op+' ')
+            +$('selAmt').value+' px'+pct);
 }
 $('selExpand').onclick=()=>selMod('expand');
 $('selContract').onclick=()=>selMod('contract');
 $('selFeatherBtn').onclick=()=>selMod('feather');
+$('selInvert').onclick=()=>selMod('invert');
 $('selCrop').onclick=async()=>{
   if(!activeSel)return toast('pick a selection first');
   const r=await api('/api/crop',{...J,body:JSON.stringify({selection:activeSel})});
@@ -7230,6 +8695,7 @@ $('selToMask').onclick=async()=>{ if(!activeSel)return toast('pick a selection f
 // change ("the last change is Bob's"). Surface the server's message, offer a
 // one-click force retry, and never fail silently.
 async function undoRedo(path){
+  if(!canStep(path))return;              // R59: see canStep
   let r=await api(path,{...J,quiet:true,body:'{}'});
   if(r&&r.error&&r.author){                       // 409: someone else's change
     toast(r.error,'warn');
@@ -7239,6 +8705,16 @@ async function undoRedo(path){
     else return;
   } else if(r&&r.error)toast(r.error);
   refresh();refreshNodePreviews();
+}
+// R59: don't fire an undo the server will refuse. Ctrl+Z on a fresh
+// document 409'd on every press (a console error each time, and nothing
+// said why); the state we already hold knows whether there is anything to
+// take back, so say so instead.
+function canStep(path){
+  const yes=path==='/api/undo'?(state&&state.can_undo):(state&&state.can_redo);
+  if(!yes){ toast(path==='/api/undo'?'nothing to undo yet':'nothing to redo','info');
+            return false; }
+  return true;
 }
 $('btnUndo').onclick=()=>undoRedo('/api/undo');
 $('btnRedo').onclick=()=>undoRedo('/api/redo');
@@ -7253,6 +8729,12 @@ document.addEventListener('keydown',e=>{
     if(e.key==='Enter'){e.preventDefault();trApply();return;}
     if(e.key==='Escape'){$('trReset2').click();return;}
   }
+  // R71: ESCAPE BELONGS TO EVERYONE, and it has to be handled BEFORE the
+  // text-field guard below. Five of the seven dialogs could not be closed
+  // with Escape, and two of them (New document, Document settings) autofocus
+  // a text input on open -- so the guard swallowed the key and a
+  // keyboard-only person was stuck inside a focus trap with no exit at all.
+  if(e.key==='Escape'&&closeTopOverlay()){ e.preventDefault(); return; }
   {const t=e.target, tag=t.tagName;   // never steal keys from a text field:
    // TEXTAREA was missing -- typing in the shader editor switched tools, and
    // Ctrl+C/V were hijacked so shader code could not be copied or pasted.
@@ -7289,7 +8771,8 @@ document.addEventListener('keydown',e=>{
       return;}
     if(k==='g'&&mode==='nodes'){e.preventDefault();groupSelected();return;}
     if(k==='j'){e.preventDefault();
-      if(sel)api('/api/layer',{...J,body:JSON.stringify({action:'duplicate',id:sel})}).then(refresh);
+      if(sel)api('/api/layer',{...J,body:JSON.stringify({action:'duplicate',id:sel})})
+        .then(r=>{followLayerOp(r,'duplicated — the copy is selected');refresh();});
       return;}
   }
   if(e.key==='?'||(e.shiftKey&&e.key==='/')){toggleShortcuts();return;}
@@ -7327,7 +8810,18 @@ document.addEventListener('keydown',e=>{
                    f:'fx',        // Paint Effects brush
                    m:'rect',      // Photoshop: marquee
                    w:'wand'};     // Photoshop: magic wand
-    const want=TOOLKEY[e.key];
+    // R71: the tool letters are BARE letters. This read e.key with no
+    // modifier guard, so every Ctrl combination whose letter happened to
+    // name a tool was swallowed here and returned before the real handler
+    // further down ever ran -- and before any preventDefault(), so the
+    // browser's own command fired too. Measured: Ctrl+S switched to Smudge
+    // AND opened Chrome's "Save page as"; Ctrl+Y switched to Blend instead
+    // of redoing; Ctrl+F changed the brush and opened Find; Ctrl+P changed
+    // the tool and opened Print; Ctrl+V pasted and then left you in
+    // Transform. A person hitting Ctrl+S to save their painting is the
+    // worst of these: they get a browser dialog and a changed tool, and
+    // nothing is saved.
+    const want=(e.ctrlKey||e.metaKey||e.altKey)?null:TOOLKEY[e.key];
     if(want){ setTool(want); return; }
   }
   if((e.key==='Delete'||e.key==='Backspace')&&mode==='nodes'&&selNode){e.preventDefault();$('delNode').click();}
@@ -7353,6 +8847,7 @@ document.addEventListener('keydown',e=>{
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();$('saveWsLink').click();}
   if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='o'){e.preventDefault();$('file').click();}
   if((e.ctrlKey||e.metaKey)&&e.shiftKey&&e.key.toLowerCase()==='e'){e.preventDefault();$('lMergeVisible').click();}
+  if((e.ctrlKey||e.metaKey)&&e.shiftKey&&e.key.toLowerCase()==='i'){e.preventDefault();$('selInvert').click();}
   if((e.ctrlKey||e.metaKey)&&e.key==='0'){e.preventDefault();userZoom=1;panX=panY=0;fitCanvas();repaintCanvas();}
   if((e.ctrlKey||e.metaKey)&&e.shiftKey&&e.key.toLowerCase()==='n'){e.preventDefault();$('addLayer').click();}
   if((e.ctrlKey||e.metaKey)&&e.key==='1'){e.preventDefault();   // Photoshop: 100%
@@ -8458,6 +9953,7 @@ function selectNode(id,additive){
   document.querySelectorAll('.node').forEach(x=>x.classList.toggle('sel',selNodes.has(x.dataset.id)));
   const meta=state.ops[(graph.find(n=>n.id===id)||{}).type];
   sideTab('node'); $('props').textContent=meta?meta.doc:'';
+  if($('propsEmpty'))$('propsEmpty').style.display=(meta&&meta.doc)?'none':'';
 }
 async function groupSelected(){
   const ids=[...selNodes].filter(i=>{const n=graph.find(x=>x.id===i);return n&&!['Output','Layer','Layer out','Mask','Mask out','Brush out'].includes(n.type);});
@@ -8719,8 +10215,11 @@ window.addEventListener('resize',()=>{ if(state){fitCanvas();drawComposite();fit
       const d=JSON.parse(ev.data);
       if(d.kicked){ es.close(); showKicked(); return; }
       const chip=$('presenceChip');
-      chip.style.display=d.editors>1?'inline':'none';
-      chip.textContent='👥 '+d.editors+' editors'+((d.names&&d.names.length)?' · '+d.names.join(', '):'');
+      // R64 (dogfooded): this counted browser TABS, so a session with two
+      // scripted painters and a connected agent all writing showed no chip
+      // at all -- and the popup behind it, the one place that says who is
+      // in the room, could not be opened. Anyone present counts.
+      syncPresenceChip(d);
       // R5 #31: the SSE payload now carries what each user is doing; surface
       // a summary on the chip's tooltip and keep an open roster live
       if(d.activity){
@@ -8782,7 +10281,20 @@ $('svgExportBtn').onclick=async()=>{
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
   toast('lestudio.svg downloaded','info');
 };
-api('/api/status').then(s=>{
+// R71: the engine's capability report costs several seconds of CPU to
+// produce (it reads the whole engine package to answer). `serve()` now pays
+// that before the first request, but an embedded or freshly-imported server
+// may still be measuring -- in which case the answer comes back with
+// `measuring: true` and we say so and ask again, rather than making the
+// person wait on a chip in the corner.
+function readStatus(){ return api('/api/status').then(s=>{
+  if(s&&s.measuring){
+    $('accelChip').textContent='engine: measuring…';
+    $('accelChip').title='Checking what this machine can accelerate. '
+      +'Painting works normally meanwhile.';
+    setTimeout(readStatus, 4000);
+    return;
+  }
   // Say what is accelerated, not just that a GPU EXISTS. Painting is CPU
   // whatever hardware is present, so a bare 'GPU' chip told a painter their
   // brush was accelerated when it was not.
@@ -8822,8 +10334,17 @@ api('/api/status').then(s=>{
   }
   $('accelChip').title=miss.length
     ? 'Optional accelerators not installed:\n'+miss.map(m=>'• '+m.name+' — '+m.unlocks+'\n    '+m.install).join('\n')
-    : 'All optional accelerators installed';});
+    : 'All optional accelerators installed';}); }
+readStatus();
+// R59: both bottom banners share one stack from the start, so they can
+// never pile up on top of each other over the picture
+$('bannerStack').appendChild($('firstRun'));
+setCanvasBusy(true);             // R59: dim until the first composite lands
 refresh().then(maybeFirstRun);   // orientation for a first-time user
+// R63: the inbox and the document prompt both have to arrive without being
+// asked for -- an access request nobody sees is the same as no request flow
+// at all. One clock drives both (r63Tick), slow while you paint alone.
+refresh().then(()=>{ pollAccess(); loadAgentBrief(); r63Tick(); });
 
 // ═══ R7: Layer options dialog ═══════════════════════════════════════════
 // The advanced layer rows moved out of the panel into #layerDlg (four tabs).
@@ -8879,6 +10400,66 @@ function layerDlgOpen(tab){
 }
 function layerDlgClose(){ $('layerDlgBack').style.display='none';
   document.removeEventListener('keydown',layerDlgEsc,true); }
+
+/* ---------- R60: focus belongs to the dialog that is open ----------------
+   Opening a dialog left focus on the page BEHIND it: Tab then walked the
+   toolbar and panels underneath a modal the person was looking at, and
+   closing it left focus nowhere. One helper, so every dialog gets the same
+   three things: focus moves in, Tab cannot escape while it is open, and on
+   close focus returns to whatever opened it. */
+const modalFocus={
+  _stack:[],
+  _items(box){
+    return [...box.querySelectorAll('button,input,select,textarea,a[href],[tabindex]:not([tabindex="-1"])')]
+      .filter(e=>e.offsetParent!==null&&!e.disabled);
+  },
+  enter(box){
+    if(!box)return;
+    const prev=document.activeElement;
+    const trap=e=>{
+      if(e.key!=='Tab')return;
+      const f=this._items(box); if(!f.length)return;
+      const first=f[0], last=f[f.length-1];
+      if(e.shiftKey&&(document.activeElement===first||!box.contains(document.activeElement))){
+        e.preventDefault(); last.focus();
+      }else if(!e.shiftKey&&(document.activeElement===last||!box.contains(document.activeElement))){
+        e.preventDefault(); first.focus();
+      }
+    };
+    box.addEventListener('keydown',trap);
+    document.addEventListener('keydown',trap,true);
+    this._stack.push({box,prev,trap});
+    // the first real control, not the close button: a person who opened
+    // this came to change something
+    const f=this._items(box);
+    const target=f.find(e=>!/close|cancel/i.test(e.id+' '+e.className+' '+e.textContent))||f[0]||box;
+    setTimeout(()=>{ try{ target.focus({preventScroll:true}); }catch(_){ } },0);
+  },
+  leave(){
+    const st=this._stack.pop(); if(!st)return;
+    st.box.removeEventListener('keydown',st.trap);
+    document.removeEventListener('keydown',st.trap,true);
+    try{ if(st.prev&&st.prev.focus&&document.contains(st.prev))st.prev.focus({preventScroll:true}); }catch(_){ }
+  }
+};
+// Wired by OBSERVATION, not by hand at every call site: each dialog is
+// shown and hidden from several places (a button, a menu item, a backdrop
+// click, Escape), and hand-wiring meant the one path someone forgot was
+// the one that stranded focus. Watch the backdrops instead.
+(function modalFocusWiring(){
+  const backs=['modalBack','modalBack2','glModalBack','layerDlgBack','shortcutsBack'];
+  const shown=el=>getComputedStyle(el).display!=='none';
+  for(const id of backs){
+    const el=document.getElementById(id); if(!el)continue;
+    let was=shown(el);
+    new MutationObserver(()=>{
+      const now=shown(el);
+      if(now===was)return;
+      was=now;
+      if(now)modalFocus.enter(el); else modalFocus.leave();
+    }).observe(el,{attributes:true,attributeFilter:['style','class']});
+  }
+})();
 $('layerDlgBtn').onclick=()=>layerDlgOpen();
 $('layerDlgClose').onclick=layerDlgClose;
 $('layerDlgBack').onclick=e=>{ if(e.target===$('layerDlgBack'))layerDlgClose(); };
@@ -8886,6 +10467,30 @@ $('layerDlgBack').onclick=e=>{ if(e.target===$('layerDlgBack'))layerDlgClose(); 
 // and the strip highlight follow the Type select (addEventListener rides
 // beside the shipped onchange= handler without replacing it)
 $('lVol').addEventListener('change',()=>{ if(layerDlgIsOpen())syncLayerDlgHeader(); });
+
+// R71: WHAT COUNTS AS ONE GESTURE.
+//
+// Each of these sends more than one mutating request, and before this each
+// request took its own undo entry -- so one Ctrl+Z reverted a fragment of
+// the action and the picture did not visibly move. They are listed here
+// rather than wrapped in place so the list can be read, argued with and
+// added to. (Run at the end of the script: these are function
+// DECLARATIONS, so they are global-object properties by the time we get
+// here and the rebinding reaches every existing call site.)
+[
+  'endCanvasPointer',      // a stroke, its mirrored twins, and any layer the FX brush has to add
+  'fxAttachStroke',        // the first FX stroke: the stroke, then the layer and graph node it needs
+  'mediaBurstAfterStroke', // a stroke into ink/smoke/fire, and the five sim steps it kicks off
+  'setLayerVolume',        // "stir the medium" -- six steps, one pick
+  'soloLayer',             // solo: one request per OTHER layer in the document
+  'applyShapeSnap',        // pressing S: undo the freehand stroke, paint the clean shape
+  'applyStudio',           // a studio preset: the paper stock and the palette
+  'ensureAnimGroup',       // turning the animation strip on: the first frame and its group
+  'animAddFrame',          // "+": the layer, the group membership, the flipbook
+  'animDeleteFrame',       // "✕": the group membership, the layer, the flipbook
+  'animMoveFrame',         // "◀"/"▶": the group membership and the flipbook
+  'addLayerStyle',         // "Outer glow": the layer, its position, the graph node
+].forEach(asGesture);
 </script>
 </body>
 </html>

@@ -14,6 +14,7 @@ discipline): editing one node's parameter recomputes only that node and its down
 """
 from __future__ import annotations
 
+import contextlib
 import base64
 import hashlib
 import time as _time
@@ -30,7 +31,8 @@ import zlib
 import numpy as np
 
 __all__ = ["Document", "Layer", "NodeGraph", "OPS", "op_catalog", "composite",
-           "BLEND_MODES", "save_workspace", "load_workspace", "sdf_to_glsl"]
+           "BLEND_MODES", "save_workspace", "load_workspace", "sdf_to_glsl",
+           "LayerLocked"]
 
 __version__ = "0.1.0"
 
@@ -4805,6 +4807,17 @@ def _standard_brushes():
             Brush("Spray", spray, 0.5, True, id="B5")]
 
 
+class LayerLocked(ValueError):
+    """A locked layer refused an edit.
+
+    R71: a ValueError, so every existing `except ValueError` keeps working
+    -- but a NAMED one, so the server can answer 400 "this is locked, here
+    is how to unlock it" instead of a 500 with a stack trace. A refusal the
+    app makes on purpose is not an internal error, and reporting it as one
+    both alarms the person and buries the one sentence that helps them.
+    """
+
+
 class Selection:
     """A stored selection: a greyscale field like a mask, but living in its own
     list, combinable with set operations, and convertible into a Mask."""
@@ -5155,9 +5168,23 @@ class Document:
                 "masks": [(m.id, m.name,
                            self._snap_intern_get("mask", m.id, m.data))
                           for m in self.masks],
+                # R71: the SAVED list and the throwaway WORKING selection
+                # are snapshotted apart. They used to be flattened together
+                # by all_selections(), and _restore rebuilt `selections`
+                # from the lot -- so one undo promoted a marquee the person
+                # had never chosen to keep into their saved list, the stale
+                # scratch object survived alongside it, and every further
+                # undo added another row with the SAME id (renaming or
+                # deleting one of those was then ambiguous).
                 "selections": [(x.id, x.name,
                                 self._snap_intern_get("sel", x.id, x.data))
-                               for x in self.all_selections()],
+                               for x in self.selections],
+                "scratch_sel": ((self._scratch_sel.id, self._scratch_sel.name,
+                                 self._snap_intern_get("sel",
+                                                       self._scratch_sel.id,
+                                                       self._scratch_sel.data))
+                                if getattr(self, "_scratch_sel", None) is not None
+                                else None),
                 "splines": [(p.id, p.name, [dict(q) for q in p.points], p.closed)
                             for p in self.splines],
                 "brushes": [(b.id, b.name, b.spacing, b.builtin,
@@ -5273,6 +5300,17 @@ class Document:
         return list(self._stroke_shadow)
 
     def _restore(self, snap):
+        # R71: a restore rebuilds layers from their journals, so it must not
+        # be refused by a lock -- see _locked_guard. The flag is cleared in
+        # the finally below even if a rebuild raises, or one bad restore
+        # would leave locks off for the rest of the session.
+        self._restoring = True
+        try:
+            return self._restore_inner(snap)
+        finally:
+            self._restoring = False
+
+    def _restore_inner(self, snap):
         self.width, self.height = snap["w"], snap["h"]
         self.groups = [dict(g, layers=list(g["layers"])) for g in snap.get("groups", [])]
         self.stroke_groups = [dict(g, strokes=list(g["strokes"]))
@@ -5315,6 +5353,16 @@ class Document:
             x = Selection(self.height, self.width, name, data.copy())
             x.id = sid
             self.selections.append(x)
+        # R71: the working selection is restored as the working selection.
+        # Snapshots taken before this key existed simply have no scratch,
+        # which is the same as not having had one.
+        _sc = snap.get("scratch_sel")
+        if _sc is None:
+            self._scratch_sel = None
+        else:
+            _x = Selection(self.height, self.width, _sc[1], _sc[2].copy())
+            _x.id = _sc[0]
+            self._scratch_sel = _x
         self.masks = []
         for mid, name, data in snap.get("masks", []):
             m = Mask(self.height, self.width, name, data.copy())
@@ -5422,6 +5470,33 @@ class Document:
         for _lid in snap.get("rerender", ()) or ():
             self._stroke_rerender(_lid)
 
+    @contextlib.contextmanager
+    def undo_group(self, label="Edit"):
+        """One gesture is ONE undo step.
+
+        R71 -- Devin: "Undo doesn't seem to work." It did, for a plain
+        brush stroke. What did not work was any gesture that mutated the
+        document more than once: each mutation pushed its own undo entry,
+        so the first Ctrl+Z reverted a part of the gesture the person
+        never thought of as a separate act (a relief property, say) and
+        the picture did not move. The tool looked broken because from the
+        outside it was: press undo, nothing happens.
+
+        Inside this block the FIRST record() is kept and every later one
+        is suppressed, so the entry holds the state from before the whole
+        gesture. Nesting is counted, so an inner group is a no-op.
+        """
+        depth = getattr(self, "_undo_group", 0)
+        self._undo_group = depth + 1
+        if depth == 0:
+            self._undo_group_armed = True
+        try:
+            yield
+        finally:
+            self._undo_group = depth
+            if depth == 0:
+                self._undo_group_armed = False
+
     def record(self, label="Edit", only=None, region=None, journaled=None):
         """`region` = (x0, y0, x1, y1) the operation cannot paint outside.
 
@@ -5431,6 +5506,12 @@ class Document:
         measures 6 ms -- is what made the start of every stroke cost ~340 ms."""
         _MUT_REV[0] += 1
         self._sim_run = None              # any recorded edit ends a sim run
+        if getattr(self, "_undo_group", 0):
+            # inside an undo_group: the first record stands for the whole
+            # gesture, the rest are the gesture's own internal steps.
+            if not getattr(self, "_undo_group_armed", False):
+                return
+            self._undo_group_armed = False
         # R33 (user design): the painting IS paths with properties and a
         # deterministic render. A stroke's undo entry therefore stores NO
         # pixels at all -- just the pre-stroke path list (shared via the
@@ -6249,6 +6330,19 @@ class Document:
         l = Layer(self.height, self.width, name,
                   None if akey is not None else pixels)
         l.id = self._mint_id("L")
+        # R71: EVERY UNNAMED LAYER WAS CALLED "layer". Layer.__init__ falls
+        # back to `id or "layer"`, but the layer is built before its id is
+        # minted, so the id branch could never fire and a document filled up
+        # with rows reading Background / layer / layer / layer. The paint
+        # diagnostics quote the name, producing lines like "that landed
+        # UNDER 'layer' ... paint on 'layer' instead", which is no help at
+        # all. Number them the way every other editor does.
+        if not name:
+            _taken = {x.name for x in self.layers}
+            _n = 1
+            while ("Layer %d" % _n) in _taken:
+                _n += 1
+            l.name = "Layer %d" % _n
         if src is not None:
             l.source = src
             self._trim_placed()
@@ -6424,6 +6518,12 @@ class Document:
         return True
 
     def remove_layer(self, lid):
+        # R71: the lock button's tooltip says it "refuses EVERY edit (paint,
+        # erase, fill, flip, move, placement)". Deleting and reordering were
+        # the two it did not refuse, which makes the promise worse than no
+        # promise: someone who locks a layer to protect it can still lose it
+        # to a mis-click, silently.
+        self._locked_guard(lid)
         self.record("Remove layer")
         self.layers = [l for l in self.layers if l.id != lid]
         for g in self.groups:
@@ -6460,6 +6560,12 @@ class Document:
         self.groups = [g for g in self.groups if g["id"] != gid]
 
     def edit_group(self, gid, name=None, layers=None):
+        # R71: RECORD IT. `add_group` and `remove_group` on either side of
+        # this both record, and this did not -- so renaming a group and
+        # ticking layers into it were invisible to undo, and a Ctrl+Z after
+        # organising a document deleted the whole group instead of undoing
+        # the last change to it. All group organising went the same way.
+        self.record("Edit group", only=[])
         _MUT_REV[0] += 1
         g = self.group(gid)
         if name is not None:
@@ -6474,19 +6580,40 @@ class Document:
         return composite(members, self.height, self.width, self.mask_map())
 
     def move_layer(self, lid, to_index):
+        self._locked_guard(lid)          # R71: see remove_layer
         self.record("Reorder layers", only=[])
         l = self.layer(lid)
         self.layers.remove(l)
         self.layers.insert(max(0, min(len(self.layers), int(to_index))), l)
 
-    def merge_layers(self, ids):
+    def merge_layers(self, ids, _report=None):
         """Bake the given layers (in stack order, with blend/opacity/masks applied)
-        into one layer at the lowest member's position; remove the rest."""
+        into one layer at the lowest member's position; remove the rest.
+
+        R71: a HIDDEN member is baked as itself rather than as nothing.
+        `composite` skips invisible layers by definition, so merging onto a
+        hidden layer used to delete that layer's paint without a word --
+        the canvas looked identical afterwards, because the thing that
+        vanished was the thing you could not see. Photoshop refuses to
+        merge a hidden layer at all; leStudio keeps the content (the
+        friendlier half of the same intent) and says what it did through
+        `_report`, so the route can tell the person.
+        """
         members = [l for l in self.layers if l.id in set(ids)]
         if len(members) < 2:
             return members[0] if members else None
         self.record("Merge layers")
-        comp = composite(members, self.height, self.width, self.mask_map())
+        hidden = [l for l in members if not l.visible]
+        if _report is not None:
+            _report["hidden"] = [l.name for l in hidden]
+        _was = [(l, l.visible) for l in hidden]
+        for l, _ in _was:
+            l.visible = True
+        try:
+            comp = composite(members, self.height, self.width, self.mask_map())
+        finally:
+            for l, v in _was:
+                l.visible = v
         lowest = min(self.layers.index(l) for l in members)
         merged = Layer(self.height, self.width, members[0].name + " merged", comp)
         merged.id = self._mint_id("L")
@@ -6494,11 +6621,17 @@ class Document:
         self.layers.insert(lowest, merged)
         return merged
 
-    def merge_layer_down(self, lid):
+    def merge_layer_down(self, lid, _report=None):
         i = self.layers.index(self.layer(lid))
         if i == 0:
+            # R71: this was a silent no-op -- an enabled button that did
+            # nothing and said nothing. There is no layer below the bottom
+            # one; say so rather than letting the click evaporate.
+            if _report is not None:
+                _report["why"] = ("this is the bottom layer - there is "
+                                  "nothing under it to merge into")
             return None
-        return self.merge_layers([self.layers[i - 1].id, lid])
+        return self.merge_layers([self.layers[i - 1].id, lid], _report=_report)
 
     def merge_visible_layers(self):
         return self.merge_layers([l.id for l in self.layers if l.visible])
@@ -6611,10 +6744,29 @@ class Document:
         # is ONE action to the user -- reuse the simulate_stroke run
         # mechanism (record() clears _sim_run, so any other edit, or an
         # undo/redo, ends the run and the next edit snapshots again).
-        tag = ("edit_layer", lid)
-        if getattr(self, "_sim_run", None) != tag:
+        #
+        # R71: the run was bounded by NOTHING but "some other op recorded".
+        # So renaming a layer, then hiding it, then dragging its opacity --
+        # three deliberate, unrelated acts minutes apart -- collapsed into a
+        # single undo entry, and one Ctrl+Z took back all three with no way
+        # to take back just the last. A run now needs all three of: the same
+        # layer, the same set of properties, and continuity in time; and
+        # only CONTINUOUS properties (the ones you drag) coalesce at all.
+        # A rename or a checkbox is a discrete act and gets its own entry.
+        _DRAGGED = {"opacity", "thickness", "relief", "z_off", "tilt_x",
+                    "tilt_y", "curve", "dome", "field_strength", "absorbency",
+                    "emissive", "reflect", "dispersion", "media_rate",
+                    "vol_ior", "vol_density", "gravity", "gravity_angle"}
+        keys = frozenset(clean)
+        now = time.time()
+        tag = ("edit_layer", lid, keys)
+        run = getattr(self, "_sim_run", None)
+        _cont = bool(keys) and keys <= _DRAGGED
+        if not (_cont and run == tag
+                and now - getattr(self, "_edit_run_t", 0.0) < 1.2):
             self.record("Edit layer", only=[])
-            self._sim_run = tag
+        self._sim_run = tag if _cont else None
+        self._edit_run_t = now
         for k, v in clean.items():
             setattr(l, k, v)
         for pk in ("curve_profile", "dome_profile"):
@@ -7286,7 +7438,14 @@ class Document:
             return self.selection_by_id(sid)
 
     def _tool_field(self, tool, prm):
-        """Build the raw (H, W) selection field for one tool invocation."""
+        """Build the raw (H, W) selection field for one tool invocation.
+
+        R70: the pixel-reading tools (wand / luminance / object) take
+        prm['sample'] -- 'layer' (default), 'below' or 'composite' -- and
+        prm['layer'] names the layer they read. Every other editor calls
+        this "Sample All Layers" and ships it OFF; leStudio had it on with
+        no switch, so a wand click on a layer selected the shape of
+        whatever happened to be underneath it."""
         h, w = self.height, self.width
         ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
         if tool == "rect":
@@ -7303,7 +7462,9 @@ class Document:
             # layer thumbnail does in every other editor
             return np.clip(np.asarray(self.layer(prm["layer"]).pixels[..., 3],
                                       np.float32), 0, 1)
-        comp = self.composite()
+        _lid = prm.get("layer")
+        comp = (self._sample_px(_lid, prm.get("sample", "layer"))
+                if _lid is not None else self.composite())
         rgb = comp[..., :3] * comp[..., 3:4] + 1.0 * (1 - comp[..., 3:4])
         px, py = int(prm["x"]), int(prm["y"])
         px = np.clip(px, 0, w - 1); py = np.clip(py, 0, h - 1)
@@ -7961,6 +8122,50 @@ class Document:
         l.pixels[region, 3] = 1.0
         return int(region.sum())
 
+    # R70: "Each layer is separate."
+    #
+    # Devin, after a multi-layer session: the flood fill for some tools was
+    # reacting to data on OTHER layers. His rule, and it is the right one:
+    #
+    #   Light needs to consider all layers that it passes through, but
+    #   paint related things should not be aware of other layers by
+    #   default. Each layer is separate. There are blending and other
+    #   things that involve combining layers, and light as I said passes
+    #   through layers, but as far as painting and filling goes though it
+    #   should be sandboxed on a per layer basis.
+    #
+    # So every op that READS pixels in order to decide what to paint goes
+    # through here, and every one of them defaults to "layer". Reading the
+    # flattened picture stays available -- shading onto a clean layer above
+    # someone else's lineart is a real technique, and the clone stamp has
+    # an all-layers mode in every editor -- but it is now something you ask
+    # for, on a control you can see, rather than the default nobody chose.
+    #
+    # This is NOT the relief/light path: `_shaded_pixels` and the lighting
+    # stack still see the whole stack, because light does pass through.
+    def _sample_px(self, lid, sample="layer"):
+        """Pixels an op should READ (as opposed to the ones it writes).
+
+        'layer'     -- the target layer alone. The default: a paint op is
+                       sandboxed to the layer it paints.
+        'composite' -- the flattened picture, every layer.
+        'below'     -- everything under the target layer, the target and
+                       anything above it excluded. This is what "sample
+                       the lineart I am shading over" actually means, and
+                       it is the honest middle setting.
+        """
+        sample = str(sample or "layer")
+        if sample == "composite":
+            return self.composite()
+        if sample == "below":
+            ids = [x.id for x in self.layers]
+            try:
+                k = ids.index(lid)
+            except ValueError:
+                k = len(ids)
+            return self.composite(only=[x for x in ids[:k]])
+        return np.asarray(self.layer(lid).pixels, np.float32)
+
     def _flood_region(self, lid, x, y, tolerance=0.12, contiguous=True,
                       sample="layer"):
         """The paint-bucket's region as a bool mask: pixels within
@@ -7973,8 +8178,7 @@ class Document:
         l = self.layer(lid)
         h, w = l.pixels.shape[:2]
         x = int(np.clip(x, 0, w - 1)); y = int(np.clip(y, 0, h - 1))
-        px = (self.composite() if sample == "composite"
-              else l.pixels).astype(np.float32)
+        px = self._sample_px(lid, sample).astype(np.float32)
         seed = px[y, x]
         dist = np.sqrt(((px - seed) ** 2).sum(-1))
         close = dist <= float(tolerance) * 2.0       # RGBA space: diagonal is 2
@@ -8428,7 +8632,7 @@ class Document:
     def scribble(self, lid, x, y, radius=60.0, curl=0.5, thickness=1.6,
                  color=(0, 0, 0), opacity=0.85, hardness=0.7, density=1.0,
                  length=1.0, seed=None, selection=None, sel_invert=False,
-                 feather=0.0, gate=None, poly=None, record=True):
+                 feather=0.0, gate=None, poly=None, path=None, record=True):
         """Curl-noise scribble brush (R47). Generates wandering strands in
         a disc at (x, y) and paints each as an ORDINARY journaled stroke
         -- the randomness is spent at generation time, the journal keeps
@@ -8439,11 +8643,22 @@ class Document:
         it, and stop when they wander below it -- a soft edge thins the
         scribble out instead of shearing it."""
         rng = np.random.default_rng(seed)
+        # R69: a DRAGGED stroke is a region like any other. The strands
+        # seed against it, so a drag lays a scribbled band that follows
+        # the hand instead of one disc under the first click.
+        if gate is None and path is not None:
+            gate = self._path_gate(path, radius, feather)
+            if gate is not None and path:
+                x, y = path[len(path) // 2][0], path[len(path) // 2][1]
         if gate is None and poly is not None:
             gate = self._poly_gate(poly, feather)
         raw_gate = gate is not None
         if gate is None:
             gate = self._resolve_gate(selection, sel_invert, feather=feather)
+        if raw_gate and selection is not None:
+            # a drag inside a selection is still bound by it
+            gate = gate * self._resolve_gate(selection, sel_invert,
+                                             feather=feather)
         h, w = self.height, self.width
         cx, cy = float(x), float(y)
         r = max(4.0, float(radius))
@@ -8472,12 +8687,31 @@ class Document:
         if record:
             self.record("Scribble", only=[lid], journaled=True)
         made = 0
+        # R69: when the region is a raw gate -- a dragged stroke, a
+        # polygon, a selection -- seed inside the GATE's own box, not a
+        # disc around one point. Both the seeding and the stop test below
+        # assumed a disc, so a scribble dragged across the canvas came
+        # back as a single blob at the middle of the path: the strands
+        # were only ever born within `r` of (cx, cy), and any that
+        # wandered further were cut. A poly region wider than the disc had
+        # always been clipped the same way.
+        _bx0 = _by0 = 0.0
+        _bx1, _by1 = float(w), float(h)
+        if raw_gate:
+            _ys, _xs = np.where(gate > 0.02)
+            if len(_xs):
+                _bx0, _bx1 = float(_xs.min()), float(_xs.max()) + 1.0
+                _by0, _by1 = float(_ys.min()), float(_ys.max()) + 1.0
         for _ in range(n * (8 if raw_gate else 4)):
             if made >= n:
                 break
-            a0 = rng.uniform(0, 2 * np.pi)
-            rr = r * np.sqrt(rng.uniform(0, 1))
-            px, py = cx + rr * np.cos(a0), cy + rr * np.sin(a0)
+            if raw_gate:
+                px = rng.uniform(_bx0, _bx1)
+                py = rng.uniform(_by0, _by1)
+            else:
+                a0 = rng.uniform(0, 2 * np.pi)
+                rr = r * np.sqrt(rng.uniform(0, 1))
+                px, py = cx + rr * np.cos(a0), cy + rr * np.sin(a0)
             gv = 1.0
             if gate is not None:
                 xi = int(np.clip(px, 0, w - 1)); yi = int(np.clip(py, 0, h - 1))
@@ -8496,7 +8730,11 @@ class Document:
                 ang += curl * 0.55 * da + rng.normal(0, 0.28 * (1 - curl)
                                                      + 0.04)
                 px += step * np.cos(ang); py += step * np.sin(ang)
-                if np.hypot(px - cx, py - cy) > r:
+                if raw_gate:
+                    if not (_bx0 - r <= px <= _bx1 + r
+                            and _by0 - r <= py <= _by1 + r):
+                        break
+                elif np.hypot(px - cx, py - cy) > r:
                     break
                 if gate is not None:
                     xi = int(np.clip(px, 0, w - 1))
@@ -8515,6 +8753,43 @@ class Document:
                        stroke_new=(True if record else None))
             made += 1
         return made
+
+    def _path_gate(self, path, radius, feather=0.0):
+        """Rasterise a DRAGGED STROKE into a gate: the region a round nib
+        of `radius` sweeps along the path.
+
+        R69: the generator brushes -- scribble, hatch shading, textile --
+        only ever took a single centre point and a radius, so the client
+        could only stamp one disc per click and a drag did nothing at all.
+        They sit in the brush row, take a brush cursor and are called
+        brushes, so that is not a thing a person can be expected to guess.
+        A stroke is just a longer region than a disc, which is all this
+        turns it into; every generator downstream is unchanged and still
+        fills whatever gate it is handed."""
+        from PIL import Image as _Img, ImageDraw as _ImgDraw
+        h, w = self.height, self.width
+        pts = [(float(p[0]), float(p[1])) for p in (path or [])
+               if p is not None and len(p) >= 2]
+        if not pts:
+            return None
+        r = max(1.0, float(radius))
+        m = _Img.new("L", (w, h), 0)
+        dr = _ImgDraw.Draw(m)
+        if len(pts) > 1:
+            # a round nib: the swept band plus a cap at every vertex, so
+            # the corners of a fast zig-zag are not bitten off
+            dr.line(pts, fill=255, width=int(round(r * 2)), joint="curve")
+        for (px, py) in pts:
+            dr.ellipse([px - r, py - r, px + r, py + r], fill=255)
+        g = np.asarray(m, np.float32) / 255.0
+        # the same soft shoulder the disc gate has, so a generator thins
+        # out at the edge of a stroke exactly as it does at a disc's rim
+        g = np.clip(_gauss_blur(g[..., None], max(1.2, r * 0.18))[..., 0],
+                    0, 1)
+        if feather and feather > 0:
+            g = np.clip(_gauss_blur(g[..., None], float(feather))[..., 0],
+                        0, 1)
+        return g
 
     def _poly_gate(self, poly, feather=0.0):
         """Rasterise an inline polygon into a float gate. This is the
@@ -8538,7 +8813,7 @@ class Document:
                    opacity=0.9, hardness=0.75, wobble=0.6, cross_angle=None,
                    weave="twill", depth=0.0, seed=None, selection=None,
                    sel_invert=False, feather=0.0, area="brush", gate=None,
-                   poly=None, record=True):
+                   poly=None, path=None, sample="layer", record=True):
         """Uniform line/hatch shading brush (R47). Emits journaled paint
         strokes. area='selection' shades the whole (feathered) gate;
         otherwise a disc at (x, y). mode 'line': one direction. 'hatch':
@@ -8548,6 +8823,18 @@ class Document:
         edges lighten the lines and end runs -- shading that follows a
         feathered mask like a real shaped shadow."""
         rng = np.random.default_rng(seed)
+        # R69: a DRAGGED stroke is a region, so the hatch (and the cloth,
+        # which comes through here too) fills the band the nib swept
+        # rather than one disc under the first click. `area` becomes
+        # 'selection' because the gate IS the shape now -- multiplying a
+        # disc into it as well would clip the stroke back to its start.
+        if gate is None and path is not None:
+            gate = self._path_gate(path, radius, feather)
+            if gate is not None:
+                area = "selection"
+                if selection is not None:
+                    gate = gate * self._resolve_gate(selection, sel_invert,
+                                                     feather=feather)
         if gate is None and poly is not None:
             gate = self._poly_gate(poly, feather)
             area = "selection"
@@ -8570,22 +8857,53 @@ class Document:
         if record:
             self.record("Fill", only=[lid], journaled=True)
         if mode in ("weave", "cross", "stitch"):
-            return self._textile_strokes(
-                lid, reg, rng, mode, float(angle), float(spacing),
-                float(thickness), color, float(opacity), float(hardness),
-                weave, float(depth), record)
+            # R71: raising the layer's relief is part of laying thread with
+            # body, not a second act -- the client used to send it as its
+            # own request right after this one, which took its own undo
+            # entry, so the first Ctrl+Z after stitching reverted a
+            # property nobody could see and the stitching stayed put.
+            if float(depth) > 0:
+                _l = self.layer(lid)
+                _l.relief = max(float(getattr(_l, "relief", 1.0)),
+                                0.5 + float(depth))
+            # R69: one relight for the whole cloth, not one per thread
+            with self.shading_deferred():
+                return self._textile_strokes(
+                    lid, reg, rng, mode, float(angle), float(spacing),
+                    float(thickness), color, float(opacity), float(hardness),
+                    weave, float(depth), record)
         luma = None
+        _nothing_to_read = False
         if mode == "both":
-            comp = self.composite()
-            luma = _gauss_blur(
-                (comp[..., :3].mean(-1) * comp[..., 3]
-                 + (1 - comp[..., 3]))[..., None], 3.0)[..., 0]
+            # R70: 'both' is VALUE-AWARE -- it reads the drawing to decide
+            # where to cross-hatch. It used to read the flattened picture
+            # unconditionally, so shading one layer changed depending on
+            # what was on the others, with nothing in the UI saying so.
+            # It now reads the same source as everything else: the layer,
+            # unless you ask for more.
+            comp = self._sample_px(lid, sample)
+            if float(np.asarray(comp[..., 3])[reg > 0.05].max()
+                     if (reg > 0.05).any() else 0.0) < 0.02:
+                # Nothing to read. Reading the layer means a fresh shading
+                # layer is empty under the brush, and an empty read is
+                # pure light -- which the value-aware pass answers with
+                # almost no strokes at all. That reads as a broken tool,
+                # so 'both' falls back to its plain LINE pass instead of
+                # fading to nothing: it crosses only the darks, and there
+                # are no darks here to cross. Ask for 'below' or
+                # 'composite' to shade against a drawing on another layer.
+                luma = None
+                _nothing_to_read = True
+            else:
+                luma = _gauss_blur(
+                    (comp[..., :3].mean(-1) * comp[..., 3]
+                     + (1 - comp[..., 3]))[..., None], 3.0)[..., 0]
         ys, xs = np.where(reg > 0.05)
         bx0, bx1 = xs.min(), xs.max(); by0, by1 = ys.min(), ys.max()
         ccx, ccy = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
         diag = float(np.hypot(bx1 - bx0, by1 - by0)) / 2 + 4
         passes = [(np.deg2rad(float(angle)), "base")]
-        if mode in ("hatch", "both"):
+        if mode == "hatch" or (mode == "both" and not _nothing_to_read):
             ca = np.deg2rad(float(cross_angle) if cross_angle is not None
                             else float(angle) + 62.0)
             passes.append((ca, "cross"))
@@ -9104,8 +9422,10 @@ class Document:
         Extra kwargs pass through to the generator (curl, angle, spacing,
         thickness, color, opacity, density...). Every emitted stroke is
         an ordinary journaled paint stroke -- the generator contract.
-        sample='composite' floods the flattened picture instead of the
-        target layer, so you can shade onto a clean layer above lineart."""
+        sample: 'layer' (default -- R70: a fill is sandboxed to the layer
+        it fills), 'below' or 'composite'. The wider settings are how you
+        shade onto a clean layer above someone else's lineart; they are
+        now something you ask for rather than what you get."""
         region = self._flood_region(lid, x, y, tolerance, contiguous,
                                     sample=sample)
         g = region.astype(np.float32)
@@ -9142,8 +9462,12 @@ class Document:
             raise ValueError("fill_generated style must be scribble, line, "
                              "hatch, both, weave, cross, stitch or "
                              "scatter, not %r" % (style,))
+        # R70: the value-aware mode reads pixels to decide where to cross,
+        # so it reads the SAME source the region came from -- one answer to
+        # "which layers is this fill looking at", not two.
         return self.hatch_fill(lid, cx, cy, mode=style, area="selection",
-                               gate=g, seed=seed, record=record, **kw)
+                               gate=g, seed=seed, sample=sample,
+                               record=record, **kw)
 
     @staticmethod
     def _homography(src, dst):
@@ -9417,7 +9741,17 @@ class Document:
             _m = getattr(_pl, "_stroke_count", 0)
             _last = getattr(_pl, "_last_sid", None)
             if (_m and _last and _m % self.CKPT_EVERY == 0
-                    and not getattr(self, "_replaying", False)):
+                    and not getattr(self, "_replaying", False)
+                    # R69: and not inside a generator fill. A fill is ONE
+                    # undo entry made of hundreds of strokes, so a rung
+                    # laid part-way through it is never an undo target --
+                    # and each rung copies the pixels, height, material
+                    # and media maps. Measured on a 570-stitch textile
+                    # fill at 900x650: 28 rungs, 1.29 s of pure churn, the
+                    # biggest cost left once the shading was deferred. One
+                    # rung is laid when the fill closes instead, which is
+                    # where replay would actually want to start.
+                    and getattr(self, "_shade_defer", None) is None):
                 _jn = self._layer_journal_len(lid)
                 if _jn:
                     self._ckpt_put(lid, _jn, _last)
@@ -9475,6 +9809,48 @@ class Document:
             if k["layer"] == lid:
                 n += 1
         return n
+
+    @contextlib.contextmanager
+    def shading_deferred(self):
+        """Lay many strokes, light them once.
+
+        A generator fill (textile, hatch, scribble, scatter) is one
+        gesture made of hundreds of strokes, and the relief shading is a
+        VIEW of the result -- there is no reason to recompute it after
+        every thread. Inside this block paint() marks the shade stale
+        instead of patching it; leaving the block re-lights each touched
+        layer once and drops the composite cache.
+
+        Nothing about the pigment changes: the height field, the media
+        map and the pixels are written exactly as before."""
+        prev = getattr(self, "_shade_defer", None)
+        if prev is not None:                 # already inside one
+            yield self
+            return
+        self._shade_defer = set()
+        try:
+            yield self
+        finally:
+            touched = self._shade_defer
+            self._shade_defer = None
+            for lid in touched:
+                try:
+                    l = self.layer(lid)
+                except KeyError:
+                    continue
+                if getattr(l, "height_map", None) is not None:
+                    _shaded_pixels(l)
+                # one checkpoint rung for the whole fill, at the end,
+                # where it is actually a useful place to replay from
+                try:
+                    last = getattr(l, "_last_sid", None)
+                    jn = self._layer_journal_len(lid)
+                    if last and jn:
+                        self._ckpt_put(lid, jn, last)
+                except Exception:
+                    pass
+            self._ccache = None
+            self._last_paint_rect = (0, 0, self.width, self.height)
 
     def _journal_spool(self, seg):
         """Move old journal segments to disk (zlib-pickled, tempdir).
@@ -10290,6 +10666,16 @@ class Document:
         exact loss shipped: dragging one point of a stroke reverted a fill on
         the same layer to the background colour with no error and no toast.
         nudge_strokes had this gate from day one; nothing else did."""
+        # R71: CHECK THE LOCK HERE, not by accident further down. Every
+        # stroke edit used to be refused on a locked layer only because the
+        # rebuild it ends with runs through paint(), which asks the lock --
+        # and once replay stopped being treated as an edit (so that a lock
+        # applied after the fact could not make a layer's own history
+        # unreplayable), that accident stopped happening and the stroke
+        # eraser started working on locked layers. A refusal worth having is
+        # worth stating.
+        for lid in lids:
+            self._locked_guard(lid)
         for lid in lids:
             if not self.replay_is_faithful(lid):
                 name = next((l.name for l in self.layers if l.id == lid), lid)
@@ -11856,6 +12242,7 @@ class Document:
         the same frozen gate asset a selection clear records, so replay
         reproduces it exactly and the layer stays replay-faithful; there is
         no second code path for the replay to learn."""
+        self._locked_guard(lid)          # R71: see clear(), same hole
         h, w = self.height, self.width
         x0, x1 = max(0, min(int(x0), int(x1))), min(w, max(int(x0), int(x1)))
         y0, y1 = max(0, min(int(y0), int(y1))), min(h, max(int(y0), int(y1)))
@@ -11877,6 +12264,14 @@ class Document:
 
         Alpha only: the colour underneath is left alone, so undo restores it
         exactly. With no selection the whole layer is cleared."""
+        # R71: a LOCKED layer refuses this, like every other edit. It did
+        # not, and the result was the only unrecoverable bug in the sweep:
+        # pressing Delete on a locked layer wiped it (with a cheerful
+        # "layer cleared"), and because clear() is journal-first, undo then
+        # rebuilt the layer by replaying its strokes through paint() --
+        # which DOES honour the lock, raised, and aborted the restore
+        # half-way. The paint was gone for good.
+        self._locked_guard(lid)
         # Announce the change even when NOT recording undo. record() bumps the
         # mutation counter, and caches key on it -- so an unrecorded edit was
         # invisible to them. Mid-stroke flushes (and the FINAL flush of every
@@ -11923,10 +12318,19 @@ class Document:
         placement -- not just transparency (that is alpha_lock's job,
         and conflating the two was exactly the confusion reported:
         'locking a layer doesn't prevent edits like it should')."""
+        # R71: REPLAY IS NOT AN EDIT. Rebuilding a layer from its journal --
+        # which is what undo, load and every journal-first op do -- runs
+        # through paint(), and paint() asks this guard. So a lock applied
+        # after the fact could make a layer's own history unreplayable, and
+        # an undo would abort half-way through the restore and lose the
+        # paint for good. The lock protects the layer from the PERSON, not
+        # from its own recorded history.
+        if getattr(self, "_replaying", False) or getattr(self, "_restoring", False):
+            return
         l = self.layer(lid)
         if getattr(l, "locked", False):
-            raise ValueError("layer %r is locked -- unlock it to edit"
-                             % l.name)
+            raise LayerLocked("layer %r is locked -- click its 🔒 to unlock "
+                              "it, then try again" % l.name)
 
     def paint(self, lid, points, color=(0, 0, 0), radius=8.0, opacity=1.0,
               erase=False, hardness=0.7, record=True,
@@ -12646,10 +13050,25 @@ class Document:
                     _ew[..., 0][_spill] = float(med["gloss"])
                     _ew[..., 1][_spill] = float(med["shin"]) / 64.0
                     _ew[..., 2][_spill] = 1.0
-        # realtime feedback: re-light and re-blend ONLY this stroke's window.
-        # Validity is judged against the revision captured on entry, so the
-        # record/announce bumps inside this very call don't invalidate it.
-        if not getattr(self, "_replaying", False) and not _had_relief \
+        # R69: a GENERATOR FILL lays hundreds of tiny strokes as one
+        # gesture, and re-lighting after each one is the whole cost of it.
+        # Measured: 566 textile stitches take 12.85 s with depth, and the
+        # identical 566 strokes take 1.00 s without -- ~21 ms a stroke,
+        # nearly all of it `_shade_patch` ending in `_layer_token`, which
+        # md5s a strided copy of the entire canvas and every field map.
+        # Its memo is keyed on the mutation counter, which every paint
+        # bumps, so inside a fill it never hits once.
+        #
+        # Inside `shading_deferred()` the shade is invalidated instead of
+        # patched, and one relight happens when the block closes. The
+        # pixels are identical either way -- this is a view, and the view
+        # is simply computed once rather than six hundred times.
+        if getattr(self, "_shade_defer", None) is not None:
+            self._shade_defer.add(l.id)
+            l._shade_rev = None
+            self._ccache = None
+            self._last_paint_rect = (0, 0, w, h)
+        elif not getattr(self, "_replaying", False) and not _had_relief \
                 and getattr(l, "height_map", None) is not None:
             # FIRST RELIEF ON THIS LAYER. Canvas tooth now lights every
             # painted pixel, not just this stroke, so a window patch cannot
@@ -13346,16 +13765,22 @@ class Document:
         _MUT_REV[0] += 1
 
     def clone(self, lid, points, source, radius=12.0, opacity=1.0, brush=None,
-              record=True, origin=None):
+              record=True, origin=None, sample="layer"):
         """Clone-stamp: paint pixels sampled from `source` (the alt-clicked point),
         keeping the source->destination offset constant along the stroke. `origin`
-        anchors the offset when a stroke arrives in chunks (defaults to points[0])."""
+        anchors the offset when a stroke arrives in chunks (defaults to points[0]).
+
+        R70: `sample` says WHERE the pixels are read from -- 'layer' (the
+        default, and what Photoshop calls Current Layer), 'below', or
+        'composite' (Sample All Layers). It used to be all layers with no
+        way to say otherwise, so cloning a patch of sky on its own layer
+        silently dragged the foreground along with it."""
         _MUT_REV[0] += 1
         if record:
             self.record("Clone")
         l = self.layer(lid)
         h, w = self.height, self.width
-        comp = self.composite()                     # sample what the eye sees
+        comp = self._sample_px(lid, sample)         # R70: the layer, by default
         tip = self._tip_for(brush, float(radius))
         side = tip.shape[0]
         if isinstance(source, dict) and "offset" in source:
@@ -13453,9 +13878,15 @@ class Document:
                 # canvas view nor an export
                 and not getattr(l, "palette", False)]
 
-    def composite(self):
-        return composite(self.canvas_layers(), self.height, self.width,
-                         self.mask_map())
+    def composite(self, only=None):
+        """The flattened picture. `only` (a list of layer ids) flattens just
+        those layers, in stack order -- how `_sample_px(..., "below")` asks
+        for "everything under the layer I am painting into"."""
+        ls = self.canvas_layers()
+        if only is not None:
+            keep = set(only)
+            ls = [l for l in ls if l.id in keep]
+        return composite(ls, self.height, self.width, self.mask_map())
 
 
 # ------------------------------------------------------------------------------------------------
