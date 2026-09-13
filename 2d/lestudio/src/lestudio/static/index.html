@@ -384,6 +384,15 @@ button.primary{border-color:var(--wire-a);color:var(--ink-hi);background:linear-
   #busyBadge{animation:none}
   #busyBadge .spin{animation:busySpin 2.4s linear infinite}
 }
+/* R72 -- Devin: "the indicator doesn't always clear after the pending work
+   completes." It never cleared, and it was never hidden in the first place:
+   `el.hidden = true` works through the UA stylesheet's `[hidden]{display:none}`,
+   which an AUTHOR rule with an ID selector outranks -- so `#busyBadge{display:flex}`
+   above kept it on screen permanently, reading "working..." at rest. The
+   R71 test asserted on `el.hidden`, the ATTRIBUTE, which was being set
+   correctly the whole time; only a test that measures the rendered box
+   could have caught this, and that is what test_r72_a does now. */
+#busyBadge[hidden]{display:none !important}
 #canvasPane.busy{cursor:progress}
 .row{display:flex;align-items:center;gap:5px;margin:1px 0;min-height:18px;flex-wrap:wrap}
 .row label{flex:0 0 62px;color:var(--ink-dim);font-size:12px}
@@ -3076,7 +3085,7 @@ var GESTURE=null, _gestureN=0, _gestureHold=0;
 //
 // It counts requests rather than being switched on and off by callers, so a
 // tool added tomorrow is covered without anyone remembering to do it.
-var BUSY={n:0, t:null, label:''};
+var BUSY={n:0, t:null, label:'', live:[], dead:null};
 const BUSY_WORDS=[
   [/\/api\/hatchfill/,   'shading'],
   [/\/api\/scribble/,    'scribbling'],
@@ -3106,6 +3115,8 @@ function busyWord(p){
 }
 function busyShow(){
   const el=$('busyBadge'); if(!el)return;
+  // the NEWEST outstanding request is the one still running
+  BUSY.label=(BUSY.live.length?BUSY.live[BUSY.live.length-1].label:BUSY.label);
   $('busyText').textContent=BUSY.label+'…';
   // sit just under the timeline strip, not on top of it -- the strip lives
   // in the same pane and its height depends on whether animation is on
@@ -3120,25 +3131,45 @@ function busyHide(){
   const cp=$('canvasPane'); if(cp)cp.classList.remove('busy');
 }
 function busyStart(p,label){
-  BUSY.n++;
+  // R72: track the label PER REQUEST. `n` alone meant that with two
+  // requests in flight, the first one finishing left the badge naming
+  // work that was already done while the second was still running.
+  const tok={label:label||busyWord(p)};
+  BUSY.live.push(tok);
+  BUSY.n=BUSY.live.length;
   if(BUSY.n===1){
-    BUSY.label=label||busyWord(p);
     clearTimeout(BUSY.t);
     BUSY.t=setTimeout(()=>{ if(BUSY.n>0)busyShow(); }, 250);
+  }else if(!$('busyBadge').hidden){
+    busyShow();                       // already up: name the newest work
   }
   busyWatchdog();
+  return tok;
 }
-function busyStop(){
-  BUSY.n=Math.max(0,BUSY.n-1);
+function busyStop(tok){
+  const i=tok?BUSY.live.indexOf(tok):0;
+  if(i>=0)BUSY.live.splice(i,1); else BUSY.live.pop();
+  BUSY.n=BUSY.live.length;
   if(!BUSY.n){ clearTimeout(BUSY.t); BUSY.t=null; clearTimeout(BUSY.dead); busyHide(); }
+  else if(!$('busyBadge').hidden) busyShow();
 }
 // A badge that never clears is worse than no badge: it says the app is busy
-// forever. If a response is lost in a way that skips busyStop (a body that
-// fails to parse, a tab suspended mid-request), the count is reset rather
-// than left to leak.
+// forever. If a response is lost in a way that skips busyStop (a tab
+// suspended mid-request, a socket that never closes), the count is reset.
+//
+// R72: ninety seconds was far too long to sit staring at a spinner that is
+// lying to you -- long enough to conclude the app has hung. Twenty is past
+// any real tool (the slowest measured is a ~3 s textile fill) and short
+// enough that a person has not yet given up. It says what happened, too:
+// a badge that vanishes silently after a long wait leaves you unsure
+// whether the work landed.
 function busyWatchdog(){
   clearTimeout(BUSY.dead);
-  BUSY.dead=setTimeout(()=>{ BUSY.n=0; busyHide(); }, 90000);
+  BUSY.dead=setTimeout(()=>{
+    if(!BUSY.n)return;
+    BUSY.live.length=0; BUSY.n=0; busyHide();
+    setStatus('⚠ still waiting on "'+BUSY.label+'" — it may not have finished');
+  }, 20000);
 }
 function gestureBegin(){                   // for a DRAG: open now, close on release
   if(!GESTURE)GESTURE='g'+(++_gestureN)+'-'+Date.now().toString(36);
@@ -3188,19 +3219,28 @@ async function api(p,opt){
   // not waiting on a presence ping or an SSE reconnect.
   const _watch = !!(opt.method && opt.method!=='GET')
     && !/\/api\/(events|presence|autosave|status|prefs|state)\b/.test(p);
-  if(_watch)busyStart(p,opt.busy);
+  const _btok = _watch ? busyStart(p,opt.busy) : null;
   let r;
   try{
     r=await fetch(p,opt);
   }catch(netErr){
-    if(_watch)busyStop();
+    if(_watch)busyStop(_btok);
     // the server went away mid-action; a click that does nothing with no
     // explanation is the worst possible outcome
     toast('lost contact with leStudio — is it still running?');
     return {error:'network'};
   }
-  const j = r.headers.get('content-type')?.includes('json') ? await r.json() : r;
-  if(_watch)busyStop();
+  // R72: try/finally. `r.json()` throws on an empty, truncated or
+  // non-JSON-despite-the-header body, and the busyStop below it then never
+  // ran -- one unparseable response and the badge was stuck until the
+  // watchdog. The indicator must come down on EVERY exit from this
+  // function, including the ones that throw.
+  let j;
+  try{
+    j = r.headers.get('content-type')?.includes('json') ? await r.json() : r;
+  }finally{
+    if(_watch)busyStop(_btok);
+  }
   // Surface failures the caller does not handle. Every caller used to have to
   // remember to check r.error, and most did not, so a failed action simply did
   // nothing and the reason lived only in a log the user never sees.

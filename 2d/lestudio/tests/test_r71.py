@@ -399,6 +399,14 @@ def test_r71_w_a_message_outranks_what_it_is_about():
 
 
 def test_r71_x_there_is_a_busy_indicator():
+    """Source-level only. THIS TEST IS NOT THE PIN, and R72 is the reason:
+    an earlier version of it asserted the badge was hidden by checking
+    `el.hidden`, the ATTRIBUTE -- which was being set perfectly while the
+    badge sat on screen the whole time, because an author rule with an ID
+    selector outranks the UA stylesheet's `[hidden]{display:none}`. An
+    indicator is only ever really tested by measuring what the person
+    sees; `tests/test_r72.py` drives a browser and reads the rendered box.
+    What is left here is what source can honestly answer."""
     ui = open(UI).read()
     assert 'id="busyBadge"' in ui and 'role="status"' in ui
     assert "function busyStart(" in ui and "function busyStop(" in ui
