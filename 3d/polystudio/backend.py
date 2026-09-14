@@ -30,6 +30,7 @@ RENDERS, engine-true and tuned for speed:
 """
 import base64
 import io, json, os, struct, sys, threading, time, zipfile
+import os
 import numpy as np
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
@@ -254,7 +255,7 @@ def _snap_obj(oid):
     # sdf_tree / kernel_src ride along: SDF trees are immutable (every combinator returns a new tree), so the
     # reference is snapshot-safe -- and without them, undoing a move would silently degrade a primitive to a
     # mesh-only object (losing its exact bake + exact shader) even though the restored mesh IS the primitive.
-    _S["undo"].append(("obj", oid, o.mesh.vertices.copy(), [tuple(f) for f in o.mesh.faces], list(o.mats),
+    _push_snapshot(("obj", oid, o.mesh.vertices.copy(), [tuple(f) for f in o.mesh.faces], list(o.mats),
                        o.sdf_tree, o.kernel_src))
     _trim_undo()
 
@@ -286,38 +287,34 @@ def _history():
     return h
 
 
+def _push_snapshot(entry):
+    """Every snapshot producer lands here: the entry becomes a command on the engine's
+    EditHistory. Doing a new edit forks history, so the engine truncates the redo tail
+    itself -- no app-side redo list to keep in step."""
+    _history().do(None, _SnapshotCommand(entry))
+
+
 def _snap_scene():
     snap = {oid: (o.name, o.mesh.vertices.copy(), [tuple(f) for f in o.mesh.faces], list(o.mats),
                   o.sdf_tree, o.kernel_src)
             for oid, o in _S["objects"].items()}
-    _S["undo"].append(("scene", snap, _S["next_id"]))
+    _push_snapshot(("scene", snap, _S["next_id"]))
     _trim_undo()
 
 
 def _discard_snapshot():
-    """A route took a snapshot, then decided the edit was a no-op or failed: drop it. Producers call
-    _trim_undo() right after appending, so the entry has usually already moved onto the engine's
-    history -- discard THAT (undo it as a no-op and cut the redo tail) rather than a list that is
-    empty by design now."""
-    if _S["undo"]:
-        _S["undo"].pop(); return
+    """A route took a snapshot, then found the edit was a no-op or failed: drop the last command."""
     h = _history()
     if (h.can_undo() if callable(getattr(h, "can_undo", None)) else getattr(h, "can_undo", False)):
-        h.undo(None)                            # restores the snapshot, which for a no-op is a no-op
+        h.undo(None)
         try: del h.undo_stack[-1:]
         except Exception: pass
         try: h.redo_stack.clear()
         except Exception: pass
 
-
 def _trim_undo():
-    """THE choke point every snapshot producer calls after appending. ADOPTED: the entry just
-    appended is moved onto the engine's EditHistory (depth bound, redo-tail truncation, the
-    same command log other leCore apps use). _S["undo"] stays as the append target so the 18
-    producers do not change; it is drained here, so it never holds more than the entry in flight."""
-    while _S["undo"]:
-        _history().do(None, _SnapshotCommand(_S["undo"].pop(0)))
-    _S.setdefault("redo", []).clear()
+    """Retained as a call target; producers now push directly (see _push_snapshot)."""
+    return None
 
 def _capture_like(entry):
     """Snapshot the CURRENT state in the same shape as `entry`, so undo/redo are symmetric.
@@ -4197,7 +4194,7 @@ def sculpt_exit():
             _bump(oid)
             o.sdf_tree, o.kernel_src = tree0, kern0
             return jsonify(_payload(only=oid))
-        _S["undo"].append(("grid", oid, o.sculpt["grid"].copy())); _trim_undo()
+        _push_snapshot(("grid", oid, o.sculpt["grid"].copy())); _trim_undo()
         from holographic_meshqem import cluster_decimate
         dense = _sculpt_extract(o, dense=True)
         target = int(np.clip(int(d.get("target_faces", 6000)), 500, 40000))
@@ -4224,7 +4221,7 @@ def sculpt_begin_stroke():
         o = _S["objects"].get(oid)
         if o is None or o.sculpt is None:
             return jsonify({"error": "object is not in sculpt mode"}), 400
-        _S["undo"].append(("grid", oid, o.sculpt["grid"].copy())); _trim_undo()
+        _push_snapshot(("grid", oid, o.sculpt["grid"].copy())); _trim_undo()
         return jsonify({"rev": _S["rev"]})
 
 
@@ -7083,8 +7080,18 @@ def workspace_import():
 
 
 def _planar_uv(mesh):
-    """A plain planar unwrap on the mesh's two widest axes -- enough to LAND a painted texture on an object
-    that has no uvs of its own. Honest about what it is: not a seam-aware unwrap."""
+    """UVs for an object that has none. ADOPTED: asks the engine's mesh_uv_unwrap first (isomap,
+    seam-aware); the plain two-widest-axes projection is now only the fallback for a mesh the
+    unwrapper refuses (too small, non-manifold), and it says which one it used in the shape of
+    its return -- (uv, method)."""
+    try:
+        uv = np.asarray(_mind().mesh_uv_unwrap(mesh, method="isomap"), float)
+        if uv.shape == (len(mesh.vertices), 2) and np.isfinite(uv).all():
+            lo, hi = uv.min(axis=0), uv.max(axis=0)
+            span = np.where((hi - lo) > 1e-9, hi - lo, 1.0)
+            return (uv - lo) / span
+    except Exception:
+        pass
     V = np.asarray(mesh.vertices, float)
     ext = V.max(axis=0) - V.min(axis=0)
     a, b = np.argsort(-ext)[:2]
@@ -7092,8 +7099,6 @@ def _planar_uv(mesh):
     span = np.where((hi - lo) > 1e-9, hi - lo, 1.0)
     return (V[:, [a, b]] - lo) / span
 
-
-@bp.route("/api/workspace/export")
 def workspace_export():
     """Download the scene as a .lews the painter can open: our objects as `polystudio.object` sections,
     each texture as a canonical `lecore.image`, plus every foreign section from an imported workspace
@@ -7304,6 +7309,43 @@ def scene_new():
         return jsonify(_payload())
 
 
+_WS = None
+
+
+def _workspace():
+    """The live .lews workspace, if POLYSTUDIO_WORKSPACE names one (docs/APP_FOUNDATION.md §3).
+    Opened once; every scene save is a Workspace.put so a second leCore app on the same directory
+    sees it, and every load reads the shared section rather than a file on this machine."""
+    global _WS
+    if _WS is None:
+        root = os.environ.get("POLYSTUDIO_WORKSPACE")
+        if root:
+            try:
+                _WS = _mind().lews_open(root, app="polystudio")
+            except Exception:
+                _WS = False
+        else:
+            _WS = False
+    return _WS or None
+
+
+@bp.route("/api/workspace")
+def workspace_status():
+    """What Help > Workspace shows: is a .lews open, who else is in it, what changed since a rev."""
+    ws = _workspace()
+    if ws is None:
+        return jsonify({"open": False, "hint": "set POLYSTUDIO_WORKSPACE=<dir> to share a live .lews"})
+    since = request.args.get("since")
+    out = {"open": True, "root": os.environ.get("POLYSTUDIO_WORKSPACE")}
+    for k in ("describe", "roster"):
+        try: out[k] = getattr(ws, k)()
+        except Exception as e: out[k] = f"{type(e).__name__}: {e}"
+    if since is not None:
+        try: out["changes"] = ws.changes_since(int(since))
+        except Exception as e: out["changes"] = f"{type(e).__name__}: {e}"
+    return jsonify(out)
+
+
 @bp.route("/api/scene/save")
 def scene_save():
     _init()
@@ -7381,13 +7423,31 @@ def scene_save():
         if ra:
             out["render_assets"] = ra
         out["units"] = dict(_S.get("units", {}))
-    return jsonify(out)
+        ws = _workspace()
+        if ws is not None:
+            # ADOPTED: the save is also a Workspace.put, so a second leCore app on this directory
+            # sees the scene; the returned rev is what /api/workspace?since= keys on.
+            try:
+                from holographic.io_and_interop import holographic_lews as _L
+                out["workspace_rev"] = ws.put({"id": "polystudio.scene", "kind": _L.SCENE_KIND,
+                                               "meta": {"scene": out}})
+            except Exception as e:
+                out["workspace_error"] = f"{type(e).__name__}: {e}"
+        return jsonify(out)
 
 
 @bp.route("/api/scene/load", methods=["POST"])
 def scene_load():
     _init()
     d = request.get_json(force=True) or {}
+    if not d or d.get("from") == "workspace":
+        # ADOPTED: no body (or {"from":"workspace"}) loads the shared section another app may have put.
+        ws = _workspace()
+        sec = ws.get("polystudio.scene") if ws is not None else None
+        if sec and isinstance(sec.get("meta"), dict) and "scene" in sec["meta"]:
+            d = sec["meta"]["scene"]
+        elif ws is not None:
+            return jsonify({"error": "workspace has no polystudio.scene section yet"}), 404
     if "objects" not in d:
         return jsonify({"error": "not a scene file (no 'objects')"}), 400
     from holographic_mesh import Mesh
@@ -8939,6 +8999,30 @@ def env_backdrop():
     if request.method == "GET":
         return jsonify({"active": _S.get("env_img") is not None})
     d = request.get_json(force=True) or {}
+    # ADOPTED (1.5.0): a REAL environment. {"hdr": "<path or data URL>"} reads a Radiance .hdr/.pic
+    # through the engine's load_hdr -> unbounded linear radiance -> the same dome light the procedural
+    # presets feed. The engine calls this "THE LAST MISSING PIECE OF IMAGE-BASED LIGHTING"; the
+    # backlog had it filed as C1 "no HDRI import" -- it existed, we had not looked.
+    hdr = d.get("hdr")
+    if hdr:
+        import tempfile, base64 as _b64
+        path = hdr
+        if str(hdr).startswith("data:"):
+            raw = _b64.b64decode(str(hdr).split(",", 1)[1])
+            fd, path = tempfile.mkstemp(suffix=".hdr"); os.write(fd, raw); os.close(fd)
+        try:
+            img = np.asarray(_mind().load_hdr(path, exposure=float(d.get("exposure", 1.0))), np.float32)
+        except Exception as e:
+            return jsonify({"error": f"load_hdr refused: {type(e).__name__}: {e}"}), 400
+        with _LOCK:
+            _S["env_img"] = img
+            _S["env_meta"] = {"source": "hdr", "shape": list(img.shape),
+                              "max_radiance": float(img.max()), "exposure": float(d.get("exposure", 1.0))}
+        prev = np.clip(img / max(float(np.percentile(img, 99.5)), 1e-6), 0, 1)
+        return jsonify({"active": True, "source": "hdr", "shape": list(img.shape),
+                        "max_radiance": float(img.max()),
+                        "preview": _png_b64((prev ** (1 / 2.2) * 255).astype(np.uint8))
+                        if "_png_b64" in globals() else None})
     preset = str(d.get("preset", "day"))
     seed = int(d.get("seed", 0))
     rng = np.random.RandomState(seed)

@@ -42,7 +42,7 @@ def _load_history_ns():
     sys.modules.setdefault("holographic_mesh", type(sys)("holographic_mesh"))
     sys.modules["holographic_mesh"].Mesh = _StubMesh
     ns["_MIND"] = None
-    for fn in ("_mind", "_history", "_discard_snapshot", "_trim_undo",
+    for fn in ("_mind", "_history", "_push_snapshot", "_discard_snapshot", "_trim_undo",
                "_capture_like", "_restore", "_snap_obj", "_snap_scene"):
         i = SRC.index("def %s(" % fn)
         exec(SRC[i:SRC.index("\ndef ", i + 1)], ns)

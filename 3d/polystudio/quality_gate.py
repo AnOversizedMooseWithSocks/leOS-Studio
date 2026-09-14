@@ -60,33 +60,25 @@ def engine_gate(frame, limits=None):
         return None
 
 
+def _gate(frame, single_round=None):
+    """ADOPTED: terracing / edge_tones / fringe_ratio are the engine's own metrics now
+    (m.render_quality_gate, sweep 163 -- which the audit says this file caused). The harness
+    below is what stays ours: it knows this app's routes and which frames to compare."""
+    import lecore
+    return lecore.UnifiedMind(dim=256, seed=0).render_quality_gate(frame, limits=LIMITS,
+                                                                    single_round=single_round)
+
+
 def terracing(img):
-    """Terracing = flat plateaus separated by jumps, so it shows up as SPIKES IN THE SECOND DIFFERENCE down
-    the floor. A plain first-difference test was tried first and rejected: it cannot tell a terrace from the
-    legitimate gradient of a soft shadow edge. Calibrated on the frames that actually shipped --
-    known-bad (grid-terraced, user-reported) 0.068, known-good (exact + supersampled) 0.018."""
-    g = img.mean(-1)
-    band = g[int(g.shape[0] * 0.5):, :]
-    return float((np.abs(np.diff(band, 2, axis=0)) > 0.010).mean())
+    return float(_gate(img)["metrics"].get("terracing", 0.0))
 
 
 def edge_tones(img):
-    """Fraction of silhouette pixels that are partially covered. A jagged edge is all-or-nothing."""
-    g = img.mean(-1)
-    gy, gx = np.gradient(g)
-    mag = np.sqrt(gx * gx + gy * gy)
-    e = mag > np.percentile(mag, 99)
-    v = g[e]
-    return float(((v > 0.05) & (v < 0.95)).mean()) if v.size else 0.0
+    return float(_gate(img)["metrics"].get("edge_tones", 0.0))
 
 
 def edge_chroma(img):
-    g = img.mean(-1)
-    gy, gx = np.gradient(g)
-    mag = np.sqrt(gx * gx + gy * gy)
-    e = mag > np.percentile(mag, 99)
-    ch = np.abs(img[..., 0] - img[..., 1]) + np.abs(img[..., 1] - img[..., 2])
-    return float(ch[e].mean()) if e.any() else 0.0
+    return float(_gate(img)["metrics"].get("edge_chroma", _gate(img)["metrics"].get("fringe", 0.0)))
 
 
 def resolve(client, api, session, extra=""):
