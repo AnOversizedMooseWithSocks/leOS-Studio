@@ -161,7 +161,10 @@ const iDel = JS.indexOf("if((e.key==='Delete'||e.key==='Backspace')&&mode==='nod
 ok('Backspace on a corner cannot reach the clear-layer binding', iPoly > 0 && iDel > iPoly, iPoly + ' vs ' + iDel);
 
 console.log('\nthe overlay draws the lasso, not just the marquee');
-ok('drawMarquee handles a lasso in progress', /function drawMarquee\(\)\{\n {2}if\(lasso\|\|polyLasso\)\{/.test(JS));
+// the lasso branch must be INSIDE drawMarquee (other tools add their own
+// previews at the top of it, so pin containment, not the first line)
+const dm = JS.slice(JS.indexOf('function drawMarquee(){'));
+ok('drawMarquee handles a lasso in progress', /if\(lasso\|\|polyLasso\)\{/.test(dm.slice(0, dm.indexOf('\nfunction '))));
 ok('the closing edge is drawn faint', /vctx\.globalAlpha=0\.45/.test(JS));
 ok('polygon corners get handles', /pts\.forEach\(\(p,i\)=>\{vctx\.beginPath\(\);vctx\.arc\(p\[0\],p\[1\],i===0\?4:2\.5/.test(JS));
 

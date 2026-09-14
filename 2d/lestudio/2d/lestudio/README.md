@@ -258,12 +258,57 @@ exactly what playback showed.
 * Everything downstream treats a lasso like any other selection: feathering,
   expand/contract, invert, to-mask, crop to selection, and the brush gate.
 
-The creature brush moved from L to **Shift+L** (L is the lasso in every other
-editor); Shift+L cycles lasso -> polygon lasso -> creature.
+L is the lasso now (as in every other editor) and **Shift+L** is the polygon
+lasso. The creature brush has its own key, **A**, and its own always-visible
+button. The generator brushes share **D**: D is scribble, Shift+D cycles on to
+hatch and textile.
+
+## Gradients (R74)
+
+**Gradient (Shift+G)** -- drag across the layer: where you press is the start
+of the ramp, where you let go is the end, and a line with a coloured handle at
+each end shows it while you drag. Hold **Shift** to snap the direction to 45°.
+
+* Five kinds: **linear**, **radial** (out from the press), **angle** (a sweep
+  round it), **reflected** (mirrored either side of the start) and
+  **diamond**.
+* Two ends, with **⇄** to swap them, or tick **to transparent** to fade out
+  instead of reaching the second colour -- the two gradients every editor
+  ships. Opacity scales the whole ramp; **dither** adds a seeded speckle that
+  breaks up banding without breaking replay.
+* Inside a selection it fills only there, feathering included.
+
+A gradient is journaled as geometry, not pixels: one drag is one undo entry,
+it replays from the journal, and it survives a `.lews` round trip without
+storing an image. `POST /api/gradient` takes the same options plus a full
+`stops` list (`[{pos, color, alpha}]`) for ramps with more than two ends.
+
+## Shapes, without a shape tool (R74)
+
+Once there are marquee, ellipse and lasso selections, the shape tool is a
+selection plus one button. In the **Select** tab:
+
+* **Stroke outline** draws the selection's boundary with the current brush --
+  its width, colour, hardness and **media**, so a watercolour rectangle or a
+  gold ellipse is one click. Rectangle select gives a rectangle, ellipse gives
+  an ellipse, lasso gives whatever you drew, and several islands give several
+  rings. The result is **ordinary paint**: nudge it, restyle it, undo it.
+  Tick **inside** to keep the line within the selection instead of straddling
+  the edge.
+* **Fill** fills the whole selection with the brush colour (Edit → Fill
+  elsewhere). With nothing selected it fills the layer.
+
+And with the brush or eraser, **hold Shift while dragging for a straight
+line** -- Shift+Alt locks it to 45°. The stroke stays two points, so it is one
+ordinary stroke you can still nudge.
+
+Shortcuts that now work the way they do elsewhere: **Ctrl+A** select all,
+**Ctrl+D** deselect, **Ctrl+E** merge down, **Ctrl+Shift+E** merge visible,
+**Ctrl+Shift+N** new layer, **Ctrl+T** transform, **Ctrl+J** duplicate layer.
 
 ## The creature brush (R73)
 
-Pick the ladybird (🐞, key **L**) and click, or drag, and the brush is no
+Pick the ladybird (🐞, key **A**, its own button on the rail) and click, or drag, and the brush is no
 longer in your hand. Up to ten small creatures -- each with its own leCore
 brain, a `CreatureMind` on the one `UnifiedMind` -- walk the layer for a few
 seconds (3 by default) and each paints the way it went. The layer is their
@@ -476,4 +521,5 @@ provides the two helpers the tests use.
 
 The client has its own gates, driven against a tiny DOM in Node (no browser
 needed): `node tests/test_toolbar.js`, `node tests/test_popups.js`,
-`node tests/test_creature_ui.js`, `node tests/test_lasso_ui.js`.
+`node tests/test_creature_ui.js`, `node tests/test_lasso_ui.js`,
+`node tests/test_gradient_ui.js`, `node tests/test_shape_ui.js`.

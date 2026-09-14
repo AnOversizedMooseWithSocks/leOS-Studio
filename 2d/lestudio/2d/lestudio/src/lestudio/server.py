@@ -3951,6 +3951,102 @@ def creature():
         return jsonify(error=str(e)), 400
 
 
+@app.post("/api/stroke_selection")
+def stroke_selection():
+    """R74 shape tool: paint the active selection's outline with the current
+    brush. {"layer", "selection"?, "color", "radius", "opacity", "hardness",
+    "media"/"material"/"load", "simplify", "inside", "sel_invert"?,
+    "feather"?}. Rectangle select + this = a rectangle; ellipse = an ellipse;
+    lasso = whatever you drew -- as ORDINARY journaled strokes, so the result
+    is editable paint. Returns {ok, rings}."""
+    d = request.json or {}
+    try:
+        n = DOC.stroke_selection(
+            d["layer"], selection=d.get("selection") or None,
+            color=tuple(d.get("color", (0, 0, 0))),
+            radius=float(d.get("radius", 6.0)),
+            opacity=float(d.get("opacity", 1.0)),
+            hardness=float(d.get("hardness", 0.7)),
+            media=(d.get("media") or None),
+            material=(d.get("material") or None),
+            load=float(d.get("load", 0.6)),
+            simplify=float(d.get("simplify", 1.0)),
+            inside=bool(d.get("inside")),
+            sel_invert=bool(d.get("sel_invert")),
+            feather=float(d.get("feather", 0.0)),
+            record=bool(d.get("record", True)))
+        GRAPH.commit_layer_outputs()
+        if not n:
+            return jsonify(ok=True, rings=0,
+                           warning="nothing to stroke -- make a selection "
+                                   "first (marquee, ellipse, lasso or wand)")
+        return jsonify(ok=True, rings=int(n))
+    except Exception as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.post("/api/fill_selection")
+def fill_selection():
+    """R74: fill the whole active selection with a colour (Edit > Fill).
+    {"layer", "selection"?, "color", "opacity", "sel_invert"?, "feather"?}.
+    With no selection it fills the layer, as every editor does. Journals
+    pixel-free. Returns {ok, pixels}."""
+    d = request.json or {}
+    try:
+        n = DOC.fill_selection(
+            d["layer"], selection=d.get("selection") or None,
+            color=tuple(d.get("color", (0, 0, 0))),
+            opacity=float(d.get("opacity", 1.0)),
+            sel_invert=bool(d.get("sel_invert")),
+            feather=float(d.get("feather", 0.0)),
+            record=bool(d.get("record", True)))
+        GRAPH.commit_layer_outputs()
+        return jsonify(ok=True, pixels=int(n))
+    except Exception as e:
+        return jsonify(error=str(e)), 400
+
+
+@app.post("/api/gradient")
+def gradient():
+    """R74 gradient tool: {"layer", "x0", "y0", "x1", "y1",
+    "kind": linear|radial|angle|reflected|diamond, "color", "color2",
+    "to_transparent", "stops"? [{pos, color, alpha}], "opacity", "dither",
+    "selection"?, "sel_invert"?, "feather"?, "seed", "record"}. Journals a
+    pixel-free {op:"gradient"} record, so it replays, undoes as one entry and
+    survives a .lews round trip. Returns {ok}."""
+    d = request.json or {}
+    try:
+        for k in ("x0", "y0", "x1", "y1"):
+            if k not in d:
+                return jsonify(error="a gradient needs x0, y0, x1 and y1"), 400
+            d[k] = _finite(d[k], k, -1e6, 1e6)
+    except _Gone as e:
+        return jsonify(error=str(e)), 400
+    stops = d.get("stops")
+    if stops is not None and not isinstance(stops, (list, tuple)):
+        return jsonify(error="stops must be a list of {pos, color, alpha}"), 400
+    try:
+        DOC.gradient(
+            d["layer"], float(d["x0"]), float(d["y0"]),
+            float(d["x1"]), float(d["y1"]),
+            kind=str(d.get("kind", "linear")),
+            stops=stops,
+            color=tuple(d.get("color", (0, 0, 0))),
+            color2=tuple(d.get("color2", (1, 1, 1))),
+            to_transparent=bool(d.get("to_transparent")),
+            opacity=float(d.get("opacity", 1.0)),
+            dither=float(d.get("dither", 0.0)),
+            selection=d.get("selection") or None,
+            sel_invert=bool(d.get("sel_invert")),
+            feather=float(d.get("feather", 0.0)),
+            seed=int(d.get("seed", 0)),
+            record=bool(d.get("record", True)))
+        GRAPH.commit_layer_outputs()
+        return jsonify(ok=True)
+    except Exception as e:
+        return jsonify(error=str(e)), 400
+
+
 @app.post("/api/scribble")
 def scribble():
     """R47 scribble brush: {"layer", "x", "y", "radius", "curl" 0..1,

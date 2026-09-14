@@ -18,6 +18,7 @@ const ok = (name, cond, extra) => {
 };
 
 const slice = (open, close) => HTML.slice(HTML.indexOf(open), HTML.indexOf(close));
+const _slice0 = slice;
 const markup = slice('<div id="creatureHud"', '<div id="hatchHud"')
   + '<input id="bColor" value="#ff0000"><input id="bOp" value="90"><input id="bHard" value="70">'
   + '<select id="bSel"><option value=""></option></select><input id="bSelInv" type="checkbox">'
@@ -132,6 +133,35 @@ const out = id => doc.getElementById(id).parentNode.querySelector('output').text
   ok('the drawn light want lands in the slider', v('crLight') === '75', v('crLight'));
   ok('the drawn target lands in the swatch', v('crTarget') === '#336699', v('crTarget'));
   ok('the readout shows it', out('crLight') === '75');
+
+  // R74d: the panel must actually APPEAR. The creature button was the
+  // fourth in a collapsed group whose visible face is Scribble, and its
+  // advertised key (Shift+L) reached the polygon lasso first -- so there was
+  // no way to open this panel at all. Drive the shipped setTool body: the
+  // dock mapping and the show/hide sweep decide whether the panel is seen.
+  console.log('\npicking the creature shows its panel');
+  const hudDoc = makeDocument(
+    slice('<div id="creatureHud"', '<div id="hatchHud"')
+    + '<div id="gradHud"></div><div id="hatchHud"></div><div id="textileHud"></div>'
+    + '<div id="scribHud"></div><div id="trHud"></div><div id="fillHud"></div>'
+    + '<div id="textHud"></div><div id="npHud"></div><div id="fxHud"></div>'
+    + '<div id="stampHud"></div><div id="strokeSelPanel"></div>'
+    + '<div id="toolDockEmpty"></div>');
+  const dockSrc = grab(/const dockTool=\{[^\n]*\n[\s\S]{0,400}?\}\);/, 'dock sweep');
+  const h = vm.createContext({ document: hudDoc, console, $: id => hudDoc.getElementById(id) });
+  for (const t of ['creature', 'gradient', 'scribble']) {
+    // fresh scope each time: the lifted body declares `const dockTool`
+    vm.runInContext('(function(t){' + dockSrc
+      + ';this.shown=["creatureHud","gradHud","scribHud","hatchHud","textileHud"]'
+      + '.filter(id=>$(id).style.display&&$(id).style.display!=="none");'
+      + '}).call(this,' + JSON.stringify(t) + ');', h);
+    const want = { creature: 'creatureHud', gradient: 'gradHud', scribble: 'scribHud' }[t];
+    ok(t + ' shows exactly its own panel',
+       h.shown.length === 1 && h.shown[0] === want, JSON.stringify(h.shown));
+  }
+  ok('the creature panel still has its presets after the move',
+     hudDoc.querySelectorAll('#crPresets .crp').length === 8,
+     hudDoc.querySelectorAll('#crPresets .crp').length);
 
   console.log('\n' + passes + ' passed, ' + fails + ' failed');
   process.exit(fails ? 1 : 0);

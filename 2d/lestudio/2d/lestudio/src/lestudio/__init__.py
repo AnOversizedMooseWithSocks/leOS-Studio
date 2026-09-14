@@ -9473,6 +9473,264 @@ class Document:
                 row += 1
         return made
 
+    # R74 STROKE / FILL A SELECTION -----------------------------------------
+    # The shape tools, without a shape tool. Once there are marquee, ellipse
+    # and lasso selections, "paint the outline of the selection with the
+    # current brush" IS the line / rectangle / ellipse / polygon tool, and it
+    # comes out as ORDINARY JOURNALED STROKES -- so a stroked rectangle can be
+    # nudged, restyled, replayed and painted in watercolour like anything else
+    # drawn by hand. Photoshop and GIMP both ship exactly this pair.
+
+    def selection_outline(self, sid=None, sel_mask=None, sel_invert=False,
+                          feather=0.0, simplify=1.0, threshold=0.5):
+        """The selection's boundary as a list of closed polylines [[x, y], ...].
+
+        Traced with cv2 (already a dependency -- the flood fill uses it), not
+        scikit-image, which is optional here and absent on plenty of installs.
+        `simplify` is the Douglas-Peucker tolerance in pixels."""
+        import cv2
+        g = (np.asarray(sel_mask, np.float32) if sel_mask is not None
+             else self._resolve_gate(sid, sel_invert, feather=feather))
+        if g is None:
+            return []
+        m = (np.clip(g, 0, 1) >= float(threshold)).astype(np.uint8)
+        if not m.any():
+            return []
+        cnts, _ = cv2.findContours(m, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+        out = []
+        for c in cnts:
+            if len(c) < 3:
+                continue
+            eps = max(float(simplify), 0.0)
+            if eps > 0:
+                c = cv2.approxPolyDP(c, eps, True)
+            pts = [[float(p[0][0]), float(p[0][1])] for p in c]
+            if len(pts) < 3:
+                continue
+            pts.append(list(pts[0]))              # close the ring
+            out.append(pts)
+        return out
+
+    def stroke_selection(self, lid, selection=None, color=(0, 0, 0),
+                         radius=6.0, opacity=1.0, hardness=0.7, media=None,
+                         material=None, load=0.6, simplify=1.0,
+                         sel_invert=False, feather=0.0, sel_mask=None,
+                         inside=False, record=True):
+        """Paint the active selection's OUTLINE with the current brush.
+
+        This is the shape tool: rectangle select + stroke = a rectangle,
+        ellipse select + stroke = an ellipse, lasso + stroke = whatever you
+        drew. Each ring lands as one ordinary journaled stroke, so the result
+        is editable paint -- not a special object.
+
+        `inside=True` clips the outline to the selection, the way "stroke
+        inside" does elsewhere; by default the line straddles the edge.
+        Returns the number of rings painted.
+        """
+        self._locked_guard(lid)
+        rings = self.selection_outline(selection, sel_mask=sel_mask,
+                                       sel_invert=sel_invert, feather=feather,
+                                       simplify=simplify)
+        if not rings:
+            return 0
+        if record:
+            self.record("Stroke selection", only=[lid], journaled=True)
+        n = 0
+        for pts in rings:
+            self.paint(lid, [[p[0], p[1], 1.0] for p in pts],
+                       color=tuple(color), radius=float(radius),
+                       opacity=float(opacity), hardness=float(hardness),
+                       media=media, material=material, load=float(load),
+                       selection=(selection if inside else None),
+                       sel_invert=sel_invert,
+                       record=False, stroke_new=(True if record else None))
+            n += 1
+        return n
+
+    def fill_selection(self, lid, selection=None, color=(0, 0, 0),
+                       opacity=1.0, sel_invert=False, feather=0.0,
+                       sel_mask=None, record=True):
+        """Fill the whole selection with a colour -- the other half of the
+        pair, and what people mean by "fill" when a marquee is up. Journals a
+        gradient record with a single flat stop, so it replays pixel-free
+        through machinery that already exists rather than baking an image."""
+        self._locked_guard(lid)
+        g = (np.asarray(sel_mask, np.float32) if sel_mask is not None
+             else self._resolve_gate(selection, sel_invert, feather=feather))
+        if g is None:
+            # no selection means the whole layer, which is what every editor
+            # does with Edit > Fill and nothing selected
+            g = np.ones((self.height, self.width), np.float32)
+        c = [float(np.clip(v, 0, 1)) for v in tuple(color)[:3]]
+        if record:
+            self.record("Fill selection", only=[lid])
+            self.record_stroke(
+                lid, [[self.width / 2.0, self.height / 2.0]],
+                {"op": "gradient", "kind": "linear", "gx0": 0.0, "gy0": 0.0,
+                 "gx1": float(self.width), "gy1": 0.0,
+                 "stops": [{"pos": 0.0, "color": c, "alpha": 1.0},
+                           {"pos": 1.0, "color": c, "alpha": 1.0}],
+                 "opacity": float(opacity), "dither": 0.0, "seed": 0,
+                 **(self._sel_record(selection, sel_invert)
+                    if selection else {})}, new=True)
+            if self._undo:
+                rr = self._undo[-1][1].setdefault("rerender", [])
+                if lid not in rr:
+                    rr.append(lid)
+        self._gradient_layer(lid, "linear", 0.0, 0.0, float(self.width), 0.0,
+                             [{"pos": 0.0, "color": c, "alpha": 1.0},
+                              {"pos": 1.0, "color": c, "alpha": 1.0}],
+                             g, opacity=opacity)
+        return int((g > 0.01).sum())
+
+    # R74 GRADIENT TOOL ------------------------------------------------------
+    # Every editor has one and this app did not: there was a Gradient NODE, but
+    # no way to drag a gradient onto a layer. Built the pwarp way -- a
+    # PIXEL-FREE journal record ({op: "gradient"}: two points, kind, stops,
+    # frozen gate asset) and ONE shared applier that both the tool and replay
+    # call -- so a gradient survives a .lews round trip, undoes as one entry,
+    # and never has to store its pixels.
+    GRADIENT_KINDS = ("linear", "radial", "angle", "reflected", "diamond")
+
+    @staticmethod
+    def _gradient_t(kind, x0, y0, x1, y1, xs, ys):
+        """Gradient parameter t in 0..1 for each pixel, by kind. The maths is
+        the Gradient / Radial gradient nodes', reduced to two drag points."""
+        dx, dy = float(x1 - x0), float(y1 - y0)
+        L2 = dx * dx + dy * dy
+        if L2 < 1e-9:
+            L2 = 1e-9
+        if kind == "radial":
+            t = np.sqrt((xs - x0) ** 2 + (ys - y0) ** 2) / np.sqrt(L2)
+        elif kind == "angle":
+            # A SWEEP, with the seam BEHIND the drag. Putting the 0/1 wrap on
+            # the drag direction itself laid a hard edge straight across the
+            # middle of the shape you just dragged through -- visible in the
+            # first render and wrong: the drag names where the ramp STARTS,
+            # and the only discontinuity a sweep can have belongs opposite it.
+            t = (np.arctan2(ys - y0, xs - x0)
+                 - np.arctan2(dy, dx) + np.pi) / (2 * np.pi)
+            t = np.mod(t, 1.0)
+        elif kind == "diamond":
+            u = ((xs - x0) * dx + (ys - y0) * dy) / L2
+            v = ((xs - x0) * -dy + (ys - y0) * dx) / L2
+            t = np.abs(u) + np.abs(v)
+        else:
+            # linear, and reflected = linear mirrored about the start point
+            t = ((xs - x0) * dx + (ys - y0) * dy) / L2
+            if kind == "reflected":
+                t = np.abs(t)
+        return np.clip(t.astype(np.float32), 0.0, 1.0)
+
+    @staticmethod
+    def _gradient_ramp(stops, t):
+        """Sample a stop list [{pos, color:[r,g,b], alpha}] at t. Stops are
+        sorted and clamped here, so a record written by any client replays the
+        same way regardless of the order it arrived in."""
+        st = []
+        for s in (stops or []):
+            try:
+                p = float(s.get("pos", 0.0))
+                c = [float(v) for v in (s.get("color") or (0, 0, 0))[:3]]
+                a = float(s.get("alpha", 1.0))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if not (np.isfinite(p) and all(np.isfinite(v) for v in c)
+                    and np.isfinite(a)):
+                continue
+            st.append((float(np.clip(p, 0, 1)),
+                       [float(np.clip(v, 0, 1)) for v in c],
+                       float(np.clip(a, 0, 1))))
+        if not st:
+            st = [(0.0, [0.0, 0.0, 0.0], 1.0), (1.0, [1.0, 1.0, 1.0], 1.0)]
+        st.sort(key=lambda s: s[0])
+        if len(st) == 1:
+            st = [(0.0, st[0][1], st[0][2]), (1.0, st[0][1], st[0][2])]
+        pos = np.asarray([s[0] for s in st], np.float32)
+        col = np.asarray([s[1] for s in st], np.float32)
+        alp = np.asarray([s[2] for s in st], np.float32)
+        rgb = np.stack([np.interp(t, pos, col[:, i]).astype(np.float32)
+                        for i in range(3)], axis=-1)
+        return rgb, np.interp(t, pos, alp).astype(np.float32)
+
+    def _gradient_layer(self, lid, kind, x0, y0, x1, y1, stops, gate,
+                        opacity=1.0, dither=0.0, seed=0):
+        """Shared gradient applier (tool + replay). Composites the ramp OVER
+        the layer, gated; never touches pixels outside the gate."""
+        l = self.layer(lid)
+        h, w = self.height, self.width
+        ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+        t = self._gradient_t(kind, x0, y0, x1, y1, xs, ys)
+        rgb, ramp_a = self._gradient_ramp(stops, t)
+        a = ramp_a * float(np.clip(opacity, 0.0, 1.0))
+        if dither and dither > 0:
+            # banding is the one thing a smooth ramp on 8-bit output shows;
+            # a seeded ordered jitter fixes it and stays deterministic so
+            # replay reproduces the same pixels.
+            rng = np.random.default_rng(int(seed) & 0x7FFFFFFF)
+            n = rng.random((h, w)).astype(np.float32) - 0.5
+            rgb = np.clip(rgb + (n[..., None] * float(dither) / 255.0 * 4.0), 0, 1)
+        if gate is not None:
+            a = a * np.clip(np.asarray(gate, np.float32), 0, 1)
+        A = l.pixels
+        a3 = a[..., None]
+        A[..., :3] = rgb * a3 + A[..., :3] * (1.0 - a3)
+        A[..., 3] = np.clip(a + A[..., 3] * (1.0 - a), 0, 1)
+        _MUT_REV[0] += 1
+        return True
+
+    def gradient(self, lid, x0, y0, x1, y1, kind="linear", stops=None,
+                 color=(0, 0, 0), color2=(1, 1, 1), to_transparent=False,
+                 opacity=1.0, dither=0.0, selection=None, sel_invert=False,
+                 feather=0.0, seed=0, record=True):
+        """Drag a gradient onto a layer: (x0, y0) is where the drag started.
+
+        `kind`: linear | radial | angle | reflected | diamond.
+        `stops` is the full form -- [{"pos": 0..1, "color": [r,g,b],
+        "alpha": 0..1}, ...]. When it is absent the two colours are used,
+        with `to_transparent` making the far end transparent instead of
+        `color2` (foreground->background and foreground->transparent, the
+        two every editor ships).
+
+        Journals {op: "gradient"} with the points, kind, stops and the frozen
+        gate, so replay is the SAME applier and the record carries no pixels.
+        """
+        self._locked_guard(lid)
+        kind = str(kind or "linear")
+        if kind not in self.GRADIENT_KINDS:
+            raise ValueError("unknown gradient kind %r (want one of %s)"
+                             % (kind, ", ".join(self.GRADIENT_KINDS)))
+        for v, n in ((x0, "x0"), (y0, "y0"), (x1, "y1"), (y1, "y1")):
+            if not np.isfinite(float(v)):
+                raise ValueError("gradient %s must be a number" % n)
+        x0, y0, x1, y1 = float(x0), float(y0), float(x1), float(y1)
+        if not stops:
+            c1 = [float(np.clip(v, 0, 1)) for v in tuple(color)[:3]]
+            c2 = ([float(np.clip(v, 0, 1)) for v in tuple(color)[:3]]
+                  if to_transparent
+                  else [float(np.clip(v, 0, 1)) for v in tuple(color2)[:3]])
+            stops = [{"pos": 0.0, "color": c1, "alpha": 1.0},
+                     {"pos": 1.0, "color": c2,
+                      "alpha": 0.0 if to_transparent else 1.0}]
+        gate = self._resolve_gate(selection, sel_invert, feather=feather)
+        if record:
+            self.record("Gradient", only=[lid])
+            self.record_stroke(
+                lid, [[(x0 + x1) / 2.0, (y0 + y1) / 2.0]],
+                {"op": "gradient", "kind": kind, "gx0": x0, "gy0": y0,
+                 "gx1": x1, "gy1": y1, "stops": stops,
+                 "opacity": float(opacity), "dither": float(dither),
+                 "seed": int(seed),
+                 **(self._sel_record(selection, sel_invert)
+                    if selection else {})}, new=True)
+            if self._undo:
+                rr = self._undo[-1][1].setdefault("rerender", [])
+                if lid not in rr:
+                    rr.append(lid)
+        self._gradient_layer(lid, kind, x0, y0, x1, y1, stops, gate,
+                             opacity=opacity, dither=dither, seed=seed)
+        return True
+
     def warp_perspective(self, lid, quad, bbox=None, selection=None,
                          sel_invert=False, feather=0.0, record=True):
         """4-point perspective transform (R47). The source region (`bbox`,
@@ -10778,6 +11036,23 @@ class Document:
             self.media_step(lid, int(b.get("steps", 1)), record=False,
                             sel_mask=_msg,
                             sel_invert=bool(b.get("sel_invert")))
+            return
+        if op == "gradient":
+            _gg = None
+            if b.get("sel_asset"):
+                _gg = self._asset_get(b["sel_asset"])
+                if _gg is None:
+                    self.layer(lid)._replay_ok = False
+                    return
+                if bool(b.get("sel_invert")):
+                    _gg = 1.0 - np.asarray(_gg, np.float32)
+            self._gradient_layer(lid, str(b.get("kind", "linear")),
+                                 float(b.get("gx0", 0)), float(b.get("gy0", 0)),
+                                 float(b.get("gx1", 0)), float(b.get("gy1", 0)),
+                                 b.get("stops"), _gg,
+                                 opacity=float(b.get("opacity", 1.0)),
+                                 dither=float(b.get("dither", 0.0)),
+                                 seed=int(b.get("seed", 0)))
             return
         if op == "pwarp":
             _pg = None

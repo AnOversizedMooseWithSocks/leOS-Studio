@@ -634,10 +634,14 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
     </div>
     <div class="tgrp" data-grp="gen" title="Generator brushes — one click lays a whole passage of strokes, shaped and faded by the active selection (feathering softens them)">
       <div class="tgw">
-        <button id="tScribble" class="cur" title="Scribble (G) — curl-noise scribble: wandering pen strands in a disc. Curl sets loose jitter vs tight swirls; inside a feathered selection the scribble thins out at the soft edge. Every strand is an ordinary stroke — undo removes the whole scribble, nudge can still move each strand.">🌀</button>
-        <button id="tHatch" title="Hatch shade (D) — uniform line/hatch shading. Modes: line, hatch (crossed), or both — 'both' reads the picture and crosses only the darks, fading to sparse lines in the lights. Works as a disc at the click or fills the whole selection.">▤</button>
-        <button id="tTextile" title="Textile (W) — sew and weave with strokes: woven cloth (pick the interlacement), cross-stitch, or satin-stitch embroidery. Choose the thread's colour, thickness and depth; the swatch previews exactly what a click lays down. Click to stamp a patch, or turn on region fill and click inside a shape to upholster it.">🧵</button>
-        <button id="tCreature" title="Creature (Shift+L) — let the brush loose. Up to ten little leCore creatures, each with its own brain, walk the layer for a few seconds and paint the way they went. Rules tell them what to want: chase or avoid paint, avoid their own trail, seek light or dark, follow a colour, ride the noise field, flock or keep apart — or hit random and see what they do. Click to release them at a point, drag to line them up along a path. Each walk is one ordinary stroke: undo removes the whole run, nudge can still move each walk.">🐞</button>
+        <button id="tScribble" class="cur" title="Scribble (D) — curl-noise scribble: wandering pen strands in a disc. Curl sets loose jitter vs tight swirls; inside a feathered selection the scribble thins out at the soft edge. Every strand is an ordinary stroke — undo removes the whole scribble, nudge can still move each strand.">🌀</button>
+        <button id="tHatch" title="Hatch shade (Shift+D) — uniform line/hatch shading. Modes: line, hatch (crossed), or both — 'both' reads the picture and crosses only the darks, fading to sparse lines in the lights. Works as a disc at the click or fills the whole selection.">▤</button>
+        <button id="tTextile" title="Textile (Shift+D twice) — sew and weave with strokes: woven cloth (pick the interlacement), cross-stitch, or satin-stitch embroidery. Choose the thread's colour, thickness and depth; the swatch previews exactly what a click lays down. Click to stamp a patch, or turn on region fill and click inside a shape to upholster it.">🧵</button>
+      </div><span class="tgc"></span>
+    </div>
+    <div class="tgrp solo" data-grp="creature" title="Creature brush — an agent, not a stamp">
+      <div class="tgw">
+        <button class="cur" id="tCreature" title="Creature (A) — let the brush loose. Up to ten little leCore creatures, each with its own brain, walk the layer for a few seconds and paint the way they went. Rules tell them what to want: chase or avoid paint, avoid their own trail, seek light or dark, follow a colour, ride the noise field, flock or keep apart — or hit random and see what they do. Click to release them at a point, drag to line them up along a path. Each walk is one ordinary stroke: undo removes the whole run, nudge can still move each walk.">🐞</button>
       </div><span class="tgc"></span>
     </div>
     <div class="tgrp solo" data-grp="pick" title="Eyedropper">
@@ -680,9 +684,10 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
         <button class="cur" id="tTransform" title="Transform / Move (V) — drag to move, handles scale, top handle rotates; Enter applies">⤢</button>
       </div><span class="tgc"></span>
     </div>
-    <div class="tgrp solo" data-grp="fill" title="Flood fill">
+    <div class="tgrp" data-grp="fill" title="Fill and gradient">
       <div class="tgw">
         <button class="cur" id="tFill" title="Flood fill (G) — click to fill with the configured source">🪣</button>
+        <button id="tGradient" title="Gradient (Shift+G) — drag across the layer: where you press is the start of the ramp and where you let go is the end. Linear, radial, angle, reflected or diamond; the two colour swatches are its ends, or pick 'to transparent' to fade out. Hold Shift while dragging to snap the direction to 45°. Inside a selection it fills only there.">▧</button>
       </div><span class="tgc"></span>
     </div>
     <div class="tgrp solo" data-grp="text" title="Text">
@@ -737,6 +742,25 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
         <label class="mu" title="Line thickness (px)">th <input type="number" id="scThick" value="1.6" step="0.2" min="0.4" max="12" style="width:52px"></label>
         <label class="mu" title="Strand density">dens <input type="range" id="scDens" min="20" max="300" value="100" style="width:70px"></label>
         <button class="genBrushLink mu" title="These tools are brushes: size, colour, opacity, hardness and the selection gate all come from the Brush panel. This opens it." style="background:none;border:0;padding:0;color:var(--acc);cursor:pointer;text-decoration:underline">brush settings ↗</button>
+      </div>
+      <div id="gradHud" class="hud" style="display:none">
+        <span class="mu" style="opacity:.7">drag from one end of the ramp to the other · Shift snaps to 45°</span>
+        <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <select id="grKind" title="Linear: a straight ramp along the drag. Radial: out from where you pressed. Angle: a sweep round it. Reflected: mirrored either side of the start. Diamond: square rings.">
+            <option value="linear">linear</option><option value="radial">radial</option>
+            <option value="angle">angle</option><option value="reflected">reflected</option>
+            <option value="diamond">diamond</option>
+          </select>
+          <label class="mu" title="The colour the ramp starts with — the foreground swatch">from <input type="color" id="grFrom" value="#000000" style="width:26px;height:20px;padding:0;border:0;background:none"></label>
+          <label class="mu" title="The colour it ends with — the background swatch"><span id="grToLbl">to</span> <input type="color" id="grTo" value="#ffffff" style="width:26px;height:20px;padding:0;border:0;background:none"></label>
+          <button id="grSwap" class="mu" title="Swap the two ends (X)">⇄</button>
+          <label class="mu" title="Fade the far end out instead of reaching the second colour — the other gradient every editor ships"><input type="checkbox" id="grAlpha"> to transparent</label>
+        </span>
+        <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <label class="mu" title="How strong the whole ramp lands">opacity <input type="range" id="grOp" min="5" max="100" value="100" style="width:70px"></label>
+          <label class="mu" title="A seeded speckle that breaks up the banding a smooth ramp shows on 8-bit output. Deterministic, so it replays identically.">dither <input type="range" id="grDither" min="0" max="100" value="0" style="width:60px"></label>
+          <button class="genBrushLink mu" title="The selection gate comes from the Brush panel, like every other tool that fills a region. This opens it." style="background:none;border:0;padding:0;color:var(--acc);cursor:pointer;text-decoration:underline">brush settings ↗</button>
+        </span>
       </div>
       <div id="creatureHud" class="hud" style="display:none">
         <span style="display:flex;flex-direction:column;gap:6px">
@@ -1122,6 +1146,9 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
         <label style="flex:0 0 auto;display:flex;gap:3px;align-items:center;font-size:11px" title="How many pixels Expand / Contract / Feather move by">by<input type="number" id="selAmt" value="4" min="1" max="64" style="width:44px">px</label>
       </div>
       <div class="subh">Use it</div>
+      <div class="row"><button id="selStroke" title="Draw the selection's outline with the current brush — width, colour, hardness and MEDIA all come from the Brush panel. This is the shape tool: rectangle select + stroke gives a rectangle, ellipse gives an ellipse, lasso gives whatever you drew, and the result is ordinary paint you can nudge, restyle or undo.">Stroke outline</button>
+        <button id="selFill" title="Fill the whole selection with the brush colour (Edit → Fill elsewhere). With nothing selected it fills the layer.">Fill</button>
+        <label class="mu" title="Keep the line inside the selection instead of straddling its edge"><input type="checkbox" id="selStrokeIn"> inside</label></div>
       <div class="row"><button id="selToMask" title="Turn the active selection into a layer mask">Selection → Mask</button>
         <button id="selMergeAll" title="Union every stored selection into one">Merge all</button>
         <button id="selCrop" title="Crop the document to the active selection's bounds">Crop</button></div>
@@ -1509,7 +1536,7 @@ document.addEventListener('click',e=>{
 sideTab('layers'); sideTab('brush');
 (function dockHuds(){
   const dock=$('toolDock'); if(!dock)return;
-  ['scribHud','creatureHud','hatchHud','textileHud','trHud','fillHud','textHud','npHud','fxHud','stampHud','strokeSelPanel'].forEach(id=>{ const el=$(id); if(el){ el.style.display='none'; dock.appendChild(el); } });
+  ['scribHud','creatureHud','gradHud','hatchHud','textileHud','trHud','fillHud','textHud','npHud','fxHud','stampHud','strokeSelPanel'].forEach(id=>{ const el=$(id); if(el){ el.style.display='none'; dock.appendChild(el); } });
 })();
 $('ndPreset').onchange=e=>{
   // print presets carry their DPI: "2480x3508@300"
@@ -3152,6 +3179,9 @@ const BUSY_WORDS=[
   [/\/api\/hatchfill/,   'shading'],
   [/\/api\/scribble/,    'scribbling'],
   [/\/api\/creature/,    'creatures exploring'],
+  [/\/api\/gradient/,    'pouring the gradient'],
+  [/\/api\/stroke_selection/,'stroking the outline'],
+  [/\/api\/fill_selection/,'filling'],
   [/\/api\/scatter/,     'scattering'],
   [/\/api\/fill/,        'filling'],
   [/\/api\/paint_batch/, 'painting'],
@@ -5320,6 +5350,7 @@ let shaderPresets=[], shaderAttribution='';
 let strokeError=null;
 let stroke=null, cloneSrc=null, cloneOffset=null, marquee=null, smoothPt=null;
 let lasso=null, polyLasso=null;   // R74: freehand lasso in progress / polygon lasso being clicked out
+let gradDrag=null;                // R74: the gradient being dragged out
 let sent=0, strokeFirst=true, flushTimer=null, flushing=false, strokeOrigin=null;
 function strokeBody(points,record){
   return {layer:sel,points,color:hex2rgb($('bColor').value),
@@ -5586,7 +5617,7 @@ function cancelCanvasStroke(){
   // a cancelled gesture must not leave half a mark behind.
   const wasSent=sent>0;
   if(flushTimer){clearInterval(flushTimer);flushTimer=null;}
-  stroke=null; sent=0; smoothPt=null; marquee=null; lasso=null; polyLasso=null; dragSp=null;
+  stroke=null; sent=0; smoothPt=null; marquee=null; lasso=null; polyLasso=null; gradDrag=null; dragSp=null;
   ptDrag=null; ptDragTo=null; strokeVP=null;
   endStrokeMask();
   if(wasSent){ api('/api/undo',{method:'POST'}).then(()=>{drawComposite();refresh();}); }
@@ -5760,6 +5791,7 @@ vc.addEventListener('pointerdown',e=>{
     const [x,y]=canvasXY(e);
     if(tool==='rect'||tool==='ellipse'){ marquee={x0:x,y0:y,x1:x,y1:y,shift:e.shiftKey,mod:selModFromEvent(e)}; vc.setPointerCapture(e.pointerId); }
     if(tool==='lasso'){ lasso={pts:[[x,y]],mod:selModFromEvent(e)}; vc.setPointerCapture(e.pointerId); }
+    if(tool==='gradient'){ if(!sel)return toast('Pick a layer first'); gradDrag={x0:x,y0:y,x1:x,y1:y}; vc.setPointerCapture(e.pointerId); }
     if(tool==='polylasso'){
       // click a corner. Clicking the FIRST point again closes the shape, the
       // way every polygon lasso does; so does a double-click or Enter.
@@ -5874,6 +5906,15 @@ vc.addEventListener('pointermove',e=>{
     repaintCanvas(); drawMarquee(); return;
   }
   if(polyLasso){ polyLasso.hover=canvasXY(e); repaintCanvas(); drawMarquee(); return; }
+  if(gradDrag){
+    let [gx2,gy2]=canvasXY(e);
+    if(e.shiftKey){                          // snap the direction to 45°
+      const dx=gx2-gradDrag.x0, dy=gy2-gradDrag.y0, r=Math.hypot(dx,dy);
+      const a=Math.round(Math.atan2(dy,dx)/(Math.PI/4))*(Math.PI/4);
+      gx2=gradDrag.x0+r*Math.cos(a); gy2=gradDrag.y0+r*Math.sin(a);
+    }
+    gradDrag.x1=gx2; gradDrag.y1=gy2; repaintCanvas(); drawMarquee(); return;
+  }
   if(genStroke){
     const [gx,gy]=canvasXY(e), gl=genStroke[genStroke.length-1];
     // Thin the path to the generator's own resolution: a generator reads
@@ -5884,6 +5925,27 @@ vc.addEventListener('pointermove',e=>{
   }
   if(!stroke)return;
   let p=canvasXY(e); p=[p[0],p[1],penPressure(e)];
+  // R74: SHIFT DRAWS A STRAIGHT LINE. Every editor does this and it was the
+  // one shape people could not make by hand here. The stroke keeps exactly
+  // two points -- its origin and the pointer -- so it stays one ordinary
+  // journaled stroke that nudge and restyle still work on. Shift+Alt locks
+  // the angle to 45 degrees, as it does elsewhere.
+  if(e.shiftKey&&(tool==='brush'||tool==='erase')&&stroke.length){
+    const o=stroke[0];
+    let lx=p[0], ly=p[1];
+    if(e.altKey){
+      const dx=lx-o[0], dy=ly-o[1], r=Math.hypot(dx,dy);
+      const a=Math.round(Math.atan2(dy,dx)/(Math.PI/4))*(Math.PI/4);
+      lx=o[0]+r*Math.cos(a); ly=o[1]+r*Math.sin(a);
+    }
+    stroke.length=1; stroke.push([lx,ly,p[2]]);
+    smoothPt=null;                       // the lazy brush must not drag it
+    // the live preview function is drawLocalStroke -- `node --check` passes
+    // on a phantom name, which is exactly why this is driven by a shim test
+    if(!$('bLive').checked) drawLocalStroke();
+    else previewDot({clientX:0,clientY:0,__pt:p});
+    return;
+  }
   const railSp=$('bRail').value&&splineById($('bRail').value);
   if(railSp&&(tool==='brush'||tool==='erase'||tool==='smudge'||tool==='clone'))
     p=nearestOnSpline(railSp,p);                        // ride the rail
@@ -5973,6 +6035,19 @@ function drawSampleMarker(x,y){          // where the clone is reading RIGHT NOW
   vctx.moveTo(x,y-7);vctx.lineTo(x,y+7);vctx.stroke();vctx.restore();
 }
 function drawMarquee(){
+  if(gradDrag){
+    // the ramp line with a handle at each end, so the direction and the two
+    // ends are visible while dragging -- the gradient's whole geometry
+    vctx.save();
+    vctx.strokeStyle='#0b0d12';vctx.lineWidth=3.2;vctx.setLineDash([]);
+    vctx.beginPath();vctx.moveTo(gradDrag.x0,gradDrag.y0);vctx.lineTo(gradDrag.x1,gradDrag.y1);vctx.stroke();
+    vctx.strokeStyle='#55e0d4';vctx.lineWidth=1.4;
+    vctx.beginPath();vctx.moveTo(gradDrag.x0,gradDrag.y0);vctx.lineTo(gradDrag.x1,gradDrag.y1);vctx.stroke();
+    vctx.fillStyle=$('grFrom').value;vctx.beginPath();vctx.arc(gradDrag.x0,gradDrag.y0,5,0,7);vctx.fill();vctx.stroke();
+    vctx.fillStyle=$('grAlpha').checked?'rgba(0,0,0,0)':$('grTo').value;
+    vctx.beginPath();vctx.arc(gradDrag.x1,gradDrag.y1,5,0,7);vctx.fill();vctx.stroke();
+    vctx.restore();return;
+  }
   if(lasso||polyLasso){
     const L=lasso||polyLasso, pts=L.pts;
     if(!pts.length)return;
@@ -6025,6 +6100,12 @@ async function endCanvasPointer(){
   setStatus();
   if(dragSp){dragSp=null; pushSpline(false); return;}
   if(flushTimer){clearInterval(flushTimer);flushTimer=null;}
+  if(gradDrag){
+    const g=gradDrag; gradDrag=null; repaintCanvas();
+    if(Math.hypot(g.x1-g.x0,g.y1-g.y0)<3){ setStatus('gradient: drag from one end of the ramp to the other'); return; }
+    await doGradient(g);
+    return;
+  }
   if(lasso){
     const l=lasso; lasso=null;
     const ext=l.pts.reduce((a,p)=>[Math.min(a[0],p[0]),Math.min(a[1],p[1]),Math.max(a[2],p[0]),Math.max(a[3],p[1])],[1e9,1e9,-1e9,-1e9]);
@@ -6724,17 +6805,18 @@ document.addEventListener('keydown',e=>{
   (e.shiftKey?ungroupSelectedStrokes:groupSelectedStrokes)();
 });
 $('ssUngroup').onclick=ungroupSelectedStrokes;
-const TOOLBTN={fx:'tFxBrush',nodepaint:'tNodePaint',strokesel:'tStrokeSel',nudge:'tNudge',pick:'tPick',brush:'tBrush',erase:'tErase',knife:'tKnife',blend:'tBlend',smudge:'tSmudge',clone:'tClone',heal:'tHeal',stamp:'tStamp',rect:'tRect',ellipse:'tEllipse',lasso:'tLasso',polylasso:'tPolyLasso',wand:'tWand',lum:'tLum',obj:'tObj',spline:'tSpline',transform:'tTransform',fill:'tFill',text:'tText',scribble:'tScribble',hatch:'tHatch',textile:'tTextile',creature:'tCreature'};
+const TOOLBTN={fx:'tFxBrush',nodepaint:'tNodePaint',strokesel:'tStrokeSel',nudge:'tNudge',pick:'tPick',brush:'tBrush',erase:'tErase',knife:'tKnife',blend:'tBlend',smudge:'tSmudge',clone:'tClone',heal:'tHeal',stamp:'tStamp',gradient:'tGradient',rect:'tRect',ellipse:'tEllipse',lasso:'tLasso',polylasso:'tPolyLasso',wand:'tWand',lum:'tLum',obj:'tObj',spline:'tSpline',transform:'tTransform',fill:'tFill',text:'tText',scribble:'tScribble',hatch:'tHatch',textile:'tTextile',creature:'tCreature'};
 const TOOLTIPS={knife:'Palette knife — Q · shapes the paint BODY already on the canvas (needs an oil/acrylic/water medium) · right-click the tool to cycle smooth / push / scrape / spread',blend:'Blender — Y · a clean brush that works the WET paint already there: softens two colours together, knocks ridges down',fx:'FX brush — F · the stroke grows an effect instead of pigment · pick a preset in the Tool tab · retune in the node graph',nodepaint:'Node paint — J · strokes reveal the Paint out node\'s image · pick the source node in the Tool tab',strokesel:'Select strokes — K · click a stroke, then grow the set forward/back through paint order',nudge:'Nudge — N · drags the stroke PATHS, not the pixels: refine sketch lines without smudge swirl',pick:'Eyedropper — I · click to pick a colour · Alt-click while brushing does the same',brush:'Brush — B',erase:'Eraser — E',smudge:'Smudge — S',clone:'Clone — C · Alt-click sets source',heal:'Heal — H · paint over a blemish; it repairs from the surroundings',stamp:'Stamp — U · press the selected sticker on · capture new ones from a layer or selection in the Tool tab',
   rect:'Rectangle select · Shift = square',ellipse:'Ellipse select · Shift = circle',wand:'Select by color',
   lum:'Select by brightness',obj:'Select object',spline:'Spline — P · click adds points · Esc finishes',
   transform:'Transform — drag moves · corners scale · top handle rotates · Enter applies · Esc resets',
   fill:'Flood fill — click a region · fills stay inside the active selection · source in the panel',
-  scribble:'Scribble — G · one click lays a curl-noise scribble · a feathered selection shapes and thins it',
-  hatch:'Hatch shade — D · one click lays uniform line/hatch shading · both-mode crosses only the darks',
-  textile:'Textile — W · sew with strokes: weave, cross-stitch or embroidery · the swatch shows exactly what a click lays down',
-  creature:'Creature — Shift+L · release up to ten leCore creatures to explore the layer and paint their walks · set the rules, or roll random',
+  scribble:'Scribble — D · one click lays a curl-noise scribble · a feathered selection shapes and thins it',
+  hatch:'Hatch shade — Shift+D · one click lays uniform line/hatch shading · both-mode crosses only the darks',
+  textile:'Textile — Shift+D twice · sew with strokes: weave, cross-stitch or embroidery · the swatch shows exactly what a click lays down',
+  creature:'Creature — A · release up to ten leCore creatures to explore the layer and paint their walks · set the rules, or roll random',
   lasso:'Lasso — L · draw a selection freehand · Shift adds, Alt subtracts',
+  gradient:'Gradient — Shift+G · drag from one end of the ramp to the other · Shift snaps to 45°',
   polylasso:'Polygon lasso — Shift+L when a selection tool is active · click each corner · double-click, Enter or the first point closes it',
   text:'Text — click to place · choose a spline in the panel for text-on-a-path'};
 // ---------------------------------------------------------------- popups ----
@@ -7989,6 +8071,30 @@ function creatureLastLine(r,preset){
     +(preset?' · '+preset:'')
     +' · lines '+f(ru.lines)+' trail '+f(ru.self)+' others '+f(ru.others)+' light '+f(ru.light)+' colour '+f(ru.color)+' field '+f(ru.field)+' wander '+f(ru.wander)+(ru.solid?' · solid':'');
 }
+// R74: one drag = one gradient = one undo entry. The server journals it
+// pixel-free, so this posts geometry, never an image.
+async function doGradient(g){
+  if(!sel)return toast('Pick a layer first');
+  const r=await api('/api/gradient',{...J,body:JSON.stringify({layer:sel,
+    x0:Math.round(g.x0),y0:Math.round(g.y0),x1:Math.round(g.x1),y1:Math.round(g.y1),
+    kind:$('grKind').value,
+    color:hex2rgb($('grFrom').value), color2:hex2rgb($('grTo').value),
+    to_transparent:$('grAlpha').checked,
+    opacity:+$('grOp').value/100, dither:+$('grDither').value/100,
+    seed:(Math.random()*1e6)|0,
+    selection:$('bSel').value||undefined, sel_invert:$('bSelInv').checked})});
+  if(r.error)return toast(r.error);
+  setStatus($('grKind').value+' gradient · '+Math.round(Math.hypot(g.x1-g.x0,g.y1-g.y0))+' px'+($('bSel').value?' · inside the selection':''));
+  refresh();
+}
+(function wireGradient(){
+  const sw=$('grSwap');
+  if(sw) sw.onclick=()=>{ const a=$('grFrom').value; $('grFrom').value=$('grTo').value; $('grTo').value=a; setStatus('swapped the gradient ends'); };
+  const al=$('grAlpha');
+  // "to transparent" ignores the second colour; say so instead of leaving a
+  // live-looking swatch that does nothing
+  if(al) al.onchange=()=>{ $('grTo').disabled=al.checked; $('grToLbl').textContent=al.checked?'to (unused)':'to'; };
+})();
 async function doCreature(x,y,path,seed){
   if(!sel)return toast('Pick a layer first');
   const c=genCommon();
@@ -8119,13 +8225,13 @@ function setTool(t){
   syncToolRail(t);
   vc.style.cursor=({brush:'crosshair',erase:'crosshair',smudge:'crosshair',knife:'crosshair',blend:'crosshair',clone:'crosshair',heal:'crosshair',stamp:'copy',
     rect:'crosshair',ellipse:'crosshair',wand:'copy',lum:'copy',obj:'copy',spline:'crosshair',transform:'move',fill:'crosshair',text:'text',
-    pick:'copy',nudge:'grab',strokesel:'pointer',nodepaint:'crosshair',fx:'crosshair',scribble:'crosshair',hatch:'crosshair',textile:'crosshair',creature:'crosshair',lasso:'crosshair',polylasso:'crosshair'})[t]||'default';
+    pick:'copy',nudge:'grab',strokesel:'pointer',nodepaint:'crosshair',fx:'crosshair',scribble:'crosshair',hatch:'crosshair',textile:'crosshair',creature:'crosshair',lasso:'crosshair',polylasso:'crosshair',gradient:'crosshair'})[t]||'default';
   const brushFam=['brush','erase','smudge','clone','heal','pick'].includes(t);
-  const dockTool={transform:'trHud',fill:'fillHud',text:'textHud',nodepaint:'npHud',fx:'fxHud',stamp:'stampHud',strokesel:'strokeSelPanel',scribble:'scribHud',hatch:'hatchHud',textile:'textileHud',creature:'creatureHud'}[t];
+  const dockTool={transform:'trHud',fill:'fillHud',text:'textHud',nodepaint:'npHud',fx:'fxHud',stamp:'stampHud',strokesel:'strokeSelPanel',scribble:'scribHud',hatch:'hatchHud',textile:'textileHud',creature:'creatureHud',gradient:'gradHud'}[t];
   // show only the active tool's dock panel
-  ['trHud','fillHud','textHud','npHud','fxHud','stampHud','strokeSelPanel','scribHud','creatureHud','hatchHud','textileHud'].forEach(id=>{ const el=$(id); if(el) el.style.display=(id===dockTool)?(id==='strokeSelPanel'?'block':'flex'):'none'; });
+  ['trHud','fillHud','textHud','npHud','fxHud','stampHud','strokeSelPanel','scribHud','creatureHud','hatchHud','textileHud','gradHud'].forEach(id=>{ const el=$(id); if(el) el.style.display=(id===dockTool)?(id==='strokeSelPanel'?'block':'flex'):'none'; });
   $('toolDockEmpty').style.display=dockTool?'none':'';
-  $('toolSectTitle').textContent=({transform:'Transform',fill:'Fill',text:'Text',nodepaint:'Node paint',fx:'FX brush',stamp:'Stickers',strokesel:'Stroke selection',scribble:'Scribble',hatch:'Hatch shade',textile:'Textile',creature:'Creature'}[t])||'Tool';
+  $('toolSectTitle').textContent=({transform:'Transform',fill:'Fill',text:'Text',nodepaint:'Node paint',fx:'FX brush',stamp:'Stickers',strokesel:'Stroke selection',scribble:'Scribble',hatch:'Hatch shade',textile:'Textile',creature:'Creature',gradient:'Gradient'}[t])||'Tool';
   const toolTabBtn=document.querySelector('#sidetabsB button[data-st="tool"]');
   if(toolTabBtn) toolTabBtn.style.display=dockTool?'':'none';   // tab only when there's something to show
   if(brushFam) sideTab('brush');
@@ -8515,7 +8621,7 @@ async function doText(x,y){
   setStatus('✓ '+r.glyphs+' glyphs'+(body.spline?' along the path':''));
   refresh(); refreshNodePreviews();
 }
-const SHORTCUTS=[['Shift+P','perspective guides on/off'],['S','Accept a shape-assist offer (tidy the stroke)'],['Shift+Space','Play / pause the timeline'],[', / .','Step one frame back / forward'],['Home / End','Jump to the first / last frame'],["B / E", "Brush / Eraser"], ["S / C", "Smudge / Clone"], ["M / W", "Marquee / Magic wand"], ["N", "Nudge — move strokes, not pixels"], ["K", "Select strokes (Shift-click adds)"], ["I", "Eyedropper (Alt-click while brushing)"], ["Swatch strip", "Click a recent colour to reuse · Alt-click to remove"], ["Del / Backspace", "Clear the selection (whole layer if none)"], ["Ctrl+click thumb", "Load layer alpha as selection"], ["Alt+click eye", "Solo a layer (again restores)"], ["Drag a layer row", "Reorder layers"], ["M (nodes)", "Bypass / re-enable a node"], ["Shift-drag (nodes)", "Box-select nodes"], ["Ctrl+C / V (nodes)", "Copy / paste nodes with their links"], ["Drop a wire on empty space", "Search for a node and auto-connect it"], ["Drop a node on a wire", "Insert it into that link"], ["Ctrl-drag (nodes)", "Slice through wires to cut them"], ["Ctrl+drag (nodes)", "Slash across wires to cut them"], ["Ctrl+Shift+N", "New layer"], ["Ctrl+1", "Zoom 100%"], ["V", "Transform tool"], ["G", "Fill (bucket)"], ["T", "Text tool"], ["P", "Spline pen"], ["Ctrl+C / X / V", "Copy / Cut / Paste selection"], ["Ctrl+J", "Duplicate layer"], ["Ctrl+D", "Deselect · duplicate node (in Nodes)"], ["Ctrl+Z / Shift+Z / Y", "Undo / Redo"], ["Ctrl+S", "Save workspace"], ["Ctrl+O", "Open image"], ["Ctrl+Shift+E", "Merge visible"], ["Esc", "Reset transform → finish spline → deselect"], ["Enter", "Apply transform"], ["[ / ]", "Brush smaller / larger"], ["+ / − / 0", "Zoom in / out / fit"], ["Ctrl+0", "Fit on screen"], ["Stroke panel", "width slider: swells selected joints, or tapers the whole stroke"], ["Strokes selected", "V transform · Ctrl+C/X/V copy/cut/paste · Del delete · panel: duplicate, to layer, smooth"], ["File ▸ Export at size…", "Render at any resolution, not just canvas size"], ["File ▸ Export frame sequence…", "The animation as numbered PNGs — media simulated on the same timeline playback uses, plus an ffmpeg line"], ["F", "Frame nodes (in Nodes)"], ["Del", "Delete node (in Nodes)"], ["?", "This overlay"], ["Drag & drop", "Images → layers · .lews → workspace · .obj/.glb → 3D models"], ["F", "FX brush — strokes grow effects (grass, drips, embers)"], ["Brush ▸ Media", "Impasto media build real thickness (gravity runs heavy loads) — or pick a MATERIAL (gold, chrome, chalk…): per-pixel stuff lit by the canvas, gleaming in your brush colour"], ["Q", "Palette knife \u2014 shapes the paint already there, across every layer the body spans · click the tool again (or right-click) to cycle the blade: smooth / push / scrape / spread"], ["Y", "Blender \u2014 a clean brush that works the WET paint already on the canvas; unlike Smudge it records as a stroke, so nothing loses its stroke editing"], ["Colour ▸ palette", "Squeeze your swatch colours out as real mounds of paint \u2014 dip a brush in one, drag it through another to mix"], ["Brush ▸ \ud83d\udd8c", "Real brush \u2014 the brush holds a finite amount of paint; drag a dry one through a thick pile to reload, or click the charge meter to dip in the palette"], ["Brush ▸ \u2261", "Build past a layer\u2019s limit \u2014 the excess starts a new layer instead of flattening to a plateau"], ["Brush ▸ Mix", "Wet-on-wet \u2014 the brush picks up paint it crosses and carries it forward"], ["Layer ▸ Paper", "The stock everything sits on: rough and cold-press granulate a wash and break dry-brush up hard; hot-press and smooth stay even"], ["Layer ▸ Grav", "Which way is down for this surface\u2019s wet paint \u2014 easel, flat on a table (paint levels instead of running), or a wall"], ["Brush ▸ ⇋", "Symmetry — strokes paint a mirrored twin (its own editable stroke)"], ["Layer row 🔒 / ◒", "Alpha lock · clipping mask (clips to the layer below)"], ["Editors chip", "Who's here — tabs count as one person; the host can kick"]];
+const SHORTCUTS=[["A","Creature brush — release the agents"],["L / Shift+L","Lasso / polygon lasso"],["D / Shift+D","Scribble, then hatch and textile"],["Shift+G","Gradient (G is the bucket)"],["Shift-drag","A straight line with the brush (+Alt locks to 45°)"],["Shift / Alt while selecting","Add to / subtract from the selection (both = intersect)"],["Ctrl+A / Ctrl+D","Select all / deselect"],["Ctrl+E / Ctrl+Shift+E","Merge down / merge visible"],["Ctrl+Shift+N","New layer"],["Ctrl+T","Transform"],['Shift+P','perspective guides on/off'],['S','Accept a shape-assist offer (tidy the stroke)'],['Shift+Space','Play / pause the timeline'],[', / .','Step one frame back / forward'],['Home / End','Jump to the first / last frame'],["B / E", "Brush / Eraser"], ["S / C", "Smudge / Clone"], ["M / W", "Marquee / Magic wand"], ["N", "Nudge — move strokes, not pixels"], ["K", "Select strokes (Shift-click adds)"], ["I", "Eyedropper (Alt-click while brushing)"], ["Swatch strip", "Click a recent colour to reuse · Alt-click to remove"], ["Del / Backspace", "Clear the selection (whole layer if none)"], ["Ctrl+click thumb", "Load layer alpha as selection"], ["Alt+click eye", "Solo a layer (again restores)"], ["Drag a layer row", "Reorder layers"], ["M (nodes)", "Bypass / re-enable a node"], ["Shift-drag (nodes)", "Box-select nodes"], ["Ctrl+C / V (nodes)", "Copy / paste nodes with their links"], ["Drop a wire on empty space", "Search for a node and auto-connect it"], ["Drop a node on a wire", "Insert it into that link"], ["Ctrl-drag (nodes)", "Slice through wires to cut them"], ["Ctrl+drag (nodes)", "Slash across wires to cut them"], ["Ctrl+Shift+N", "New layer"], ["Ctrl+1", "Zoom 100%"], ["V", "Transform tool"], ["G", "Fill (bucket)"], ["T", "Text tool"], ["P", "Spline pen"], ["Ctrl+C / X / V", "Copy / Cut / Paste selection"], ["Ctrl+J", "Duplicate layer"], ["Ctrl+D", "Deselect · duplicate node (in Nodes)"], ["Ctrl+Z / Shift+Z / Y", "Undo / Redo"], ["Ctrl+S", "Save workspace"], ["Ctrl+O", "Open image"], ["Ctrl+Shift+E", "Merge visible"], ["Esc", "Reset transform → finish spline → deselect"], ["Enter", "Apply transform"], ["[ / ]", "Brush smaller / larger"], ["+ / − / 0", "Zoom in / out / fit"], ["Ctrl+0", "Fit on screen"], ["Stroke panel", "width slider: swells selected joints, or tapers the whole stroke"], ["Strokes selected", "V transform · Ctrl+C/X/V copy/cut/paste · Del delete · panel: duplicate, to layer, smooth"], ["File ▸ Export at size…", "Render at any resolution, not just canvas size"], ["File ▸ Export frame sequence…", "The animation as numbered PNGs — media simulated on the same timeline playback uses, plus an ffmpeg line"], ["F", "Frame nodes (in Nodes)"], ["Del", "Delete node (in Nodes)"], ["?", "This overlay"], ["Drag & drop", "Images → layers · .lews → workspace · .obj/.glb → 3D models"], ["F", "FX brush — strokes grow effects (grass, drips, embers)"], ["Brush ▸ Media", "Impasto media build real thickness (gravity runs heavy loads) — or pick a MATERIAL (gold, chrome, chalk…): per-pixel stuff lit by the canvas, gleaming in your brush colour"], ["Q", "Palette knife \u2014 shapes the paint already there, across every layer the body spans · click the tool again (or right-click) to cycle the blade: smooth / push / scrape / spread"], ["Y", "Blender \u2014 a clean brush that works the WET paint already on the canvas; unlike Smudge it records as a stroke, so nothing loses its stroke editing"], ["Colour ▸ palette", "Squeeze your swatch colours out as real mounds of paint \u2014 dip a brush in one, drag it through another to mix"], ["Brush ▸ \ud83d\udd8c", "Real brush \u2014 the brush holds a finite amount of paint; drag a dry one through a thick pile to reload, or click the charge meter to dip in the palette"], ["Brush ▸ \u2261", "Build past a layer\u2019s limit \u2014 the excess starts a new layer instead of flattening to a plateau"], ["Brush ▸ Mix", "Wet-on-wet \u2014 the brush picks up paint it crosses and carries it forward"], ["Layer ▸ Paper", "The stock everything sits on: rough and cold-press granulate a wash and break dry-brush up hard; hot-press and smooth stay even"], ["Layer ▸ Grav", "Which way is down for this surface\u2019s wet paint \u2014 easel, flat on a table (paint levels instead of running), or a wall"], ["Brush ▸ ⇋", "Symmetry — strokes paint a mirrored twin (its own editable stroke)"], ["Layer row 🔒 / ◒", "Alpha lock · clipping mask (clips to the layer below)"], ["Editors chip", "Who's here — tabs count as one person; the host can kick"]];
 // R71: EVERY overlay, listed once. The old Escape handler knew about three
 // ids, one of which (`newDocBack`) does not exist anywhere in this document,
 // and missed the Invite, Stream, GPU-preview, Document-settings and leCore
@@ -8981,6 +9087,29 @@ $('selCrop').onclick=async()=>{
   if(r.error)return toast(r.error);
   switchedDoc();};
 $('selMergeAll').onclick=async()=>{await api('/api/selection',{...J,body:JSON.stringify({action:'merge'})});refresh();loadAnts();};
+// R74: the shape tool. Both take the brush panel's settings, like every
+// other tool that puts paint down.
+$('selStroke').onclick=async()=>{
+  if(!sel)return toast('Pick a layer first');
+  const r=await api('/api/stroke_selection',{...J,body:JSON.stringify({layer:sel,
+    selection:activeSel||undefined, color:hex2rgb($('bColor').value),
+    radius:+$('bSize').value*0.6, opacity:+$('bOp').value/100,
+    hardness:+$('bHard').value/100, inside:$('selStrokeIn').checked,
+    ...brushBody(), load:+$('bLoad').value/100})});
+  if(r.error)return toast(r.error);
+  if(r.warning)return toast(r.warning);
+  setStatus('stroked '+r.rings+' outline'+(r.rings===1?'':'s')+' with the brush');
+  refresh();
+};
+$('selFill').onclick=async()=>{
+  if(!sel)return toast('Pick a layer first');
+  const r=await api('/api/fill_selection',{...J,body:JSON.stringify({layer:sel,
+    selection:activeSel||undefined, color:hex2rgb($('bColor').value),
+    opacity:+$('bOp').value/100})});
+  if(r.error)return toast(r.error);
+  setStatus(activeSel?'filled the selection':'filled the layer');
+  refresh();
+};
 $('selToMask').onclick=async()=>{ if(!activeSel)return toast('pick a selection first');
   await api('/api/selection',{...J,body:JSON.stringify({action:'to_mask',id:activeSel})}); refresh(); };
 ['bSize','bOp','bHard'].forEach(id=>$(id).oninput=e=>{
@@ -9064,9 +9193,27 @@ document.addEventListener('keydown',e=>{
       else deselect();
       return;}
     if(k==='g'&&mode==='nodes'){e.preventDefault();groupSelected();return;}
+    // R74: the shortcuts a person arrives with. Ctrl+D already deselected
+    // and Ctrl+J duplicated; these are the rest of the standard set.
+    if(k==='a'){e.preventDefault();                    // select all
+      runSelect('rect',{x0:0,y0:0,x1:(state.width||1)-1,y1:(state.height||1)-1},'new');
+      return;}
+    if(k==='e'){e.preventDefault();                    // merge down
+      if(!sel)return toast('Pick a layer first');
+      api('/api/layer',{...J,body:JSON.stringify({action:'merge_down',id:sel})})
+        .then(r=>{followLayerOp(r,'merged down');refresh();});
+      return;}
+    if(k==='t'){e.preventDefault();setTool('transform');return;}
     if(k==='j'){e.preventDefault();
       if(sel)api('/api/layer',{...J,body:JSON.stringify({action:'duplicate',id:sel})})
         .then(r=>{followLayerOp(r,'duplicated — the copy is selected');refresh();});
+      return;}
+  }
+  if((e.ctrlKey||e.metaKey)&&e.shiftKey){
+    const k2=e.key.toLowerCase();
+    if(k2==='n'){e.preventDefault();$('addLayer').click();return;}   // new layer
+    if(k2==='e'){e.preventDefault();                                 // merge visible
+      const b=$('lMergeVisible'); if(b){b.click();} else toast('nothing to merge');
       return;}
   }
   if(e.key==='?'||(e.shiftKey&&e.key==='/')){toggleShortcuts();return;}
@@ -9104,12 +9251,18 @@ document.addEventListener('keydown',e=>{
                    f:'fx',        // Paint Effects brush
                    m:'rect',      // Photoshop: marquee
                    w:'wand',      // Photoshop: magic wand
-                   l:'lasso'};    // Photoshop: lasso -- R74 gave L back
-    // Shift+letter: the second tool on a letter, Photoshop's cycling
-    // L walks lasso -> polygon lasso -> creature, then back round, so one
-    // letter reaches all three without stealing anyone's muscle memory.
-    const SHIFTTOOLKEY={l:(tool==='polylasso'?'creature':tool==='creature'?'lasso':'polylasso'),
-                        m:(tool==='ellipse'?'rect':'ellipse')};
+                   l:'lasso',    // Photoshop: lasso -- R74 gave L back
+                   a:'creature', // the Agent brush -- its own key, see below
+                   d:'scribble'};// the generator family lives on D
+    // Shift+letter cycles WITHIN a family, Photoshop-style. Every key here
+    // reaches its tool in ONE press from anywhere -- the creature used to be
+    // the far end of a three-tool L cycle while its tooltip said "Shift+L",
+    // so from any other tool Shift+L landed on the polygon lasso and the
+    // creature (hidden inside a collapsed group) could not be reached at all.
+    const SHIFTTOOLKEY={l:'polylasso',                       // lasso family
+                        m:(tool==='ellipse'?'rect':'ellipse'),
+                        g:(tool==='gradient'?'fill':'gradient'),
+                        d:(tool==='scribble'?'hatch':tool==='hatch'?'textile':'scribble')};
     // R71: the tool letters are BARE letters. This read e.key with no
     // modifier guard, so every Ctrl combination whose letter happened to
     // name a tool was swallowed here and returned before the real handler

@@ -55,6 +55,25 @@ generators use. `mode` is `new` | `add` | `subtract` | `intersect` with
 `target` naming the selection to compose onto; `feather` softens the edge.
 Junk points are dropped and fewer than three is a 400.
 
+## Gradients (`POST /api/gradient`)
+`{layer, x0, y0, x1, y1, kind: linear|radial|angle|reflected|diamond,
+color, color2, to_transparent, stops?: [{pos, color, alpha}], opacity,
+dither, seed, selection?, sel_invert?, feather?}`. Journals a pixel-free
+`{op:"gradient"}` record -- geometry + stops + a frozen gate asset -- and the
+tool and replay share one applier, so a gradient replays, undoes as one entry
+and round-trips through `.lews` without storing an image. `stops` is the full
+form; the two colours are the shorthand.
+
+## Shapes (`POST /api/stroke_selection`, `POST /api/fill_selection`)
+`stroke_selection` traces the active selection's boundary (cv2 contours, not
+scikit-image, which is optional here) and paints each ring as an ORDINARY
+journaled stroke with the brush you pass -- `color`, `radius`, `opacity`,
+`hardness`, `media`/`material`/`load`, `simplify`, `inside`. That is the
+rectangle / ellipse / polygon tool, and the result is editable paint.
+`fill_selection` fills the gate, journaled pixel-free through the gradient
+record. Neither needs a selection: stroke returns `rings: 0` with a warning,
+fill covers the layer.
+
 ## The R74 plan lives in leCore's memory
 `lecore_memory/` is the app's leCore partition (autoboot finds it). Session
 `lestudio-r74-plan` holds the audit of what exists, what is missing against
