@@ -106,7 +106,7 @@ def main(argv=None):
     # so the suite that IS here still runs.
     mods = []
     for m in ("test_studio", "test_r4", "test_r5", "test_r6",
-                      "test_r7", "test_r8", "test_r9", "test_r10", "test_r16", "test_r17", "test_r18", "test_r19", "test_r20", "test_r21", "test_r22", "test_r23", "test_r24", "test_r25", "test_r26", "test_r27", "test_r28", "test_r29", "test_r30", "test_r31", "test_r32", "test_r33", "test_r34", "test_r35", "test_r36", "test_r37", "test_r47", "test_r48", "test_r49", "test_r50", "test_r53", "test_r58", "test_r59", "test_r60", "test_r62", "test_r63", "test_r64", "test_r65", "test_r66", "test_r67", "test_r68", "test_r69", "test_r70", "test_r71", "test_r72", "test_r73"):
+                      "test_r7", "test_r8", "test_r9", "test_r10", "test_r16", "test_r17", "test_r18", "test_r19", "test_r20", "test_r21", "test_r22", "test_r23", "test_r24", "test_r25", "test_r26", "test_r27", "test_r28", "test_r29", "test_r30", "test_r31", "test_r32", "test_r33", "test_r34", "test_r35", "test_r36", "test_r37", "test_r47", "test_r48", "test_r49", "test_r50", "test_r53", "test_r58", "test_r59", "test_r60", "test_r62", "test_r63", "test_r64", "test_r65", "test_r66", "test_r67", "test_r68", "test_r69", "test_r70", "test_r71", "test_r72", "test_r73", "test_r74"):
         try:
             mods.append(importlib.import_module(m))
         except ModuleNotFoundError as e:

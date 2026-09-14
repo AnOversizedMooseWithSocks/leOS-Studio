@@ -637,7 +637,7 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
         <button id="tScribble" class="cur" title="Scribble (G) — curl-noise scribble: wandering pen strands in a disc. Curl sets loose jitter vs tight swirls; inside a feathered selection the scribble thins out at the soft edge. Every strand is an ordinary stroke — undo removes the whole scribble, nudge can still move each strand.">🌀</button>
         <button id="tHatch" title="Hatch shade (D) — uniform line/hatch shading. Modes: line, hatch (crossed), or both — 'both' reads the picture and crosses only the darks, fading to sparse lines in the lights. Works as a disc at the click or fills the whole selection.">▤</button>
         <button id="tTextile" title="Textile (W) — sew and weave with strokes: woven cloth (pick the interlacement), cross-stitch, or satin-stitch embroidery. Choose the thread's colour, thickness and depth; the swatch previews exactly what a click lays down. Click to stamp a patch, or turn on region fill and click inside a shape to upholster it.">🧵</button>
-        <button id="tCreature" title="Creature (L) — let the brush loose. Up to ten little leCore creatures, each with its own brain, walk the layer for a few seconds and paint the way they went. Rules tell them what to want: chase or avoid paint, avoid their own trail, seek light or dark, follow a colour, ride the noise field, flock or keep apart — or hit random and see what they do. Click to release them at a point, drag to line them up along a path. Each walk is one ordinary stroke: undo removes the whole run, nudge can still move each walk.">🐞</button>
+        <button id="tCreature" title="Creature (Shift+L) — let the brush loose. Up to ten little leCore creatures, each with its own brain, walk the layer for a few seconds and paint the way they went. Rules tell them what to want: chase or avoid paint, avoid their own trail, seek light or dark, follow a colour, ride the noise field, flock or keep apart — or hit random and see what they do. Click to release them at a point, drag to line them up along a path. Each walk is one ordinary stroke: undo removes the whole run, nudge can still move each walk.">🐞</button>
       </div><span class="tgc"></span>
     </div>
     <div class="tgrp solo" data-grp="pick" title="Eyedropper">
@@ -662,6 +662,8 @@ input[type=checkbox]{width:15px;height:15px;flex:0 0 auto}
       <div class="tgw">
         <button class="cur" id="tRect" title="Rectangle select (M) — Shift = square">▭</button>
         <button id="tEllipse" title="Ellipse select — Shift = circle">◯</button>
+        <button id="tLasso" title="Lasso (L) — draw a selection freehand: hold the button down and go round what you want, and it closes when you let go. Hold Shift to add to the selection, Alt to subtract.">🪢</button>
+        <button id="tPolyLasso" title="Polygon lasso (Shift+L) — click each corner of the shape; double-click, Enter, or click the first point again to close it. Backspace takes back the last corner, Esc abandons it.">📐</button>
         <button id="tWand" title="Magic wand (W) — select by colour">🪄</button>
         <button id="tLum" title="Select by brightness">◐</button>
         <button id="tObj" title="Select object (leCore segmentation)">🧩</button>
@@ -5317,6 +5319,7 @@ function syncPaintTarget(){
 let shaderPresets=[], shaderAttribution='';
 let strokeError=null;
 let stroke=null, cloneSrc=null, cloneOffset=null, marquee=null, smoothPt=null;
+let lasso=null, polyLasso=null;   // R74: freehand lasso in progress / polygon lasso being clicked out
 let sent=0, strokeFirst=true, flushTimer=null, flushing=false, strokeOrigin=null;
 function strokeBody(points,record){
   return {layer:sel,points,color:hex2rgb($('bColor').value),
@@ -5437,10 +5440,27 @@ function drawGenStroke(){
   vctx.strokeStyle='rgba(85,224,212,.9)'; vctx.stroke();
   vctx.restore();
 }
-async function runSelect(tool,params){
+// R74: the modifier keys every editor uses while dragging a selection.
+// The dropdown stays the VISIBLE state and the default; holding a modifier
+// overrides it for that one drag, which is what the hands expect.
+function selModFromEvent(e){
+  if(e.shiftKey&&e.altKey)return 'intersect';
+  if(e.shiftKey)return 'add';
+  if(e.altKey)return 'subtract';
+  return null;                       // no modifier: whatever the dropdown says
+}
+// R74: close the clicked-out polygon (Enter, a double-click, or clicking the
+// first corner again). `keep` false abandons it -- Esc.
+async function finishPolyLasso(keep){
+  const p=polyLasso; polyLasso=null; repaintCanvas();
+  if(!keep||!p||p.pts.length<3){ if(p)setStatus('polygon lasso abandoned'); return; }
+  await runSelect('poly',{points:p.pts.map(q=>[Math.round(q[0]),Math.round(q[1])])},p.mod);
+}
+async function runSelect(tool,params,modeOverride){
+  const mode=modeOverride||$('selMode').value;
   const body={tool:(tool==='wand'?'color':tool==='lum'?'brightness':tool==='obj'?'object':tool),
-    params, mode:$('selMode').value, feather:+$('selFeather').value,
-    target:$('selMode').value==='new'?undefined:activeSel||undefined};
+    params, mode, feather:+$('selFeather').value,
+    target:mode==='new'?undefined:activeSel||undefined};
   if(tool==='wand'||tool==='lum')body.params.tolerance=+$('selTol').value/100;
   if(tool==='obj')body.params.k=6;
   // R70: the wand/luminance/object tools READ pixels to find their shape.
@@ -5566,7 +5586,7 @@ function cancelCanvasStroke(){
   // a cancelled gesture must not leave half a mark behind.
   const wasSent=sent>0;
   if(flushTimer){clearInterval(flushTimer);flushTimer=null;}
-  stroke=null; sent=0; smoothPt=null; marquee=null; dragSp=null;
+  stroke=null; sent=0; smoothPt=null; marquee=null; lasso=null; polyLasso=null; dragSp=null;
   ptDrag=null; ptDragTo=null; strokeVP=null;
   endStrokeMask();
   if(wasSent){ api('/api/undo',{method:'POST'}).then(()=>{drawComposite();refresh();}); }
@@ -5738,7 +5758,20 @@ vc.addEventListener('pointerdown',e=>{
   }
   if(SELTOOLS[tool]){
     const [x,y]=canvasXY(e);
-    if(tool==='rect'||tool==='ellipse'){ marquee={x0:x,y0:y,x1:x,y1:y,shift:e.shiftKey}; vc.setPointerCapture(e.pointerId); }
+    if(tool==='rect'||tool==='ellipse'){ marquee={x0:x,y0:y,x1:x,y1:y,shift:e.shiftKey,mod:selModFromEvent(e)}; vc.setPointerCapture(e.pointerId); }
+    if(tool==='lasso'){ lasso={pts:[[x,y]],mod:selModFromEvent(e)}; vc.setPointerCapture(e.pointerId); }
+    if(tool==='polylasso'){
+      // click a corner. Clicking the FIRST point again closes the shape, the
+      // way every polygon lasso does; so does a double-click or Enter.
+      if(polyLasso&&polyLasso.pts.length>2&&Math.hypot(x-polyLasso.pts[0][0],y-polyLasso.pts[0][1])<8){
+        finishPolyLasso(true); return;
+      }
+      if(!polyLasso) polyLasso={pts:[],mod:selModFromEvent(e)};
+      polyLasso.pts.push([x,y]); polyLasso.hover=[x,y];
+      repaintCanvas(); drawMarquee();
+      setStatus(polyLasso.pts.length+' corner'+(polyLasso.pts.length===1?'':'s')+' — double-click, Enter or the first point closes · Backspace undoes · Esc abandons');
+      return;
+    }
     else runSelect(tool,{x:Math.round(x),y:Math.round(y)});
     return;
   }
@@ -5833,6 +5866,14 @@ vc.addEventListener('pointermove',e=>{
     }
     marquee.x1=x; marquee.y1=y; repaintCanvas(); drawMarquee(); return;
   }
+  if(lasso){
+    const [lx,ly]=canvasXY(e), last=lasso.pts[lasso.pts.length-1];
+    // thin to ~2px: a lasso is rasterised as a polygon, so pointer jitter
+    // finer than a pixel buys nothing and costs points on the wire
+    if(Math.hypot(lx-last[0],ly-last[1])>=2) lasso.pts.push([lx,ly]);
+    repaintCanvas(); drawMarquee(); return;
+  }
+  if(polyLasso){ polyLasso.hover=canvasXY(e); repaintCanvas(); drawMarquee(); return; }
   if(genStroke){
     const [gx,gy]=canvasXY(e), gl=genStroke[genStroke.length-1];
     // Thin the path to the generator's own resolution: a generator reads
@@ -5932,6 +5973,25 @@ function drawSampleMarker(x,y){          // where the clone is reading RIGHT NOW
   vctx.moveTo(x,y-7);vctx.lineTo(x,y+7);vctx.stroke();vctx.restore();
 }
 function drawMarquee(){
+  if(lasso||polyLasso){
+    const L=lasso||polyLasso, pts=L.pts;
+    if(!pts.length)return;
+    vctx.save();vctx.strokeStyle='#55e0d4';vctx.setLineDash([5,4]);vctx.lineWidth=1.2;
+    vctx.beginPath();vctx.moveTo(pts[0][0],pts[0][1]);
+    for(let i=1;i<pts.length;i++)vctx.lineTo(pts[i][0],pts[i][1]);
+    if(polyLasso&&polyLasso.hover)vctx.lineTo(polyLasso.hover[0],polyLasso.hover[1]);
+    // the closing edge is drawn faint so it is clear the shape closes itself
+    vctx.stroke();
+    vctx.globalAlpha=0.45;vctx.beginPath();
+    vctx.moveTo((polyLasso&&polyLasso.hover?polyLasso.hover:pts[pts.length-1])[0],
+                (polyLasso&&polyLasso.hover?polyLasso.hover:pts[pts.length-1])[1]);
+    vctx.lineTo(pts[0][0],pts[0][1]);vctx.stroke();vctx.globalAlpha=1;
+    if(polyLasso){                                   // handles on the corners
+      vctx.setLineDash([]);
+      pts.forEach((p,i)=>{vctx.beginPath();vctx.arc(p[0],p[1],i===0?4:2.5,0,7);vctx.stroke();});
+    }
+    vctx.restore();return;
+  }
   if(!marquee)return;
   vctx.save();vctx.strokeStyle='#55e0d4';vctx.setLineDash([5,4]);vctx.lineWidth=1.2;
   const x=Math.min(marquee.x0,marquee.x1), y=Math.min(marquee.y0,marquee.y1);
@@ -5949,6 +6009,7 @@ function drawMarquee(){
 // commits what was drawn, exactly like lifting the pen.
 vc.addEventListener('pointercancel',()=>endCanvasPointer());
 $('canvasPane').addEventListener('pointercancel',()=>{panDrag=null;});
+vc.addEventListener('dblclick',e=>{ if(polyLasso){ e.preventDefault(); finishPolyLasso(true); } });
 vc.addEventListener('pointerup',()=>endCanvasPointer());
 async function endCanvasPointer(){
   splinePtrDown=false;
@@ -5964,10 +6025,19 @@ async function endCanvasPointer(){
   setStatus();
   if(dragSp){dragSp=null; pushSpline(false); return;}
   if(flushTimer){clearInterval(flushTimer);flushTimer=null;}
+  if(lasso){
+    const l=lasso; lasso=null;
+    const ext=l.pts.reduce((a,p)=>[Math.min(a[0],p[0]),Math.min(a[1],p[1]),Math.max(a[2],p[0]),Math.max(a[3],p[1])],[1e9,1e9,-1e9,-1e9]);
+    repaintCanvas();
+    if(l.pts.length>=3&&(ext[2]-ext[0])>3&&(ext[3]-ext[1])>3)
+      await runSelect('poly',{points:l.pts.map(p=>[Math.round(p[0]),Math.round(p[1])])},l.mod);
+    else deselect();               // a flick with a lasso means "clear it"
+    return;
+  }
   if(marquee){
     const m=marquee; marquee=null;
     if(Math.abs(m.x1-m.x0)>2&&Math.abs(m.y1-m.y0)>2)
-      await runSelect(tool,{x0:Math.round(m.x0),y0:Math.round(m.y0),x1:Math.round(m.x1),y1:Math.round(m.y1)});
+      await runSelect(tool,{x0:Math.round(m.x0),y0:Math.round(m.y0),x1:Math.round(m.x1),y1:Math.round(m.y1)},m.mod);
     else deselect();                       // a plain click clears the selection
     return;
   }
@@ -6654,7 +6724,7 @@ document.addEventListener('keydown',e=>{
   (e.shiftKey?ungroupSelectedStrokes:groupSelectedStrokes)();
 });
 $('ssUngroup').onclick=ungroupSelectedStrokes;
-const TOOLBTN={fx:'tFxBrush',nodepaint:'tNodePaint',strokesel:'tStrokeSel',nudge:'tNudge',pick:'tPick',brush:'tBrush',erase:'tErase',knife:'tKnife',blend:'tBlend',smudge:'tSmudge',clone:'tClone',heal:'tHeal',stamp:'tStamp',rect:'tRect',ellipse:'tEllipse',wand:'tWand',lum:'tLum',obj:'tObj',spline:'tSpline',transform:'tTransform',fill:'tFill',text:'tText',scribble:'tScribble',hatch:'tHatch',textile:'tTextile',creature:'tCreature'};
+const TOOLBTN={fx:'tFxBrush',nodepaint:'tNodePaint',strokesel:'tStrokeSel',nudge:'tNudge',pick:'tPick',brush:'tBrush',erase:'tErase',knife:'tKnife',blend:'tBlend',smudge:'tSmudge',clone:'tClone',heal:'tHeal',stamp:'tStamp',rect:'tRect',ellipse:'tEllipse',lasso:'tLasso',polylasso:'tPolyLasso',wand:'tWand',lum:'tLum',obj:'tObj',spline:'tSpline',transform:'tTransform',fill:'tFill',text:'tText',scribble:'tScribble',hatch:'tHatch',textile:'tTextile',creature:'tCreature'};
 const TOOLTIPS={knife:'Palette knife — Q · shapes the paint BODY already on the canvas (needs an oil/acrylic/water medium) · right-click the tool to cycle smooth / push / scrape / spread',blend:'Blender — Y · a clean brush that works the WET paint already there: softens two colours together, knocks ridges down',fx:'FX brush — F · the stroke grows an effect instead of pigment · pick a preset in the Tool tab · retune in the node graph',nodepaint:'Node paint — J · strokes reveal the Paint out node\'s image · pick the source node in the Tool tab',strokesel:'Select strokes — K · click a stroke, then grow the set forward/back through paint order',nudge:'Nudge — N · drags the stroke PATHS, not the pixels: refine sketch lines without smudge swirl',pick:'Eyedropper — I · click to pick a colour · Alt-click while brushing does the same',brush:'Brush — B',erase:'Eraser — E',smudge:'Smudge — S',clone:'Clone — C · Alt-click sets source',heal:'Heal — H · paint over a blemish; it repairs from the surroundings',stamp:'Stamp — U · press the selected sticker on · capture new ones from a layer or selection in the Tool tab',
   rect:'Rectangle select · Shift = square',ellipse:'Ellipse select · Shift = circle',wand:'Select by color',
   lum:'Select by brightness',obj:'Select object',spline:'Spline — P · click adds points · Esc finishes',
@@ -6663,7 +6733,9 @@ const TOOLTIPS={knife:'Palette knife — Q · shapes the paint BODY already on t
   scribble:'Scribble — G · one click lays a curl-noise scribble · a feathered selection shapes and thins it',
   hatch:'Hatch shade — D · one click lays uniform line/hatch shading · both-mode crosses only the darks',
   textile:'Textile — W · sew with strokes: weave, cross-stitch or embroidery · the swatch shows exactly what a click lays down',
-  creature:'Creature — L · release up to ten leCore creatures to explore the layer and paint their walks · set the rules, or roll random',
+  creature:'Creature — Shift+L · release up to ten leCore creatures to explore the layer and paint their walks · set the rules, or roll random',
+  lasso:'Lasso — L · draw a selection freehand · Shift adds, Alt subtracts',
+  polylasso:'Polygon lasso — Shift+L when a selection tool is active · click each corner · double-click, Enter or the first point closes it',
   text:'Text — click to place · choose a spline in the panel for text-on-a-path'};
 // ---------------------------------------------------------------- popups ----
 // One rule for every popup we draw ourselves: it must end up wholly inside the
@@ -8041,12 +8113,13 @@ function setTool(t){
     toast('Node paint needs a Paint out node with an image wired in — add one in the node graph','info');
     return;
   }
+  if(polyLasso&&t!=='polylasso'){ polyLasso=null; repaintCanvas(); }
   tool=t;Object.values(TOOLBTN).forEach(id=>$(id).classList.remove('active'));
   $(TOOLBTN[t]).classList.add('active');
   syncToolRail(t);
   vc.style.cursor=({brush:'crosshair',erase:'crosshair',smudge:'crosshair',knife:'crosshair',blend:'crosshair',clone:'crosshair',heal:'crosshair',stamp:'copy',
     rect:'crosshair',ellipse:'crosshair',wand:'copy',lum:'copy',obj:'copy',spline:'crosshair',transform:'move',fill:'crosshair',text:'text',
-    pick:'copy',nudge:'grab',strokesel:'pointer',nodepaint:'crosshair',fx:'crosshair',scribble:'crosshair',hatch:'crosshair',textile:'crosshair',creature:'crosshair'})[t]||'default';
+    pick:'copy',nudge:'grab',strokesel:'pointer',nodepaint:'crosshair',fx:'crosshair',scribble:'crosshair',hatch:'crosshair',textile:'crosshair',creature:'crosshair',lasso:'crosshair',polylasso:'crosshair'})[t]||'default';
   const brushFam=['brush','erase','smudge','clone','heal','pick'].includes(t);
   const dockTool={transform:'trHud',fill:'fillHud',text:'textHud',nodepaint:'npHud',fx:'fxHud',stamp:'stampHud',strokesel:'strokeSelPanel',scribble:'scribHud',hatch:'hatchHud',textile:'textileHud',creature:'creatureHud'}[t];
   // show only the active tool's dock panel
@@ -9031,7 +9104,12 @@ document.addEventListener('keydown',e=>{
                    f:'fx',        // Paint Effects brush
                    m:'rect',      // Photoshop: marquee
                    w:'wand',      // Photoshop: magic wand
-                   l:'creature'}; // let the brush loose
+                   l:'lasso'};    // Photoshop: lasso -- R74 gave L back
+    // Shift+letter: the second tool on a letter, Photoshop's cycling
+    // L walks lasso -> polygon lasso -> creature, then back round, so one
+    // letter reaches all three without stealing anyone's muscle memory.
+    const SHIFTTOOLKEY={l:(tool==='polylasso'?'creature':tool==='creature'?'lasso':'polylasso'),
+                        m:(tool==='ellipse'?'rect':'ellipse')};
     // R71: the tool letters are BARE letters. This read e.key with no
     // modifier guard, so every Ctrl combination whose letter happened to
     // name a tool was swallowed here and returned before the real handler
@@ -9043,8 +9121,25 @@ document.addEventListener('keydown',e=>{
     // Transform. A person hitting Ctrl+S to save their painting is the
     // worst of these: they get a browser dialog and a changed tool, and
     // nothing is saved.
-    const want=(e.ctrlKey||e.metaKey||e.altKey)?null:TOOLKEY[e.key];
+    // R74: SHIFT cycles within a letter, the way Photoshop's Shift+L walks
+    // the lasso family. e.key is already the shifted character ('L'), so
+    // match on the lowercase letter and read shiftKey.
+    if(!e.ctrlKey&&!e.metaKey&&!e.altKey&&e.shiftKey&&e.key.length===1){
+      const alt=SHIFTTOOLKEY[e.key.toLowerCase()];
+      if(alt){ setTool(alt); return; }
+    }
+    const want=(e.ctrlKey||e.metaKey||e.altKey||e.shiftKey)?null:TOOLKEY[e.key];
     if(want){ setTool(want); return; }
+  }
+  if(polyLasso){
+    if(e.key==='Enter'){e.preventDefault();finishPolyLasso(true);return;}
+    if(e.key==='Backspace'){
+      e.preventDefault();
+      polyLasso.pts.pop();
+      if(!polyLasso.pts.length){polyLasso=null;setStatus('polygon lasso abandoned');}
+      repaintCanvas();drawMarquee();return;
+    }
+    if(e.key==='Escape'){e.preventDefault();finishPolyLasso(false);return;}
   }
   if((e.key==='Delete'||e.key==='Backspace')&&mode==='nodes'&&selNode){e.preventDefault();$('delNode').click();}
   if((e.key==='Delete'||e.key==='Backspace')&&mode!=='nodes'&&sel){   // ONE canvas

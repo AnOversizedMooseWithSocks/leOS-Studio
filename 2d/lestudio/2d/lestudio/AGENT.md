@@ -46,6 +46,24 @@ can synthesise whole pipelines -- including cross-document reads
 a `Value` node drives it directly, `Light direction` exposes x/y/angle value
 sockets, and an image input drives the parameter by mean luminance.
 
+## Selections (`POST /api/select`)
+`tool` is `rect` | `ellipse` | `poly` | `color` (wand) | `brightness` |
+`object`. **`poly` is the lasso**: `params.points` is a list of `[x, y]`
+making a closed outline -- a freehand drag and a clicked polygon arrive
+identically, and it rasterises through the same `_poly_gate` the region
+generators use. `mode` is `new` | `add` | `subtract` | `intersect` with
+`target` naming the selection to compose onto; `feather` softens the edge.
+Junk points are dropped and fewer than three is a 400.
+
+## The R74 plan lives in leCore's memory
+`lecore_memory/` is the app's leCore partition (autoboot finds it). Session
+`lestudio-r74-plan` holds the audit of what exists, what is missing against
+Photoshop/GIMP/Krita, acceptance criteria per item, the engineering rules,
+and the ordered plan `r74-ux`. `python tools/lecore_plan.py` prints the plan;
+`python tools/lecore_plan.py ask "..."` answers from it (T0 = taught fact;
+otherwise the nearest taught questions are listed); `teach` refills it from
+`docs/BACKLOG-r74-ux.md` after edits. Start there before picking up an item.
+
 ## The creature brush (`POST /api/creature`)
 A stroke generator whose paths come from leCore creatures, not a hand: up to
 ten `CreatureMind`s explore the layer as a map for `seconds` and each paints

@@ -198,7 +198,10 @@ def test_r73_i_the_client_reads_the_brush_panel_and_registers_the_tool():
         assert ("function %s(" % fn) in ui, fn
     assert "creature:1" in ui[ui.index("const GENTOOLS="):][:120]
     assert "creature:'tCreature'" in ui and "creature:'creatureHud'" in ui
-    assert "l:'creature'" in ui, "hotkey L"
+    # R74 gave L back to the lasso (it is the lasso in every other editor);
+    # the creature brush is the second tool on the letter, Shift+L.
+    assert "const SHIFTTOOLKEY=" in ui and "'creature'" in ui.split(
+        "const SHIFTTOOLKEY=")[1][:200], "hotkey Shift+L"
     for el in ("crSecs", "crCount", "crThick", "crLines", "crSelf",
                "crOthers", "crLight", "crColor", "crTarget", "crField",
                "crFieldW", "crWander", "crRandom", "crRandomNow", "crSolid",

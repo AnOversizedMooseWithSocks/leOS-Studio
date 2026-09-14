@@ -242,6 +242,25 @@ onion skins (previous frame red, next green — on by default). Playback and
 *Export frame sequence…* ride the existing timeline, so the files are
 exactly what playback showed.
 
+## Selecting (R74)
+
+* **Lasso (L)** -- hold the button down and draw round what you want; it closes
+  itself when you let go. A quick flick with nothing enclosed clears the
+  selection instead.
+* **Polygon lasso (Shift+L)** -- click each corner. Double-click, press Enter,
+  or click the first corner again to close it; **Backspace** takes back the
+  last corner and **Esc** abandons the shape. Switching tools abandons it too.
+* **Rectangle (M)** and **ellipse (Shift+M)**, **magic wand (W)**, select by
+  brightness, and select object (leCore segmentation) are unchanged.
+* **While you drag any selection tool**: hold **Shift** to add, **Alt** to
+  subtract, **Shift+Alt** to intersect. The mode dropdown in the Select tab
+  stays the visible default; a modifier overrides it for that one drag.
+* Everything downstream treats a lasso like any other selection: feathering,
+  expand/contract, invert, to-mask, crop to selection, and the brush gate.
+
+The creature brush moved from L to **Shift+L** (L is the lasso in every other
+editor); Shift+L cycles lasso -> polygon lasso -> creature.
+
 ## The creature brush (R73)
 
 Pick the ladybird (🐞, key **L**) and click, or drag, and the brush is no
@@ -457,4 +476,4 @@ provides the two helpers the tests use.
 
 The client has its own gates, driven against a tiny DOM in Node (no browser
 needed): `node tests/test_toolbar.js`, `node tests/test_popups.js`,
-`node tests/test_creature_ui.js`.
+`node tests/test_creature_ui.js`, `node tests/test_lasso_ui.js`.

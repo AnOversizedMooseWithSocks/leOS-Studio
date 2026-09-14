@@ -7457,6 +7457,18 @@ class Document:
             rx = max(abs(prm["x1"] - prm["x0"]) / 2.0, 1e-3)
             ry = max(abs(prm["y1"] - prm["y0"]) / 2.0, 1e-3)
             return ((((xs - cx) / rx) ** 2 + ((ys - cy) / ry) ** 2) <= 1).astype(np.float32)
+        if tool == "poly":
+            # R74: THE LASSO. A freehand drag and a polygon lasso are the same
+            # thing once the client has collected points -- a closed polygon --
+            # so both land here, on the SAME _poly_gate every region generator
+            # already uses. Nothing new rasterises a shape in this app.
+            pts = [(float(p[0]), float(p[1])) for p in (prm.get("points") or [])
+                   if p is not None and len(p) >= 2
+                   and np.isfinite(p[0]) and np.isfinite(p[1])]
+            if len(pts) < 3:
+                raise ValueError("a lasso selection needs at least 3 points")
+            g = self._poly_gate(pts, 0.0)
+            return np.zeros((h, w), np.float32) if g is None else g
         if tool == "alpha":
             # the layer's own coverage as a selection -- what Ctrl+clicking a
             # layer thumbnail does in every other editor

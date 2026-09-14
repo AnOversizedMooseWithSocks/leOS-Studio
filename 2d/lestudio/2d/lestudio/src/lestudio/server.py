@@ -5496,7 +5496,10 @@ def mask_edit():
 
 @app.post("/api/select")
 def select():
-    """Make a selection: {"tool": "rect"|"ellipse"|"wand"|"lum"|"obj", "params": {...}, "mode": "new"|"add"|"sub"}."""
+    """Make a selection: {"tool": "rect"|"ellipse"|"poly"|"wand"|"lum"|"obj",
+    "params": {...}, "mode": "new"|"add"|"sub"}. R74: "poly" is the lasso --
+    params.points is a list of [x, y] making a closed outline (a freehand
+    drag and a clicked polygon arrive here identically)."""
     d = request.json or {}
     # A selection built from NaN silently produced a mask nothing could use,
     # and a missing corner reported just "'x0'" -- true, and useless.
@@ -5510,6 +5513,27 @@ def select():
                 prm[k] = _finite(prm[k], k, -1e6, 1e6)
         except _Gone as e:
             return jsonify(error=str(e)), 400
+        d["params"] = prm
+    if str(d.get("tool")) == "poly":
+        # the same hygiene the paths get: junk in the point list is dropped,
+        # and a run that cannot make an outline says so rather than handing
+        # back an empty selection nobody can explain
+        pts = prm.get("points")
+        if not isinstance(pts, (list, tuple)):
+            return jsonify(error="a lasso selection needs params.points, a "
+                                 "list of [x, y]"), 400
+        clean = []
+        for p in pts[:20000]:
+            if isinstance(p, (list, tuple)) and len(p) >= 2:
+                try:
+                    x_, y_ = float(p[0]), float(p[1])
+                except (TypeError, ValueError):
+                    continue
+                if x_ == x_ and y_ == y_ and abs(x_) < 1e6 and abs(y_) < 1e6:
+                    clean.append([x_, y_])
+        if len(clean) < 3:
+            return jsonify(error="a lasso selection needs at least 3 points"), 400
+        prm["points"] = clean
         d["params"] = prm
     try:
         # R70: the pixel-reading selection tools read the ACTIVE LAYER by
