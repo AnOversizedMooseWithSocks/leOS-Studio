@@ -1,0 +1,479 @@
+# leStudio
+
+A **Photoshop/GIMP-style image editor with a non-destructive node graph**, built on top of the
+[leos-core](https://pypi.org/project/leos-core/) engine (leCore, import name `lecore`). Pure
+NumPy underneath, deterministic throughout: same document + same graph = same pixels.
+
+A standalone app (not published anywhere) -- it consumes the engine strictly through
+`pip install leos-core`.
+
+> **Prerequisite:** the app is written against the leCore repo's current capability surface
+> (`render_sdf`, `synthesize_texture`, `depth_from_image`, `reproject`, `segment_image`,
+> `inpaint`, `upscale`, ...). Publish the repo's current state to PyPI as `leos-core` first,
+> then:
+
+**Windows:** double-click `run.bat` -- it creates a `.venv`, installs everything
+(`leos-core` from PyPI + Flask/Pillow/NumPy), and opens the editor at
+http://127.0.0.1:5050. Later runs skip the setup and just launch.
+
+**Any platform, by hand:**
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e .            # pulls leos-core from PyPI, adds the `lestudio` command
+lestudio                    # or: python -m lestudio  ->  http://127.0.0.1:5050
+```
+
+## What it is
+
+**Canvas tab** -- layered raster editing: soft brush + eraser (size/opacity/hardness), a
+10-mode blend stack (normal, multiply, screen, overlay, add, subtract, difference, darken,
+lighten, softlight), per-layer opacity/visibility, image import, PNG export, and snapshot
+undo/redo.
+
+**Node graph tab** -- 35 operators, most a direct door into the leCore engine:
+
+| Category | Nodes | leCore capability |
+|---|---|---|
+| Generate | Solid, Gradient, Pattern, Fractal, Warped noise, **SDF render** | `pattern_field`, `escape_time`, `warped_noise`, `render_sdf` + the full `holographic_sdf` DSL |
+| Color | Palette map (cosine / random / blackbody), Color transfer, Levels, Hue/Sat, Invert, Posterize | `cosine_palette`, `random_palette`, `blackbody_color`, `color_transfer`, `image_colours` |
+| Filter | Blur, Sharpen, Denoise, Edges, Segment, Inpaint, Upscale 2x, Displace, Texture synth, Flow warp, Annotate | `image_edges`, `segment_image`, `inpaint`, `upscale`, `synthesize_texture`, `curl_noise`, `image_lines` + `image_corners` |
+| Combine | Blend, Morph (blend / phase), Mask mix, Align, **Seamless clone** | `blend_images`, `phase_morph`, `est_dx`/`reproject`, `solve_poisson_periodic` (Poisson image editing) |
+| FX | Light shafts, Vignette, Depth fog (4 depth estimators), **Post FX**, ASCII art | `light_shafts`, `depth_from_image`/`auto_fuse_depth`/`haze_depth`/`sharpness_depth` + `depth_fog`, `postfx_chain` (bloom, glare, lens flare, chromatic aberration, film grain, colour grade, Reinhard/ACES), `ascii_view` |
+| Input | Layer, Canvas | the document itself |
+
+Node evaluation is **dependency-keyed and O(change)** (the engine's ModifierStack rule): each
+node's output is memoised under a hash of its type, params, and upstream signatures, so moving
+one slider recomputes only that node and its downstream. Cycles are refused. *Bake to layer*
+flattens any node's output into the layer stack, so destructive and non-destructive editing
+compose.
+
+## Library use
+
+```python
+from lestudio import Document, NodeGraph
+doc = Document(768, 512)
+doc.paint(doc.layers[0].id, [(10, 10), (200, 150)], color=(1, 0, 0), radius=12)
+g = NodeGraph(doc)
+g.set_graph([
+    {"id": "N1", "type": "Fractal", "params": {"julia": 1}, "inputs": {}},
+    {"id": "N2", "type": "Palette map", "params": {"freq": 2.0}, "inputs": {"image": "N1"}},
+])
+img = g.evaluate("N2")     # (H, W, 3) float in [0, 1]
+g.apply_to_layer("N2")     # bake into the document
+```
+
+
+## Media inputs & live streaming
+
+The **Media in** node accepts: a server file path (image or video — use the node's 📁
+button to upload), a **direct** video URL (`.mp4`, `.m3u8`, RTSP, MJPEG), or
+`test:clock` for a built-in animated signal. Page URLs like YouTube links are not
+direct streams — install `yt-dlp` (`pip install "leos-studio[media]"`) and they will
+be resolved automatically. The node shows its live status (connecting / capturing /
+a specific error) directly under its parameters.
+
+Press **● Live** to evaluate the graph continuously and publish
+`http://127.0.0.1:5050/api/stream.mjpg` — point OBS's browser/media source at it.
+
+## New in this release (R4): the colorist, the retoucher, and the memory
+
+Twelve new nodes plus two exporters, panel-driven and measured before adopted
+(the numbers live in `LECORE_SWEEP_R4.md`; the experiments in
+`experiments_r4.py`). The theme: everything Photoshop 2026 forgot while it
+chased AI — the classical pro workflow layer, deterministic and node-based.
+
+**The colorist's corner** (nothing else free ships this set):
+
+- **Color wheels** (Adjust) — lift / gamma / gain per shadows / mids /
+  highlights, the Resolve grammar; all-zero is the exact identity.
+- **LUT** (Color) — apply any `.cube` 3D LUT (trilinear; identity verified to
+  1e-16). And the reverse trip: **Export LUT (.cube)** bakes the selected
+  node's colour chain into a `.cube` for Resolve / Premiere / OBS — with an
+  honesty guard that detects position-dependent stages (a vignette in the
+  chain) and says so in the file header instead of baking a lie.
+- **Scope** (Values) — waveform, RGB parade, vectorscope, histogram *as a
+  node output*: wire it beside any node and grade with numbers. Scopes work
+  in exports and A/B setups because they are just images.
+- **Post FX** gained `pbr_neutral` and `agx` tonemaps (the scene-referred
+  transform darktable popularized), and **/api/export/glsl** compiles a
+  Post FX node's pointwise chain to a Shadertoy fragment via the engine's
+  `postfx_to_glsl` — multi-pass stages are `// skipped` comments, never
+  silently dropped.
+
+**The retoucher's ritual, automated:**
+
+- **Frequency split / Frequency merge** (Filter) — frequency separation as
+  two nodes; the untouched round-trip is exact (the Photoshop version is a
+  9-step manual recipe). Heal the low band, keep the pores.
+- **Clarity** (Adjust) — Lightroom's clarity + texture sliders on leCore's
+  guided filter: halo-free by construction (measured overshoot 0.23 vs 0.40
+  for unsharp masking). Negative clarity is the skin-smoothing direction.
+- **Dehaze** (Adjust) — dark-channel dehaze with a guided-refined
+  transmission map; rmse 0.202 → 0.119 on synthetic haze.
+- **Focus stack** (Combine) — Laplacian-energy sharpest-of across up to four
+  plates; the fused result measures sharper than every input.
+- **Content-aware scale** (Filter) — seam carving (Avidan–Shamir): squeeze a
+  picture 15% and the subjects keep their proportions while sky and water
+  quietly vanish.
+
+**The looks:**
+
+- **Film look** (FX) — the analog character stack in one node: halation
+  (96% of its energy stays inside the highlight glow, measured),
+  luminance-weighted grain that lives in the mids like real stock, print
+  fade, gate weave that animates on the timeline. Film picker: chrome /
+  noir / polaroid / technicolor, or drive the dials yourself.
+- **Dither** (Color) — Bayer / Floyd–Steinberg / nearest against retro
+  palettes (1-bit, Game Boy, CGA, 16-colour) or a median-cut palette of the
+  image itself. With Pixelize, the full pixel-art pipeline.
+- **Orbit trap** (Generate) — the signature Quilez fractal colouring,
+  native from the engine's raymarcher: rays remember their closest approach
+  to a trap and the surface is painted by it. Same SDF DSL as SDF render,
+  entirely different mood.
+
+**The memory** (no other editor has this):
+
+- **Remember** (Output) + **Dream** (Generate) — leCore's content-addressable
+  visual memory pointed at your document. Remember stores any node's output
+  under a label; Dream recalls matching memories, trains the engine's splat
+  media model on them, and generates something *new* in the same family —
+  deterministic, attributable, and honest: under two matching memories it
+  renders a told-you card instead of hallucinating. Dreams are greyscale by
+  design (the media model's domain) — wire through Palette map or Gradient
+  map to colour them.
+
+Kept negatives (documented, not deleted): NumPy PatchMatch lost to the
+harmonic Inpaint on quality-per-second, and liquify waits for a real pin UI
+rather than shipping as sliders. See `LECORE_SWEEP_R4.md`.
+
+## New in the previous leCore update
+
+Five new nodes, all fully composable with the rest of the graph:
+
+- **Procedural texture** (Generate) — the classic texture menu: marble, wood,
+  brick, voronoi, musgrave, wave, magic, checker, stripes, dots, noise, fbm,
+  white, gradient. Greyscale out, so it feeds Color ramp, Merge mattes, and
+  Mask mix directly. Dials that only affect some textures dim when irrelevant.
+- **Color ramp** (Color) — a four-stop gradient map with named stops
+  (shadows / low_mid / high_mid / highlights) as colour pickers. Turn
+  `smooth` off for toon banding.
+- **Refract** (FX) — bend the image through a mask as if it were water or
+  glass; strongest at the mask edge, like a real droplet. Any greyscale
+  node (a Procedural texture works well) can be the lens.
+- **Clouds** (Generate) — a real raymarched volumetric sky. Honest cost:
+  ~6 s on `fast`; the progress bar shows and Esc cancels.
+- **Water** (Generate) — rendered ocean / calm / storm. Wire a Value
+  node into `time` to animate.
+
+The Shadertoy node gained two buttons: **✨ Match canvas** fits a procedural
+shader to your picture (a same-family statistical match on roughness and
+detail — a starting point, not a copy; ~10 s) and **🎨 Palette** inserts iq's
+cosine palette — after a match it recolours the greyscale result in one click.
+
+Also: **Segment** and **Depth fog** gained a `detail` speed dial (Segment's
+worst case went 55 s → ~2 s; masks stay full-resolution), and optional CPU
+accelerators install with `run.bat accel` (Windows) or `./run.sh accel`
+(macOS / Linux) -- never installed silently.
+
+## Painting with real media
+
+Pick a setup from the **Media** menu — *oil painting*, *watercolour* or *ink
+drawing* — and the app configures the whole studio at once: the medium, the
+paper, the brush behaviour and a palette of colours to work from. That is one
+choice instead of five separate switches.
+
+**The palette is real paint, not a colour picker.** Press *palette* in the
+Colour row to squeeze your swatch colours out as mounds on a strip below the
+panel. Drag across one to load your brush from it; **shift-drag** (or the
+*mix here* button) to drag one colour into another and mix them, exactly as
+they would mix on the canvas. The mounds get dirty as you work them and go
+down as you take paint. It lives on its own surface, so it never appears in
+your picture or an export, and *scrape* clears it undoably.
+
+**runs out** turns the brush into a real one that empties as you paint, and
+lays nothing once it is dry — reload by dipping in the palette or by dragging
+through a thick passage on the canvas, which takes paint off it. The meter
+beside the button shows what is left.
+
+**build up** lets paint keep thickening past a single layer's limit: when a
+layer fills, the excess starts a new one named *"sky · build-up 2"* and so
+on. Without it a heavily worked passage flattens to a plateau.
+
+**Paper** (in the Layer panel) is the surface everything sits on. Rough and
+cold-press granulate a wash into cloudy mottles and break dry-brush up hard;
+hot-press and smooth stay even; linen shows its weave. Thick paint buries the
+tooth on any of them, the way real paint fills the cavities and levels off.
+
+**Watercolour** behaves as a fluid in paper rather than a film on a surface:
+washes wick outward through the fibres, darken at their edges as the water
+carries pigment to the perimeter, and granulate into the paper's dips.
+
+**Palette knife** (`Q`) shapes the paint that is already there instead of
+adding more, working the whole depth of the paint even where it spans several
+layers. Click the tool again to cycle the blade: *smooth* levels a surface,
+*push* ploughs a ridge ahead of it, *scrape* takes the tops off, *spread*
+drags it into a thin film.
+
+**Gravity** is a property of the surface, not an assumption: a canvas on an
+easel runs wet paint downward, one lying flat on a table lets a puddle level
+outward instead, and a layer standing on a wall runs down that wall.
+
+## Wet paint, living ink, and flipbook animation
+
+**Drips.** The Brush panel's **Drips** row holds a small gravity compass:
+drag from its centre to aim which way wet paint runs and how far (tap to
+reset to straight down), then press **⟱ Drip** — droplets spawn from the wet
+strokes and walk that direction, leaving tapering trails. The same verb sits
+in the layer's Actions menu as *⟱ Drip wet paint*.
+
+**Living ink.** Set a layer's **Type** to *Living ink*, *Smoke* or *Fire*
+and the layer runs a real fluid simulation. The stroke is the emitter: paint
+into it and the medium visibly takes the stroke at once. Press **▶ Live**
+(in the Cook row) to keep the simulation running while you watch and paint;
+*≈ Advance medium a little* in Actions steps it a short burst instead. The
+timeline remains the replayable clock — scrubbing reproduces exactly.
+
+**Flipbook animation.** Press **🎞 Animate** next to the frame bar: frames
+are ordinary layers in an "Animation" group, shown as a strip of thumbnails.
+Add blank or duplicated frames, reorder them, hold a drawing for several
+timeline frames, pick Loop / Ping-pong / Once and an FPS, and draw with
+onion skins (previous frame red, next green — on by default). Playback and
+*Export frame sequence…* ride the existing timeline, so the files are
+exactly what playback showed.
+
+## Selecting (R74)
+
+* **Lasso (L)** -- hold the button down and draw round what you want; it closes
+  itself when you let go. A quick flick with nothing enclosed clears the
+  selection instead.
+* **Polygon lasso (Shift+L)** -- click each corner. Double-click, press Enter,
+  or click the first corner again to close it; **Backspace** takes back the
+  last corner and **Esc** abandons the shape. Switching tools abandons it too.
+* **Rectangle (M)** and **ellipse (Shift+M)**, **magic wand (W)**, select by
+  brightness, and select object (leCore segmentation) are unchanged.
+* **While you drag any selection tool**: hold **Shift** to add, **Alt** to
+  subtract, **Shift+Alt** to intersect. The mode dropdown in the Select tab
+  stays the visible default; a modifier overrides it for that one drag.
+* Everything downstream treats a lasso like any other selection: feathering,
+  expand/contract, invert, to-mask, crop to selection, and the brush gate.
+
+The creature brush moved from L to **Shift+L** (L is the lasso in every other
+editor); Shift+L cycles lasso -> polygon lasso -> creature.
+
+## The creature brush (R73)
+
+Pick the ladybird (🐞, key **L**) and click, or drag, and the brush is no
+longer in your hand. Up to ten small creatures -- each with its own leCore
+brain, a `CreatureMind` on the one `UnifiedMind` -- walk the layer for a few
+seconds (3 by default) and each paints the way it went. The layer is their
+map. They sense it egocentrically (what is ahead, ahead-left, ahead-right
+...), decide which way to turn, and are rewarded by the rules you give them,
+so a creature that keeps finding what it wants to the left starts leaning
+left before it can see it.
+
+The rules are sliders, each a *want* -- left avoids, right seeks, the
+middle does not care:
+
+* **lines** -- paint already on the map (what the Brush panel's *reads*
+  setting looks at); **self** -- its own trail (avoid it for open,
+  space-filling walks; seek it for knots); **others** -- the other creatures
+  (keep apart, or flock); **light** -- seek the bright or the dark;
+  **colour** -- seek or flee a colour you pick; **field** -- ride a noise
+  field (leCore curl noise, or a vortex about the click); **wander** -- how
+  often it ignores everything and just turns.
+* **solid** makes paint a wall: draw a maze, a box with a door, a ring, and
+  release them inside. A fully opaque layer counts as ground, not paint, so
+  glows painted on the background pull without blocking.
+* **random each run** draws a fresh rule set for every click, shows it in the
+  status bar and loads it into the sliders afterwards, so a happy accident
+  can be kept. 🎲 rolls the sliders once.
+
+The panel opens with a row of **personalities** -- explorer, knotter, moth,
+mole, flock, spinner, maze runner, surprise -- each a complete rule set in
+one click (hover one for what it does). Change any slider and the chip
+unlights: a preset is a starting point, not a mode. Under the wants the
+panel shows the last run (walks, time, seed, the rules used) and two buttons
+that make exploring cheap: **↻ again** releases the same creatures at the
+last spot (or along the last drag) with a fresh seed, stacking on what is
+there; **⟲ retry** takes the last run back first, which is how you shop for
+a walk you like. Tick **keep seed** and both repeat the exact walk, so you
+can move one slider and see precisely what it changed.
+
+They carry the brush's medium: a watercolour creature wicks and granulates
+where it walks, an oil one builds impasto, a gold one lays gold. Inside a
+selection (or, from the API, an inline `poly`) they are released spread
+through the region and never leave it -- which turns the brush into a fill
+tool: give a cell self-avoiding watercolour creatures and it fills with an
+even, organic hatch; give it self-seeking ink creatures and it fills with
+knots. Each walk lands in the journal as one ordinary stroke, so undo removes
+the whole run and *nudge* can still move any single walk. Time runs on the
+creatures' own clock (60 steps a second), so a seed reproduces exactly on any
+machine.
+
+`POST /api/creature` takes the same parameters as the panel plus `poly`,
+`heading` (degrees), `media`/`material`/`load` and `seed`, and returns the
+rules used.
+
+## Image menu
+
+**File ▸ Image** holds the document-wide operations: crop to selection, rotate
+90° CW / CCW / 180°, and flip horizontal / vertical. Rotate and flip are
+lossless — pure array reorderings rather than resampling — so four 90° turns
+return the exact original pixels, and every layer, mask, selection and spline
+moves together.
+
+## Starting simple
+
+Open it and paint — there is a document, a layer and a brush already. **B** for
+brush, **E** for eraser, **Ctrl+Z** to undo; a one-line hint says so on first
+run and then never returns.
+
+**⚙ Layer options…** (Layers panel) opens a tabbed dialog holding everything
+else about the selected layer — *Shape & pose* (thickness, backing, placement,
+tilts, curve, dome), *Optics & material*, *Living media*, and *Walls*. Its
+header shows engine-rendered preview pictures of all 11 layer types: click one
+to change the layer's type — the picture is the explanation.
+
+The sidebar leads with Layers and Brush. Masks and splines sit under a
+collapsed **Advanced** heading: nothing is hidden or removed, it is one click
+away when you want it and out of the way when you do not. The same applies to
+the tool dock — everyday tools first, then the stroke tools (Nudge, Select
+strokes) grouped after a divider, then selection tools.
+
+## Working with several documents, and with other people
+
+Document tabs carry a **•** when they hold unsaved edits, and closing one that
+does asks before discarding them — the server refuses the close and the client
+confirms, so edits can never vanish on a stray click.
+
+The workspace is shared: everyone sees the same document. The doc bar shows who
+else is connected, highlighted when they are on the document you are, dimmed
+when they are elsewhere. `.lews` files carry every open document, so saving and
+reopening restores the whole workspace rather than one canvas.
+
+## Selections are temporary until you keep them
+
+Most selections are momentary — drag a marquee, paint inside it, move on — so a
+selection is a single reusable **working** slot, not a permanent entry. It
+behaves exactly like a saved one (it gates painting, crops, feeds nodes) and the
+canvas badge says plainly that it is not saved. Press **Keep…** to name it and
+add it to the list; only kept selections are written to the `.lews` file.
+
+## Streaming to OBS
+
+**Stream** in the top bar gives you a Browser-Source URL and the exact steps.
+Two modes: the default rides an MJPEG stream; **transparent** polls PNG frames
+with alpha so viewers see through the canvas to your other OBS sources.
+
+The dialog measures what your machine can actually sustain for the current
+canvas and says so — a frame takes roughly 120 ms at 720p and 990 ms at 4K, so
+picking 60 fps on a large canvas would just stutter. It warns before you
+configure something that cannot keep up, and suggests a rate that will.
+
+Opening the capture page turns Live on by itself, so the overlay is never
+blank, and the transparent path chains each frame off the last (with backoff on
+error) rather than queueing requests the server cannot answer.
+
+## Running it as a service
+
+`LESTUDIO_HOST`, `LESTUDIO_PORT` and `LESTUDIO_THREADS` configure the app from
+the environment, so the same build runs on a laptop and in a container without
+editing anything. The thread cap matters on a small or shared machine, where
+NumPy would otherwise spawn a worker per core and thrash.
+
+`GET /api/health` is a liveness probe — cheap, lock-free, and answerable while
+the engine is busy painting. `GET /api/ready` is a readiness probe and does
+touch the workspace, so it fails while starting up.
+
+**Two things to know before hosting it.** The workspace is a **single shared
+studio**, not one canvas per visitor — that is deliberate, it is what the
+invite and presence features are for, but it means everyone who connects
+paints on the same picture. Kicks are advisory: a guest who resets their
+identity can rejoin — treat the link itself as the access boundary. And it
+must run as **one worker**: the engine
+keeps its state in memory in the process, so a second worker would hold a
+different painting. `run.sh` uses Flask's development server, which is right
+for one painter on one machine and not a production server.
+
+Painting itself runs on the CPU. The accelerator chip says which subsystems
+are accelerated — the GPU, when present, is used for simulation and node
+work, not for the brush.
+
+## Files keep working
+
+`.lews` files survive version drift in both directions, and it is tested. A file
+written before a feature existed still opens — the newer behaviour degrades
+rather than failing (a missing DPI defaults to 72, a mask with no stored shape
+resamples on resize, a document with no recorded strokes simply declines to
+nudge). A file written by a *later* build loads too, ignoring fields this one
+has never heard of instead of dying on an unexpected key.
+
+## Documents are reproducible
+
+A leStudio document is a recipe, not a pile of pixels: stroke paths with their
+brush settings, node parameters, and seeds. Rebuilding it renders **byte-identical
+output** — verified across a save/load and across separate processes. That is
+what lets Nudge replay strokes, "Re-render strokes" match a native-resolution
+render exactly, and a `.lews` file mean the same thing tomorrow.
+
+The accelerator chip warns if a setting would break that (enabling a GPU path
+makes renders bit-approximate rather than bit-exact), so the guarantee never
+lapses silently.
+
+## Resolution and DPI
+
+A new document declares both a pixel size and a **DPI**, with print presets (A4,
+Letter, 4×6) and a live physical-size readout. Opening an image into an empty
+document **adopts that image's resolution and DPI** rather than squeezing it
+into whatever canvas happened to be there.
+
+Document settings distinguishes **Image size** (resample — the picture stays,
+the pixel count changes) from **Canvas size** (the frame changes, content keeps
+its pixels). After an image resize, brush layers are re-rendered from their
+strokes rather than upscaled.
+
+Imported images keep the original file's pixels, so **File ▸ Re-render image**
+recovers full detail after a resize rather than upscaling what was fitted to the
+old canvas.
+
+Brush strokes are stored as paths, so they survive a resize exactly. After
+changing the canvas size, **File ▸ Re-render strokes** repaints a stroke layer at
+the new resolution — measurably identical to having drawn it at that size,
+rather than an upscale of the old pixels. See RESOLUTION_INDEPENDENCE.md for
+what is and is not resolution-free.
+
+## Exporting
+
+**Export PNG** saves at canvas size. **File ▸ Export at size…** renders the
+graph at any resolution you type — procedural nodes synthesize genuinely more
+detail at larger sizes rather than upscaling.
+
+## Colour swatches
+
+Colours you pick with the eyedropper, paint with, or choose directly collect in
+a strip under the colour well — newest first, no duplicates, twelve deep. Click
+one to use it again, Alt-click to drop it.
+
+## Histogram
+
+Tick **Histogram** under the Layers panel for a live per-channel tone
+distribution of the composite. It is computed in the browser from the pixels
+already on screen, so it costs nothing extra and can never disagree with what
+you are looking at. Red bars at either edge mean clipped shadows or highlights,
+with the exact percentages below. `GET /api/histogram` exposes the same numbers
+for scripting (sampled on a stride, and it says so).
+
+## Running the tests
+
+    python tests/run.py                 # everything (~2 min)
+    python tests/run.py --chunk 1/2     # first half, when a step has a time limit
+    python tests/run.py -k paint        # just the tests matching "paint"
+    python tests/run.py --slowest 10    # everything, then the 10 worst offenders
+
+The suite is plain functions, so no pytest install is required -- the runner
+provides the two helpers the tests use.
+
+The client has its own gates, driven against a tiny DOM in Node (no browser
+needed): `node tests/test_toolbar.js`, `node tests/test_popups.js`,
+`node tests/test_creature_ui.js`, `node tests/test_lasso_ui.js`.
