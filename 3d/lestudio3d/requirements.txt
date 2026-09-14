@@ -1,0 +1,14 @@
+# The ENGINE. Without this line `pip install -r requirements.txt` installs a web server and no leCore,
+# and the app only runs because a copy happens to be vendored -- which is how it silently drifted before.
+# The version floor is the release that carries what this app calls. 1.6.0 raised it from 0.2.11 to 0.2.22:
+# the Scene document doors (describe_to_scene, render_preview, render_animation, fit_camera), the canonical
+# .lews kinds (lews_mesh_section / material / scene / preset, Workspace.mint), surface_retopo / cvt_remesh /
+# manifold_cleanup / mesh_orient, studio_sky / sky_model / load_exr, app_substrate, and agent_surface(hints=).
+# Everything is still gated at runtime on m.features() (Help > Engine status names what an older build lacks).
+leos-core[ui] >= 0.2.22
+
+# leos-core[ui] already pulls Flask and Pillow; numpy is the engine's own hard dependency.
+# Optional, each a real speedup rather than a requirement:
+#   pip install "leos-core[jit]"   # numba-compiled kernels
+#   pip install "leos-core[zig]"   # native kernels
+#   pip install "leos-core[gpu]"   # CuPy
